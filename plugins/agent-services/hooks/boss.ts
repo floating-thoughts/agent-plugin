@@ -4,16 +4,20 @@
 // the wiring renders <data dir>/boss/index.html from GET /org/summary after a turn (with the person's own board,
 // at most every 10 minutes; the summary itself is fetched at most every BOSS_TTL_MS) and publishBoards publishes it
 // through dashboard.ts with BOSS_BOARD: the same consent, grant and 10-minute throttle as the person's own board, and
-// only in a turn where that board made no Artifact call (one call per turn). The page is plain HTML with no script
-// and no clock time, so it changes only when the figures do. Everything here is best effort and never throws.
+// only in a turn where that board made no tool call (one board per turn). The page draws its figures (bossView) from
+// its data slot, and from the artifact's data document once it is there (dashboard.ts writes it without publishing
+// the page again); its only clock time is when its figures last changed (`at`, so the page shows only newer figures
+// from the document), so it changes only when the figures do. Everything here is best effort and
+// never throws.
 //
 // The summary-mail switch: `/agent-services company mail on|off` (POST /org/summary-mail); `/agent-services company`
 // tells where the board is and how the weekly email is set.
 // For anyone else `/agent-services company` shows the member's own view (memberView, GET /org/me).
 import type { EngineInterface } from 'claude-code'
-import { BOSS_BOARD, publishDashboard } from './dashboard'
+import { BOSS_BOARD, pageParts, publishDashboard } from './dashboard'
 import type { Report } from './dashboard'
 import { orgAdmin } from './org'
+import { encode, render } from './render'
 import { COMMAND } from './status'
 import { safeDelete, safeGet, safeSet } from './store'
 import type { KV } from './store'
@@ -63,10 +67,6 @@ export function changeLine(total: number, prev: number | null): string {
   return `That is the same as the week before (${money(prev)}).`
 }
 
-function esc(s: unknown): string {
-  return String(s).replace(/[&<>"']/g, (c) => `&#${c.charCodeAt(0)};`)
-}
-
 function seatsText(used: number, paid: number | null): string {
   return paid === null ? `${used}` : `${used} of the ${paid} your plan covers`
 }
@@ -79,27 +79,14 @@ function mailText(s: Obj): string {
 
 export const NO_DATA_LINE = 'Figures show here after your people have used Claude Code with agent-services for a day.'
 
-/** The company board page from a GET /org/summary answer (escaped; no script, no clock time). */
-export function bossHtml(s: Obj): string {
+/** The figures the company board shows, from a GET /org/summary answer: its texts, as the page prints them. */
+export function bossView(s: Obj, at: string | null = null): Obj {
   const people: Obj[] = Array.isArray(s.people) ? s.people : []
   const top = Math.max(0, ...people.map((p) => (typeof p.usd === 'number' ? p.usd : 0)))
-  const rows = people.length
-    ? people
-        .map((p) => {
-          const usd = typeof p.usd === 'number' ? money(p.usd) : 'no data yet'
-          const dev = p.devices === 0 ? 'not signed in' : p.devices === 1 ? '1 device' : `${p.devices} devices`
-          const cls = typeof p.usd === 'number' ? '' : ' class="none"'
-          const pct = typeof p.usd === 'number' && top > 0 ? Math.max(0, Math.round((p.usd / top) * 100)) : 0
-          return `<tr><td>${esc(p.email)}</td><td${cls}>${esc(usd)}</td><td>${esc(dev)}</td>` +
-            `<td class="bar" aria-hidden="true"><span style="width:${pct}%"></span></td></tr>`
-        })
-        .join('\n')
-    : '<tr><td colspan="4" class="none">Nobody is set up yet.</td></tr>'
   const savings = s.savings === 'on' ? 'On for everyone.' : s.savings === 'off' ? 'Off for everyone: nothing is uploaded.' : 'Each person decides.'
   const paused = s.paused ? 'Paused for everyone in your company.' : 'Running.'
   const total = typeof s.total_usd === 'number' ? s.total_usd : 0
   const prev = typeof s.prev_usd === 'number' ? s.prev_usd : null
-  const week = isObj(s.week) ? span(String(s.week.first_day), String(s.week.last_day)) : ''
   // the change pill: green up, red down, neutral when equal or nothing to compare with
   const trend = prev === null ? 'flat' : Math.round(total * 100) > Math.round(prev * 100) ? 'up'
     : Math.round(total * 100) < Math.round(prev * 100) ? 'down' : 'flat'
@@ -108,7 +95,33 @@ export function bossHtml(s: Obj): string {
   const measured = people.filter((p) => typeof p.usd === 'number').length
   // nobody has a figure and the total is zero: a new company, so say so instead of a big $0.00
   const noData = measured === 0 && Math.round(total * 100) === 0
-  return `<!doctype html>
+  return {
+    v: 1,
+    ...(at === null ? {} : { at }), // when these figures were rendered (UTC), for the page's newer-only check
+    org: String(s.org ?? 'your company'),
+    week: isObj(s.week) ? span(String(s.week.first_day), String(s.week.last_day)) : '',
+    no_data: noData,
+    total: money(total),
+    trend: noData ? 'flat' : trend,
+    change: noData ? NO_DATA_LINE : changeLine(total, prev),
+    kpis: [noData ? '-' : money(total), prev === null ? '-' : money(prev), `${measured} of ${people.length}`, paid === null ? `${used}` : `${used} / ${paid}`],
+    people: people.map((p) => ({
+      email: String(p.email),
+      usd: typeof p.usd === 'number' ? money(p.usd) : 'no data yet',
+      none: typeof p.usd !== 'number',
+      devices: p.devices === 0 ? 'not signed in' : p.devices === 1 ? '1 device' : `${p.devices} devices`,
+      pct: typeof p.usd === 'number' && top > 0 ? Math.max(0, Math.round((p.usd / top) * 100)) : 0,
+    })),
+    settings: [seatsText(used, paid), paused, savings, mailText(s)],
+  }
+}
+
+/**
+ * The company board's page: no figures in the markup; its script draws them from the data slot (render.ts render
+ * fills it with bossView), then from the artifact's data document board/figures when the db capability is there.
+ * Everything is set as text (no HTML from data); the only clock time is the figures' `at`.
+ */
+export const BOSS_TEMPLATE = `<!doctype html>
 <html lang="en">
 <head>
 <meta charset="utf-8">
@@ -163,26 +176,25 @@ footer { color: var(--muted); font-size: 13px; margin-top: 24px; }
 </head>
 <body>
 <main>
-<header class="top"><span class="brand"><i></i>agent-services</span><span class="pill">${esc(s.org ?? 'your company')}</span></header>
+<header class="top"><span class="brand"><i></i>agent-services</span><span class="pill" id="org"></span></header>
 <div class="hero">
-<p class="eyebrow">agent-services for ${esc(s.org ?? 'your company')}</p>
-<h1>${noData ? 'No figures yet' : `Saved last week: <b>${esc(money(total))}</b>`}</h1>
-<p class="muted">The week of ${esc(week)}.</p>
-<p class="change ${noData ? 'flat' : trend}">${esc(noData ? NO_DATA_LINE : changeLine(total, prev))}</p>
+<p class="eyebrow" id="eyebrow"></p>
+<h1 id="headline"></h1>
+<p class="muted" id="week"></p>
+<p class="change flat" id="change"></p>
 </div>
 <div class="kpis">
-<div class="kpi"><span>Saved last week</span><strong>${esc(noData ? '-' : money(total))}</strong></div>
-<div class="kpi"><span>The week before</span><strong>${esc(prev === null ? '-' : money(prev))}</strong></div>
-<div class="kpi"><span>People with figures</span><strong>${esc(`${measured} of ${people.length}`)}</strong></div>
-<div class="kpi"><span>Seats used</span><strong>${esc(paid === null ? `${used}` : `${used} / ${paid}`)}</strong></div>
+<div class="kpi"><span>Saved last week</span><strong id="k0"></strong></div>
+<div class="kpi"><span>The week before</span><strong id="k1"></strong></div>
+<div class="kpi"><span>People with figures</span><strong id="k2"></strong></div>
+<div class="kpi"><span>Seats used</span><strong id="k3"></strong></div>
 </div>
 <section>
 <h2>Saved by each person</h2>
 <div class="scroll">
 <table>
 <thead><tr><th>Person</th><th>Saved last week</th><th>Signed in on</th><th class="bar"></th></tr></thead>
-<tbody>
-${rows}
+<tbody id="rows">
 </tbody>
 </table>
 </div>
@@ -191,18 +203,88 @@ ${rows}
 <section>
 <h2>Your company's settings</h2>
 <dl>
-<div><dt>People set up</dt><dd>${esc(seatsText(used, paid))}</dd></div>
-<div><dt>agent-services</dt><dd>${esc(paused)}</dd></div>
-<div><dt>Savings record</dt><dd>${esc(savings)}</dd></div>
-<div><dt>Weekly email summary</dt><dd>${esc(mailText(s))}</dd></div>
+<div><dt>People set up</dt><dd id="s0"></dd></div>
+<div><dt>agent-services</dt><dd id="s1"></dd></div>
+<div><dt>Savings record</dt><dd id="s2"></dd></div>
+<div><dt>Weekly email summary</dt><dd id="s3"></dd></div>
 </dl>
 <p class="note">To stop the weekly email, type <code>${COMMAND} company mail off</code> in Claude Code; <code>${COMMAND} company mail on</code> starts it again. To add or remove people, pause agent-services or change the savings record, ask your agent-services contact.</p>
 </section>
-<footer>This page is private to your claude.ai account. It is updated from time to time while you use Claude Code.</footer>
+<footer>This page is private to your claude.ai account. Its figures are updated from time to time while you use Claude Code.</footer>
 </main>
+<script type="application/json" id="data">null</script>
+<script>
+(function () {
+  "use strict";
+  function byId(id) { return document.getElementById(id); }
+  function put(id, v) { var n = byId(id); if (n) { n.textContent = v === null || v === undefined ? "" : String(v); } }
+  function cell(tr, text, cls) { var td = document.createElement("td"); td.textContent = String(text); if (cls) { td.className = cls; } tr.appendChild(td); return td; }
+  function draw(D) {
+    if (!D || typeof D !== "object" || D.v !== 1) { return false; }
+    var org = typeof D.org === "string" ? D.org : "your company";
+    put("org", org);
+    put("eyebrow", "agent-services for " + org);
+    var h = byId("headline");
+    h.textContent = "";
+    if (D.no_data) { h.textContent = "No figures yet"; } else {
+      h.appendChild(document.createTextNode("Saved last week: "));
+      var b = document.createElement("b"); b.textContent = String(D.total); h.appendChild(b);
+    }
+    put("week", "The week of " + (D.week || "") + ".");
+    var c = byId("change");
+    c.className = "change " + (D.trend === "up" || D.trend === "down" ? D.trend : "flat");
+    c.textContent = String(D.change || "");
+    var k = Array.isArray(D.kpis) ? D.kpis : [];
+    for (var i = 0; i < 4; i++) { put("k" + i, k[i] === undefined ? "-" : k[i]); }
+    var rows = byId("rows");
+    rows.textContent = "";
+    var people = Array.isArray(D.people) ? D.people : [];
+    if (!people.length) { var tr0 = document.createElement("tr"); cell(tr0, "Nobody is set up yet.", "none").colSpan = 4; rows.appendChild(tr0); }
+    people.forEach(function (p) {
+      var tr = document.createElement("tr");
+      cell(tr, p.email || "");
+      cell(tr, p.usd, p.none ? "none" : "");
+      cell(tr, p.devices);
+      var bar = cell(tr, "", "bar");
+      bar.setAttribute("aria-hidden", "true");
+      var sp = document.createElement("span");
+      sp.style.width = (typeof p.pct === "number" && isFinite(p.pct) ? Math.max(0, Math.min(100, p.pct)) : 0) + "%";
+      bar.appendChild(sp);
+      rows.appendChild(tr);
+    });
+    var st = Array.isArray(D.settings) ? D.settings : [];
+    for (var j = 0; j < 4; j++) { put("s" + j, st[j] === undefined ? "" : st[j]); }
+    return true;
+  }
+  // The figures baked into the page first; then the artifact's data document (board/figures), which the plugin
+  // updates without publishing the page again, when its figures are newer. Without db the baked figures stay.
+  var shown = null;
+  try { shown = JSON.parse(byId("data").textContent || "null"); } catch (e) { shown = null; }
+  draw(shown);
+  function stamp(d) { var t = d && (d.generated_at || d.at); return typeof t === "string" ? t : ""; }
+  var newest = stamp(shown); // only newer figures replace the ones shown
+  try {
+    var cl = window.claude;
+    if (cl && typeof cl.use === "function") {
+      cl.use("db").then(function (db) {
+        if (!db) { return; }
+        db.doc("board/figures").onSnapshot(function (snap) {
+          var d = snap && snap.exists ? snap.data() : null;
+          if (!d || typeof d !== "object" || stamp(d) <= newest) { return; }
+          if (draw(d)) { newest = stamp(d); }
+        }, function () { /* the figures shown stay */ });
+      }, function () { /* the figures shown stay */ });
+    }
+  } catch (e) { /* the figures shown stay */ }
+})();
+</script>
 </body>
 </html>
 `
+
+/** The company board page from a GET /org/summary answer: BOSS_TEMPLATE with bossView's figures in its data slot. */
+export function bossHtml(s: Obj, at: string | null = null): string {
+  return render(bossView(s, at), BOSS_TEMPLATE)
 }
 
 export async function forgetSummary(kv: KV): Promise<void> {
@@ -277,14 +359,20 @@ export class BossBoard {
       if ((await this.d.svc.authState()) !== 'ok') return 'auth_failed'
       const s = await this.summary()
       if (!s) return 'no_summary'
-      const html = bossHtml(s)
       let old: string | null = null
       try {
         old = String(await this.d.fs.read(this.path(BOSS_BOARD.page)))
       } catch {
         old = null
       }
-      if (old === html) return 'unchanged'
+      // unchanged: the same page format and the same figures, whenever they were rendered
+      const was = old === null ? null : pageParts(old)
+      const now = pageParts(bossHtml(s))
+      if (was && was.data && was.format === now.format) {
+        const { at: _at, ...figures } = was.data
+        if (encode(figures) === encode(now.data)) return 'unchanged'
+      }
+      const html = bossHtml(s, new Date(this.d.now()).toISOString().slice(0, 19) + 'Z')
       await this.d.fs.write(this.path(BOSS_BOARD.page), html)
       await this.setState({ changed_at: this.d.now() / 1000 })
       return 'changed'
@@ -310,14 +398,14 @@ export class BossBoard {
 }
 
 type Boards = {
-  publish(run: (note: (d: { reason?: string }) => void) => Promise<string>, board?: typeof BOSS_BOARD): Promise<string>
+  publish(run: (note: (d: { reason?: string; tool?: string }) => void) => Promise<string>, board?: typeof BOSS_BOARD): Promise<string>
   boss: BossBoard
 }
-const ATTEMPTS = ['published', 'denied', 'failed']
+const ATTEMPTS = ['published', 'updated', 'denied', 'failed']
 
 /**
  * After a main-agent turn: the person's own board first (wiring.publish, logged), then the company board when this
- * account is its company's admin and the first made no Artifact call. Resolves to the last outcome.
+ * account is its company's admin and the first made no tool call. Resolves to the last outcome.
  */
 export async function publishBoards($: EngineInterface, w: Boards, report: Report, interactive: boolean): Promise<string> {
   const main = await w.publish((note) => publishDashboard($, report, { interactive, note }))

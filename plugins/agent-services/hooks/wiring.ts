@@ -56,7 +56,7 @@ export const ESTIMATE_KEY = 'estimate_answer' // { made_at, estimate }: the last
 export const UPDATE_HINT_KEY = 'update_hint_at' // ms of the last time the status line showed the update command
 export const METRICS_LEASE_MS = 120_000
 export const REPORT_TTL_MS = 600_000
-export const PUBLISH_ATTEMPTS = ['published', 'denied', 'failed'] // dashboard.ts outcomes that made a tool call
+export const PUBLISH_ATTEMPTS = ['published', 'updated', 'denied', 'failed'] // dashboard.ts outcomes that made a tool call
 export const ARTIFACT_URL_RX = /https:\/\/claude\.ai\/(?:code\/)?artifact\/[A-Za-z0-9_-]+/ // as dashboard.ts URL_RX
 export const SALT_RX = /^[0-9a-f]{64}$/
 
@@ -568,10 +568,10 @@ export class Wiring {
   /**
    * One guarded dashboard publish: `run` is dashboard.ts publishDashboard($). Not run at all in auth fail.
    * Every attempt that reached the Artifact tool is logged in the outbox with the input fields dashboard.ts
-   * passed (file_path, and url or icon), the page's sha256 and size, the outcome, and a deny's reason. `run` gets
-   * the `note` that takes that reason.
+   * passed (file_path, and url or icon; tool ArtifactData when only the figures were written to the page's data
+   * document), the page's sha256 and size, the outcome, and a deny's reason. `run` gets the `note` that takes them.
    */
-  async publish(run: (note: (d: { reason?: string }) => void) => Promise<string>, board: Board = MAIN_BOARD): Promise<string> {
+  async publish(run: (note: (d: { reason?: string; tool?: string }) => void) => Promise<string>, board: Board = MAIN_BOARD): Promise<string> {
     if (!(await this.authOk())) return 'auth_failed'
     const root = this.d.dataDir.replace(/[\\/]+$/, '')
     const pagePath = board === MAIN_BOARD ? this.pagePath : `${root}/${board.page}`
@@ -584,6 +584,7 @@ export class Wiring {
     try {
       outcome = String(await run((d) => {
         if (typeof d?.reason === 'string') reason = d.reason
+        if (d?.tool === 'ArtifactData') input.tool = d.tool // the figures only, written to the page's data document
       }))
     } catch {
       outcome = 'failed'

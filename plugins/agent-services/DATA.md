@@ -69,7 +69,12 @@ marketplace, not our service. It never updates the plugin; `/agent-services upda
 turn on Claude Code's own auto-update for agent-plugin, Claude Code updates the plugin by itself, without asking you;
 the model then gets no note about new versions. Your private savings page is published to your own
 claude.ai account with Claude Code's Artifact tool, only after you allowed it. A company admin's board (member
-emails and savings) goes to the admin's own claude.ai account the same way.
+emails and savings) goes to the admin's own claude.ai account the same way. Each board page is published once (and
+again only when a new plugin version changes how the page looks; a board published by an earlier plugin version is
+published once more to turn it into this kind of page). The page declares the artifact's own database (only you, its
+owner, can write to it). After that, an update does not publish the page: the plugin writes the figures the page
+shows, and nothing else, to one document of that database (`board/figures`) with Claude Code's ArtifactData tool, and
+the page reads them from there when you open it. Where that tool is missing, the page is published again as before.
 
 ## 2. What the service keeps, and for how long
 
@@ -122,7 +127,7 @@ fetched, never another member's. For the admin, the same command still shows the
 |---|---|
 | Claude Code's plugin store, a JSON file in your Claude Code folder (`~/.claude`) | the sign-in credential in plain text (the token, the next token during a rotation, the device key), plus account id, device id, plan, your choices (the savings record, the autonomy choice and the methods version you were last told about, each kept for each account that signed in here, and the methods level and the routing level) and switches, a local key for the project hash, and day counters. Any other plugin and any program running as you can read it; a copy works as your sign-in until the next rotation or sign-out. |
 | `~/.agent-services/services/outbox/<day>-<session>.jsonl` | the request log: every request as sent (secrets such as the code and the token blanked) and its answer, previews, every call the model made to this plugin's tools with its full arguments (for one, a whole subagent description given to `router_advice`), and savings-page publish attempts. Kept 90 days, at most 2 MiB a file. |
-| `~/.agent-services/dashboard/`, `~/.agent-services/boss/`, `~/.agent-services/services/*.json` | your savings page (a company admin's board, with member emails) and their publish state |
+| `~/.agent-services/dashboard/`, `~/.agent-services/boss/`, `~/.agent-services/services/*.json` | your savings page (a company admin's board, with member emails) and their publish state (`dashboard.json`, `boss.json`), and for each board the page format last published and the version of its figures document (`dashboard-live.json`, `boss-live.json`) |
 | `~/.agent-services/methods.md`, `methods.approved.md`, `methods.pending.md` | the working-methods text |
 | `~/.agent-services/methods.seen.md`, `methods.previous.md` | the served working-methods text of the version last seen and of the one before it, so `/agent-services methods diff` can show what changed |
 | `~/.agent-services/services/asked.json` | when a setup question was last asked, by any session (an unanswered question waits 7 days) |
@@ -190,6 +195,8 @@ Every answer has a fixed shape:
 - Savings and report: dollar and token figures by day, and short report lines (at most 300 characters each) for the
   band and the savings page.
 - Company summary (admins): the table of section 3.
+- From Claude Code's Artifact and ArtifactData tools (not our service): the board's claude.ai address and the
+  version number of its figures document, kept in the files of section 4; the request log notes each attempt.
 - Estimate: dollar and hour ranges for each kind of saving.
 - Switches: on or off.
 

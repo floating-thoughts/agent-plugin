@@ -360,10 +360,10 @@ export const register: Register = (on) => {
     return done
   }).catch(($, e, next) => next(e))
 
-  // On the user's consent, this plugin's own dashboard call (dashboard.ts dashboardGrant) is allowed without a rule;
+  // On the user's consent, this plugin's own board calls (dashboard.ts dashboardGrant) are allowed without a rule;
   // a deny from the user's own rule or hook stands, and every other call goes on unchanged.
-  on('tool.check', { tool: 'Artifact' }, async ($, e: Ev, next) => {
-    const granted = (next as any).origin?.plugin === $.plugin.name && (await dashboardGrant($, e.input))
+  on('tool.check', { tool: ['Artifact', 'ArtifactData'] }, async ($, e: Ev, next) => {
+    const granted = (next as any).origin?.plugin === $.plugin.name && (await dashboardGrant($, e.input, e.tool))
     if (!granted) return next(e)
     const v: Ev = await next(e)
     return v?.decision === 'deny' && (v.rule || v.hook) ? v : { decision: 'allow', reason: GRANT_REASON }

@@ -104,19 +104,22 @@ export const HOOKS: readonly HookRow[] = [
   },
   {
     event: 'turn.complete', matcher: '', file: 'register.ts', does: ['network', 'file', 'ui'],
-    what: 'Asks the service whether this is a good moment to compact (counters only). Publishes your private ' +
-      'savings page (and a company admin\'s board) with Claude Code\'s Artifact tool, only when you allowed it. ' +
+    what: 'Asks the service whether this is a good moment to compact (counters only). Keeps your private ' +
+      'savings page (and a company admin\'s board) current, only when you allowed it: the page is published once ' +
+      'with Claude Code\'s Artifact tool, then its figures are written to the page\'s own data with the ' +
+      'ArtifactData tool, which does not publish the page again. ' +
       'Once a day, a session left open sends the daily usage summary of the new day (only while the savings record ' +
       'is on). ' +
       'After a main turn it also runs the compaction of a checkpoint marked in it, reads .agent/pending.md and ' +
       '.agent/steps.json in the project, and keeps a note for the next turn when steps are ready to start but ' +
       'fewer subagents were dispatched, or when a foreground call ran longer than 60 seconds.',
-    shown: 'The Artifact call. The open count on the status line.',
+    shown: 'The Artifact or ArtifactData call. The open count on the status line.',
   },
   {
-    event: 'tool.check', matcher: 'tool: Artifact', file: 'register.ts', does: ['answer'],
-    what: 'Allows this plugin\'s own savings-page publish without a permission prompt once you allowed it. A deny ' +
-      'from your own rule or hook stands; every other Artifact call goes on unchanged.',
+    event: 'tool.check', matcher: 'tool: Artifact, ArtifactData', file: 'register.ts', does: ['answer'],
+    what: 'Allows this plugin\'s own savings-page publish and its writes of the page\'s figures without a ' +
+      'permission prompt once you allowed it. A deny from your own rule or hook stands; every other Artifact or ' +
+      'ArtifactData call goes on unchanged.',
     shown: 'The permission reason "agent-services dashboard (user allowed)".',
   },
   {
