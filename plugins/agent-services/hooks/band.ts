@@ -273,7 +273,8 @@ export function setHoverForTest(v: boolean | null): void {
 /** The band: one dim line above the prompt from the state bandSetter wrote, on the terminal and the desktop app alike,
  *  then the usage panel in three columns (Token | Quota and context | Time saved) and its disclosure; the event goes
  *  on only while a survey holds the band. On the desktop app, with an engine build that draws them (hoverEngine), each
- *  explained item (explain.ts) reveals its explanation while the pointer rests on it; elsewhere the tree is unchanged. */
+ *  panel column, the top row and the setup line reveal their explanation (explain.ts) while the pointer rests on them;
+ *  elsewhere the tree is unchanged. */
 export function installBand(on: any): void {
   on('ui.render', { component: 'AbovePrompt' }, async ($: EngineInterface, e: Obj, next: (e: Obj) => unknown) => {
     if (e.props?.hasSurvey === true) return next(e)
@@ -281,16 +282,23 @@ export function installBand(on: any): void {
     const { Text, Box } = $.ui.resolve(e as any) as any
     const panel = bandPanel(shown)
     const isOnline = isObj(shown) ? String(shown.state) : 'starting' // the state name: connLine picks its word
-    // hv: the scope of an explained item (explain.ts key), only where the hover parts are drawn; {} otherwise, so the
-    // tree is today's
+    // hover: the explanations are drawn (desktop app, an engine build that draws them). An explanation is one hidden,
+    // unkeyed card (absolute: nothing moves, the band keeps its height) as the last child of a keyed Box, shown while
+    // the pointer is on that Box. The desktop app draws only this form: hover scope groups never show there, and a
+    // keyed hidden card is refused (measured on the desktop app 2026-11-14). [] where nothing is drawn: today's tree.
     let hover = false
-    const hv = (k: string | null): Obj => (hover && k ? { hover: { scope: `x.${k}` } } : {})
+    const card = (k: string | null, at: Obj): Obj[] =>
+      hover && k && EXPLAIN[k]
+        ? [Box({ position: 'absolute', ...at, display: 'none', hover: { display: 'flex' }, backgroundColor: 'inverseText', paddingX: 1, children: Text({ color: 'text', children: EXPLAIN[k] }) })]
+        : []
+    const below = { top: 1, left: 0, right: 0 } // over the lines under a one-line Box
     const topRow = (online: unknown) =>
       Box({
         key: 'top', flexDirection: 'row', justifyContent: 'space-between',
         children: [
-          Text({ key: 'pending', bold: pendingShown > 0, dimColor: pendingShown === 0, ...hv('band-pending'), children: pendingLine(pendingShown) }),
-          Text({ key: 'conn', dimColor: true, ...hv('band-online'), children: connLine(online) }),
+          Text({ key: 'pending', bold: pendingShown > 0, dimColor: pendingShown === 0, children: pendingLine(pendingShown) }),
+          Text({ key: 'conn', dimColor: true, children: connLine(online) }),
+          ...card('band-top', below),
         ],
       })
     if (!panel) {
@@ -309,11 +317,12 @@ export function installBand(on: any): void {
     const column = (c: Panel['columns'][number], i: number) =>
       Box({
         key: String(i), flexDirection: 'column', borderStyle: 'round', borderDimColor: true, paddingX: 1, flexShrink: 0, flexGrow: 1, // the four boxes share the full width
-        children: [Text({ key: 't', bold: true, ...hv(explainKeyOf(c.title)), children: c.title }), cells(c.rows, c.align, c.title)],
+        // the column turns into its explanation while the pointer is on it
+        children: [Text({ key: 't', bold: true, children: c.title }), cells(c.rows, c.align), ...card(explainKeyOf(c.title), { top: 0, left: 0, right: 0, bottom: 0 })],
       })
     // one sub-column per cell position, so the figures line up in proportional fonts (the desktop app) as well:
     // labels flush left, figures flush right
-    const cells = (rows: string[][], align?: string[], title?: string) => {
+    const cells = (rows: string[][], align?: string[]) => {
       const n = Math.max(...rows.map((r) => r.length))
       return Box({
         key: 'cells', flexDirection: 'row', columnGap: 2,
@@ -324,47 +333,22 @@ export function installBand(on: any): void {
           children: rows.map((r, j) => Box({
             key: String(j), flexDirection: 'row',
             justifyContent: { left: 'flex-start', center: 'center', right: 'flex-end' }[align?.[k] ?? (k === 0 ? 'left' : 'right')] ?? 'flex-end',
-            ...hv(explainKeyOf(title, r[0])), // every cell of a row joins the row's group
             children: Text({ children: r[k] || ' ' }),
           })),
         })),
       })
     }
-    // One card per explained item: hidden, shown over the band (absolute: nothing moves, the band keeps its height)
-    // while the pointer is on any member of the item's group. Band lines: 0 the top row, then the setup line when one
-    // is open, then the boxes (border, title, rows, border). A card covers the half away from its item: the bottom
-    // for an item in the upper half, else the top, so three lines of card leave the item in view.
-    const cards: Obj[] = []
-    if (hover) {
-      const s = setupOpen ? 1 : 0
-      const height = 1 + s + 3 + Math.max(0, ...panel.columns.map((c) => c.rows.length))
-      const seen = new Set<string>()
-      const card = (k: string | null, at: number) => {
-        if (!k || seen.has(k) || !EXPLAIN[k]) return
-        seen.add(k)
-        cards.push(Box({
-          key: `x.${k}`, position: 'absolute', left: 0, right: 0, ...(at < height / 2 ? { bottom: 0 } : { top: 0 }),
-          display: 'none', hover: { display: 'flex', scope: `x.${k}` }, backgroundColor: 'text', paddingX: 1,
-          children: Text({ color: 'inverseText', children: EXPLAIN[k] }),
-        }))
-      }
-      card('band-pending', 0)
-      card('band-online', 0)
-      if (setupOpen) card('band-setup', 1)
-      for (const c of panel.columns) {
-        card(explainKeyOf(c.title), 2 + s)
-        c.rows.forEach((r, j) => card(explainKeyOf(c.title, r[0]), 3 + s + j))
-      }
-    }
+    // the setup line: a keyed Box around it only where its card is drawn (else the Text as before)
+    const setupText = Text({ key: 'line', dimColor: true, children: line })
+    const setupRow = hover ? Box({ key: 'line', flexDirection: 'column', children: [setupText, ...card('band-setup', below)] }) : setupText
     return Box({
       flexDirection: 'column',
       children: [
         // the top row: the open decisions on the left, the connection on the right; under it the line shows only an
         // open setup choice (the saved figure is in the panel's Quota column)
         topRow(true),
-        ...(setupOpen ? [Text({ key: 'line', dimColor: true, ...hv('band-setup'), children: line })] : []),
+        ...(setupOpen ? [setupRow] : []),
         Box({ key: 'cols', flexDirection: 'row', columnGap: 2, flexWrap: 'nowrap', children: panel.columns.map(column) }),
-        ...cards,
       ],
     })
   }).catch(($: EngineInterface, e: Obj, next: (e: Obj) => unknown) => next(e))
