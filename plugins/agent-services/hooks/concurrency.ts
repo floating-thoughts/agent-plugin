@@ -1,9 +1,10 @@
 import type { EngineInterface } from 'claude-code'
+import { dataDir } from './engine_env'
 import { methodsLevel } from './methods_level'
 import { planSteps, PLAN_FILE } from './plan_file'
 import { engineStore } from './store'
-import { rulesLive } from './rules'
-import { recentRows } from './session_rows'
+import { rulesLive, servedValue } from './rules'
+import { asRows, holdsToolUse, recentRaw, transcriptRows } from './session_rows'
 import { toolInput } from './tools'
 
 type Obj = Record<string, any>
@@ -31,6 +32,7 @@ export const CONCURRENCY_NOTE =
   'through.'
 
 const denied: string[] = []
+const live = { text: '', block: -1 }
 
 const str = (v: unknown): string => (typeof v === 'string' ? v : '')
 
@@ -38,10 +40,38 @@ export function singleUse(text: unknown): boolean {
   return /^[\s>*_`"']*single[ -]use\s*:/i.test(str(text))
 }
 
+export type PlanWords = { task: string[]; depends: string[]; owns: string[]; runs: string[]; separators: string[]; colons: string[] }
+
+export function planWords(): PlanWords {
+  const fallback: PlanWords = { task: ['task', 'tasks'], depends: ['depends on'], owns: ['owns'], runs: ['how it runs'], separators: ['|'], colons: [':'] }
+  const served = servedValue('concurrency', 'plan_header')
+  const s: Obj = served && typeof served === 'object' && !Array.isArray(served) ? (served as Obj) : {}
+  const out = { ...fallback }
+  for (const k of Object.keys(fallback) as (keyof PlanWords)[]) {
+    const v = s[k]
+    const max = k === 'separators' || k === 'colons' ? 1 : 40
+    if (Array.isArray(v) && v.length > 0 && v.length <= 20 && v.every((w) => typeof w === 'string' && w.trim() !== '' && w.length <= max)) out[k] = v as string[]
+  }
+  return out
+}
+
+const rxEsc = (w: string): string => w.replace(/[.*+?^${}()|[\]\\-]/g, '\\$&')
+const rxWord = (w: string): string => `${/^\w/.test(w) ? '\\b' : ''}${rxEsc(w)}${/\w$/.test(w) ? '\\b' : ''}`
+const rxAny = (ws: string[]): string => `(?:${ws.map(rxWord).join('|')})`
+
 export function planInText(text: unknown): boolean {
   const t = str(text)
-  if (/^[ \t>]*\|?[^\n|]*\btasks?\b[^\n|]*\|[^\n|]*\bdepends on\b[^\n|]*\|[^\n|]*\bowns\b[^\n|]*\|[^\n|]*\bhow it runs\b/im.test(t)) return true
-  if (/^[ \t>*_`-]*tasks?\b[^\n:]{0,20}:/im.test(t) && /\bdepends on\s*:/i.test(t) && /\bowns\b[^\n:]{0,30}:/i.test(t) && /\bhow it runs\b[^\n:]{0,30}:/i.test(t)) return true
+  const w = planWords()
+  const [T, D, O, R] = [rxAny(w.task), rxAny(w.depends), rxAny(w.owns), rxAny(w.runs)]
+  const seps = w.separators.map(rxEsc).join('')
+  const colons = w.colons.map(rxEsc).join('')
+  const S = `[${seps}]`
+  const N = `[^\\n${seps}]`
+  if (new RegExp(`^[ \\t>]*${S}?${N}*${T}${N}*${S}${N}*${D}${N}*${S}${N}*${O}${N}*${S}${N}*${R}`, 'im').test(t)) return true
+  const C = `[${colons}]`
+  const NC = `[^\\n${colons}]`
+  if (new RegExp(`^[ \\t>*_\`-]*${T}${NC}{0,20}${C}`, 'im').test(t) && new RegExp(`${D}\\s*${C}`, 'i').test(t) &&
+    new RegExp(`${O}${NC}{0,30}${C}`, 'i').test(t) && new RegExp(`${R}${NC}{0,30}${C}`, 'i').test(t)) return true
   return /^[ \t>*#_`-]*concurrency (plan|map)\b[^\n]{0,60}(:|$)/im.test(t)
 }
 
@@ -78,7 +108,7 @@ export function exemptType(subagentType: unknown): boolean {
   return CONCURRENCY_EXEMPT_TYPES.includes(t) || /:explore$/i.test(t)
 }
 
-export type Facts = { tool: string; input: Obj; agentId?: unknown; recent?: unknown; stateText?: string | null }
+export type Facts = { tool: string; input: Obj; agentId?: unknown; recent?: unknown; stateText?: string | null; liveText?: unknown }
 
 export function dispatchKey(tool: string, input: Obj, agentId?: unknown): string | null {
   if (agentId) return null
@@ -99,7 +129,7 @@ export function dispatchKey(tool: string, input: Obj, agentId?: unknown): string
 export function concurrencyVerdict(f: Facts): string | null {
   const key = dispatchKey(f.tool, f.input, f.agentId)
   if (key === null || denied.includes(key)) return null
-  if (planInText(recentAssistantText(f.recent)) || planInFile(f.stateText ?? null)) return null
+  if (planInText(`${recentAssistantText(f.recent)}\n${str(f.liveText)}`) || planInFile(f.stateText ?? null)) return null
   denied.push(key)
   if (denied.length > 200) denied.splice(0, denied.length - 200)
   return CONCURRENCY_NOTE
@@ -107,6 +137,89 @@ export function concurrencyVerdict(f: Facts): string | null {
 
 export function resetConcurrency(): void {
   denied.length = 0
+  liveStep(undefined)
+}
+
+export function liveStep(agentId: unknown): void {
+  if (agentId) return
+  live.text = ''
+  live.block = -1
+}
+
+export function liveChunk(agentId: unknown, chunk: unknown): void {
+  if (agentId || !chunk || typeof chunk !== 'object') return
+  const c = chunk as Obj
+  if (c.kind !== 'text' || typeof c.text !== 'string' || live.text.length > 64 * 1024) return
+  if (live.block !== -1 && c.index !== live.block) live.text += '\n'
+  live.block = typeof c.index === 'number' ? c.index : live.block
+  live.text += c.text
+}
+
+export function liveStepText(): string {
+  return live.text
+}
+
+export async function* stepWatch($: EngineInterface, e: Obj, next: any): AsyncGenerator<any, any> {
+  liveStep(e?.agentId)
+  const stream = next(e)
+  const it = typeof stream?.next === 'function' ? stream : stream[Symbol.asyncIterator]()
+  for (;;) {
+    const r = await it.next()
+    if (r.done) return r.value
+    try {
+      liveChunk(e?.agentId, r.value)
+    } catch {}
+    yield r.value
+  }
+}
+
+export function traceLine(f: { e: Obj; form: string; raw: unknown[]; liveText: string; transcript: unknown[] | null; verdict: string | null }): Obj {
+  const cut = (v: unknown): string => str(v).slice(0, 200)
+  const shape = (m: unknown): Obj => {
+    if (!m || typeof m !== 'object') return { kind: typeof m }
+    const o = m as Obj
+    const content = o.content ?? o.message?.content
+    return {
+      keys: Object.keys(o).slice(0, 12),
+      role: o.role ?? o.message?.role ?? o.type,
+      content: typeof content === 'string' ? `string:${content.length}` : Array.isArray(content) ? content.map((b: Obj) => str(b?.type) || typeof b) : typeof content,
+      text: cut(asRows([o])[0]?.text),
+    }
+  }
+  return {
+    at: Date.now(),
+    tool: str(f.e.tool),
+    toolUseId: str(f.e.tool_use_id),
+    eventKeys: Object.keys(f.e).slice(0, 30),
+    form: f.form,
+    count: f.raw.length,
+    holdsCall: holdsToolUse(f.raw, f.e.tool_use_id),
+    tail: f.raw.slice(-6).map(shape),
+    liveLength: f.liveText.length,
+    live: cut(f.liveText.slice(-200)),
+    transcript: f.transcript === null ? null : { count: f.transcript.length, tail: f.transcript.slice(-4).map(shape) },
+    denied: f.verdict !== null,
+  }
+}
+
+async function traceOn($: EngineInterface): Promise<boolean> {
+  try {
+    return String((await $.env.get('AS_TRACE_CONCURRENCY')) ?? '').trim() === '1'
+  } catch {
+    return false
+  }
+}
+
+async function traceWrite($: EngineInterface, line: Obj): Promise<void> {
+  try {
+    const path = `${await dataDir($)}/trace-concurrency.jsonl`
+    let old = ''
+    try {
+      old = String(await $.fs.read(path))
+    } catch {}
+    if (old.length > 1024 * 1024) old = old.slice(-512 * 1024).replace(/^[^\n]*\n/, '')
+    await $.fs.write(path, `${old}${JSON.stringify(line)}\n`)
+  } catch {}
 }
 
 async function stateText($: EngineInterface): Promise<string | null> {
@@ -133,7 +246,18 @@ export async function concurrencyCall($: EngineInterface, e: Obj, next: any, liv
       const input = toolInput(e)
       const key = dispatchKey(String(e.tool), input)
       if (key !== null && !denied.includes(key)) {
-        note = concurrencyVerdict({ tool: String(e.tool), input, recent: await recentRows($, 60), stateText: await stateText($) })
+        const got = await recentRaw($, 60)
+        const recent = asRows(got.messages)
+        const liveText = liveStepText()
+        const plan = await stateText($)
+        let transcript: unknown[] | null = null
+        let extra = ''
+        if (!planInText(`${recentAssistantText(recent)}\n${liveText}`) && !planInFile(plan)) {
+          transcript = await transcriptRows($, 60)
+          extra = recentAssistantText(transcript)
+        }
+        note = concurrencyVerdict({ tool: String(e.tool), input, recent, liveText: `${liveText}\n${extra}`, stateText: plan })
+        if (await traceOn($)) await traceWrite($, traceLine({ e, form: got.form, raw: got.messages, liveText, transcript, verdict: note }))
       }
     }
   } catch {
