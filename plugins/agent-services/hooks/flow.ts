@@ -11,10 +11,13 @@
 //   turn carries one note naming those steps (the same list is not repeated).
 // - A foreground Bash, PowerShell or subagent call of the main conversation that ran longer than BACKGROUND_AFTER_MS:
 //   the next turn carries one note suggesting background runs (at most BACKGROUND_NOTES_MAX per session).
+// - The routing hint (0.6.2): the first hint the routing service sent with a pass (a description without a task type
+//   word) reaches the model once per session, as a note on the next prompt of the main conversation. It follows the
+//   routing level, not the methods level: the agent.spawn hook does nothing at routing off, so no hint is kept.
 // The brief and the turn notes are off when the methods level is off (methods_level.ts).
 import type { EngineInterface } from 'claude-code'
 import { checkpointCall, checkpointPersonPrompt, checkpointTurnEnd, recheckCheckpoint, setupCheckpoint } from './checkpoint'
-import { notePersonPrompt, servedBrief } from './flow_state'
+import { notePersonPrompt, servedBrief, takeRouteHint } from './flow_state'
 import { methodsLevel } from './methods_level'
 import { SEP } from './status'
 import { engineStore } from './store'
@@ -142,6 +145,12 @@ export const backgroundNote = (tool: string, ms: number): string =>
   `${FLOW_NOTE_LABEL} A foreground ${tool === 'Task' ? 'Agent' : tool} call ran for ${Math.round(ms / 1000)} s in the ` +
   'last turn. agent-services suggests starting work that may take this long in the background (run_in_background: ' +
   'true) and carrying on meanwhile; you are told when it ends.'
+
+/** The routing hint note, shown once per session. Pure. */
+export const routeHintNote = (hint: string): string =>
+  `${FLOW_NOTE_LABEL} The agent-services routing service let a subagent dispatch run without routing advice and ` +
+  `sent this hint for it: "${[...hint].slice(0, 500).join('')}" agent-services suggests following it in the next ` +
+  'dispatches; this note is shown once per session.'
 
 /** The subagent prompt with the served rule added once; unchanged without a rule or when it already holds it. Pure. */
 export function briefedPrompt(prompt: unknown, rule: string | null): string | null {
@@ -278,7 +287,10 @@ export async function flowPrompt($: EngineInterface, e: Obj, rt?: Ready): Promis
     dispatchedThisTurn = 0
     void recheckCheckpoint($)
     const notes = queued.splice(0)
-    return notes.length && (await notesOn($)) ? [notes.join('\n')] : []
+    const out = notes.length && (await notesOn($)) ? [notes.join('\n')] : []
+    const hint = takeRouteHint() // the routing level decides this one, not the methods level
+    if (hint) out.push(routeHintNote(hint))
+    return out
   } catch {
     return []
   }

@@ -5,12 +5,16 @@
 // - The served brief rule: the latest speed-up rule the routing service sent (brief_rule), which flow.ts adds to a
 //   routed subagent's prompt.
 // - The checkpoint tool the session uses: this plugin's own, another plugin's, or none.
+// - The routing hint (0.6.2): the hint of the first pass answer that carried one (the service sends it when a
+//   description has no task type word), held for the next prompt's note (flow.ts) and taken once per session.
 
 export const REVIEW_RX = /\b(code[- ]?)?review(s|ed|ing)?\b|\baudit(s|ed|ing)?\b|\u5ba1\u67e5|\u8bc4\u5ba1|\u5ba1\u6838|\u30ec\u30d3\u30e5\u30fc|\ub9ac\ubdf0/i // also review words in Chinese, Japanese, Korean
 
 let askedReview = false
 let briefRule: string | null = null
 let checkpointTool: string | null = null
+let routeHint: string | null = null
+let routeHintTaken = false
 
 /** A message the person wrote (not a plugin's or a notification): sets the review flag for this turn. */
 export function notePersonPrompt(text: unknown): void {
@@ -25,6 +29,21 @@ export function noteBrief(rule: unknown): void {
 }
 
 export const servedBrief = (): string | null => briefRule
+
+/** The hint of a routing pass answer (core.ts onDispatch); only the first one of a session is kept. */
+export function noteRouteHint(hint: unknown): void {
+  if (routeHintTaken || routeHint !== null || typeof hint !== 'string' || !hint.trim()) return
+  routeHint = hint.trim()
+}
+
+/** The routing hint for the next prompt's note, once per session; null when there is none or it was taken. */
+export function takeRouteHint(): string | null {
+  if (routeHintTaken || routeHint === null) return null
+  routeHintTaken = true
+  const h = routeHint
+  routeHint = null
+  return h
+}
 
 export function setCheckpointTool(name: string | null): void {
   checkpointTool = name

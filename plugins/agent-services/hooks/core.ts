@@ -25,7 +25,7 @@ import { SessionSummary } from './summary'
 import type { Clock, GateState, KV, Random, ReadText, SvcResult, Transport } from './engine_types'
 import { indexed, isAbsPath, joinPath, normpath, normPath } from './paths'
 import { ORG_PAUSED_LINE } from './org'
-import { checkpointToolName, userAskedReview } from './flow_state'
+import { checkpointToolName, noteRouteHint, userAskedReview } from './flow_state'
 
 export { indexed, normpath, normPath } from './paths'
 
@@ -632,6 +632,7 @@ export class Core {
       const reason = (r.hint as string) || DENY_TEXT
       return answer('deny', { reason: reason + (extra ? sep + extra : ''), notice, fallback: fb })
     }
+    if (!fb) noteRouteHint(r.hint) // a pass with a hint (no task type word): flow.ts notes it once per session
     return answer('allow', { notice, fallback: fb })
   }
 

@@ -30,7 +30,8 @@ export const HOOKS: readonly HookRow[] = [
   {
     event: 'session.start', matcher: '', file: 'register.ts', does: ['network', 'file', 'process', 'ui', 'count'],
     what: 'Registers the tools and the slash command. In the background: the sign-in check, the daily usage upload ' +
-      '(only while the savings record is on), the request-log cleanup (90 days), the working methods for the first ' +
+      '(only after you chose to upload, never before your own answer, also when your company turned the savings ' +
+      'record on; with "Upload from now on only" nothing from before the day you chose), the request-log cleanup (90 days), the working methods for the first ' +
       'prompt (only at methods level suggest) and the CLAUDE.md methods file (only at methods on), a one-time move ' +
       'from an older version, and the update check (`claude plugin list --json` and `claude plugin marketplace ' +
       'update agent-plugin`; it never updates the plugin; not in a session nobody can be asked in). After the other plugins\' start hooks: registers the ' +
@@ -43,7 +44,9 @@ export const HOOKS: readonly HookRow[] = [
     what: 'Does nothing at all while subagent routing is off (/agent-services routing off: no request, no deny, no ' +
       'model change, nothing added). Otherwise it asks the service for routing advice on each subagent (forks and ' +
       'teammates are skipped). The advice can ' +
-      'deny the subagent with a reason, or set its model and effort. The request also carries the main session\'s ' +
+      'deny the subagent with a reason, or set its model and effort. At routing suggest (the default) a subagent ' +
+      'whose description has no task type word is never denied for it; at routing strict the request says so and ' +
+      'the service refuses it. The request also carries the main session\'s ' +
       'model id and whether your latest message asked for a review (yes or no; your text is not sent). Unless the ' +
       'methods level is off, the service\'s speed-up suggestion is added once to the end of the subagent\'s prompt, ' +
       'labelled as an agent-services suggestion.',
@@ -117,17 +120,21 @@ export const HOOKS: readonly HookRow[] = [
     event: 'prompt.submit', matcher: '', file: 'register.ts', does: ['drop', 'context', 'ui'],
     what: 'Drops a message that is only a sign-in code while a sign-in waits for one, and finishes the sign-in with ' +
       'it, so the code never reaches the model. Adds context blocks for the model, after your text and without ' +
-      'changing it: the service\'s compaction advice, the working methods of the current phase, and the plugin ' +
+      'changing it: the service\'s compaction advice, the working methods of the current phase (in full once per ' +
+      'session, and again only after /clear, a compaction, a phase change or a new served version; nothing on ' +
+      'other prompts), and the plugin ' +
       'notes (a newer version, and that /agent-services methods diff shows a change; never the setup questions), one ' +
       'planning reminder at methods level ' +
       'suggest and, unless the methods level is off, a reminder to run long work in the background and the steps ' +
-      'of .agent/steps.json ready to start, each labelled as an agent-services note. It notes locally whether ' +
+      'of .agent/steps.json ready to start, and once per session the hint the routing service sent for a subagent ' +
+      'without a task type word, each labelled as an agent-services note. It notes locally whether ' +
       'your message asks for a review (the routing request carries only yes or no).',
     shown: 'A dropped code: a toast and the sign-in answer in its place. The context blocks are not shown.',
   },
   {
     event: 'session.compact', matcher: '', file: 'register.ts', does: ['count', 'ui'],
-    what: 'Counts the compaction and its token saving locally.',
+    what: 'Counts the compaction and its token saving locally; after a real compaction of the main conversation ' +
+      'the working methods are given again at the next prompt.',
     shown: 'A dim line now and then.',
   },
   {

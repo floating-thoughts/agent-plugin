@@ -9,6 +9,7 @@
 import { sha256 } from './noble.js'
 import type { KV, Random, Transport } from './engine_types'
 import { noteBrief } from './flow_state'
+import { routingLevel } from './routing_level'
 
 /** Two more routing facts (0.6.0): the main session's model id (for the cap) and whether the person's latest message
  * asked for a review (only the boolean is sent). Absent: the fields are not sent. */
@@ -244,6 +245,8 @@ export class Records {
       const mm = flags.main_model
       body.main_model = typeof mm === 'string' && mm && [...mm].length <= 64 && MODEL_RX.test(mm) ? mm : null
       body.user_asked_review = flags.user_asked_review === true
+      // 0.6.2: only at routing strict; at suggest the field is not sent and the service never refuses a missing word
+      if ((await routingLevel(this.store)) === 'strict') body.strict = true
     }
     let ans: Record<string, unknown> | null = null
     const errors: (string | null)[] = []
@@ -252,9 +255,10 @@ export class Records {
       const statuses: (number | null)[] = []
       ans = await this.post('/router/decide', body, 'router', deadlineMs, errors, statuses)
       if (ans === null && flags && statuses.includes(422)) {
-        // a server older than 0.6.0 refuses the two new fields: ask once more without them
+        // a server older than 0.6.0 refuses the two new fields (older than 0.6.2: strict): ask once more without them
         delete body.main_model
         delete body.user_asked_review
+        delete body.strict
         errors.length = 0
         ans = await this.post('/router/decide', body, 'router', deadlineMs, errors)
       }

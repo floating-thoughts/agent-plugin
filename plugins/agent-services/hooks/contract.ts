@@ -6,7 +6,7 @@ export type ToolSpec = {
   input_schema: Record<string, unknown>
 }
 
-export const CONTRACT_SHA256 = "2ffc3452f07aebeedbc829aa52d59cb06c59121b07b55cfc897f16dbfaf2f8df"
+export const CONTRACT_SHA256 = "ee68c593813bfb31790e11c149eb7c6258d7a3f8f340d541e3a3382200d2fecf"
 
 export const API = "svc/1" as const
 export const PREFIX = "/svc/v1" as const
@@ -27,7 +27,7 @@ export const TOOL_NAMES = ["router_advice", "lesson_lookup", "savings", "checkpo
 export const TOOLS: readonly ToolSpec[] = [
   {
     "name": "router_advice",
-    "description": "Ask the routing service which model and effort a subagent dispatch should use. Returns the decision (route, pass or deny), the model, the effort, a hint, and brief_rule with brief_forward: a rule to copy unchanged into the subagent brief, as brief_forward says; pass_through when the service cannot be reached.",
+    "description": "Ask the routing service which model and effort a subagent dispatch should use. Returns the decision (route, pass or deny), the model, the effort, a hint, and brief_rule, a speed-up suggestion the plugin itself adds, labelled, to each dispatched subagent brief (do not copy it); pass_through when the service cannot be reached.",
     "input_schema": {
       "type": "object",
       "properties": {
@@ -487,7 +487,7 @@ export const CONTRACT = {
  "x-tools": [
   {
    "name": "router_advice",
-   "description": "Ask the routing service which model and effort a subagent dispatch should use. Returns the decision (route, pass or deny), the model, the effort, a hint, and brief_rule with brief_forward: a rule to copy unchanged into the subagent brief, as brief_forward says; pass_through when the service cannot be reached.",
+   "description": "Ask the routing service which model and effort a subagent dispatch should use. Returns the decision (route, pass or deny), the model, the effort, a hint, and brief_rule, a speed-up suggestion the plugin itself adds, labelled, to each dispatched subagent brief (do not copy it); pass_through when the service cannot be reached.",
    "input_schema": {
     "type": "object",
     "properties": {
@@ -2996,6 +2996,10 @@ export const CONTRACT = {
      "user_asked_review": {
       "type": "boolean",
       "description": "whether the person's latest message asked for a review, computed on the machine; the message text is not sent (0.6.0; absent from older clients)"
+     },
+     "strict": {
+      "type": "boolean",
+      "description": "true when the person turned on strict routing (a dispatch without a task type word is refused); absent or false: advice only, never refused for a missing word (0.6.2; absent from older clients)"
      }
     },
     "required": [
@@ -3078,13 +3082,13 @@ export const CONTRACT = {
        "type": "string",
        "maxLength": 2000,
        "x-served": true,
-       "description": "the speed-up rule the calling agent forwards unchanged into the subagent brief"
+       "description": "the speed-up suggestion the plugin adds itself, labelled, to the subagent brief"
       },
       "brief_forward": {
        "type": "string",
        "maxLength": 500,
        "x-served": true,
-       "description": "the instruction to forward brief_rule into the subagent brief"
+       "description": "a note that the plugin adds brief_rule itself, so the model does not copy it"
       }
      },
      "required": [

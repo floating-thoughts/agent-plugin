@@ -6,9 +6,13 @@
 //   savings page (`page`, the person's own answer; it follows the record until set alone) and the weekly email (a
 //   server setting, changed with the record). The status line, the band, the savings page, the upload and the weekly
 //   email all read this one record (recordState, uploadOn, pageOn).
-// - A company's choice (org.ts, from the sign-in check) overlays the upload only: "on" or "off" for everyone. The
-//   private page stays each person's own answer, also for a company admin (whose company board follows the same
-//   page answer, so a company "off" never hides it).
+// - The person's "on" says how far back the first upload goes (`backfill`, 0.6.2): true ("Upload, including the past
+//   30 days", and every "on" kept before 0.6.2) sends up to 30 earlier days; false ("Upload from now on only") sends
+//   only the days after the day of the choice.
+// - A company's choice (org.ts, from the sign-in check): "off" turns the upload off for everyone. "on" (0.6.2) no
+//   longer switches anyone on: it is the admin's recommendation, and each member answers the same question; until a
+//   member answers, nothing of theirs is uploaded. The private page stays each person's own answer, also for a
+//   company admin (whose company board follows the same page answer, so a company "off" never hides it).
 // - "off" is final: never asked again. Unanswered is asked at most once per ASK_EVERY_MS across all sessions: the
 //   shared "last asked" time is a small file in the plugin data folder (the caller reads and writes it).
 // - The 0.5.0 keys (sharing, dashboard_consent, savings_prompt and the upload switch) are read once, for the account
@@ -31,9 +35,9 @@ const DASHBOARD_URL_RX = /^https:\/\/claude\.ai\/(?:code\/)?artifact\/[A-Za-z0-9
 
 export type Side = 'on' | 'off'
 export type RecordValue = Side | 'unanswered'
-export type Entry = { record?: Side; at?: number; page?: Side; page_at?: number }
+export type Entry = { record?: Side; at?: number; backfill?: boolean; page?: Side; page_at?: number }
 export type RecordState = {
-  record: RecordValue // what the upload does: the company's choice, else the person's
+  record: RecordValue // what the upload does: the company's "off", else the person's own answer
   own: RecordValue // the person's own answer
   org: Side | null // the company's choice for everyone, if any
   page: boolean // the private page is to be published
@@ -55,6 +59,7 @@ export function entryOf(v: unknown): Entry {
   const r = side(v.record)
   if (r) e.record = r
   if (num(v.at) !== null) e.at = v.at
+  if (typeof v.backfill === 'boolean') e.backfill = v.backfill
   const p = side(v.page)
   if (p) e.page = p
   if (num(v.page_at) !== null) e.page_at = v.page_at
@@ -132,37 +137,38 @@ export async function recordState(kv: KV): Promise<RecordState> {
     const org: Side | null = o && (o.savings === 'on' || o.savings === 'off') ? o.savings : null
     const own: RecordValue = entry.record ?? 'unanswered'
     const page = entry.page ? entry.page === 'on' : own === 'on'
-    return { record: org ?? own, own, org, page, pageSet: entry.page !== undefined, account }
+    return { record: org === 'off' ? 'off' : own, own, org, page, pageSet: entry.page !== undefined, account }
   } catch {
     return { record: 'unanswered', own: 'unanswered', org: null, page: false, pageSet: false, account: null }
   }
 }
 
-/** The daily upload is on: the company's "on", else the person's own "on". */
+/** The daily upload is on: the person's own "on", unless the company turned it off. */
 export const uploadOn = async (kv: KV): Promise<boolean> => (await recordState(kv)).record === 'on'
 
 /** The private savings page (and, for a company admin, the company board) may be published. */
 export const pageOn = async (kv: KV): Promise<boolean> => (await recordState(kv)).page
 
-/** The savings question is open: no company choice and no answer of the person's own. "off" is never open. */
-export const savingsOpen = (s: RecordState): boolean => s.org === null && s.own === 'unanswered'
+/** The savings question is open: no answer of the person's own and no company "off" (a company "on" asks too, as a
+ * recommendation). "off" is never open. */
+export const savingsOpen = (s: RecordState): boolean => s.org !== 'off' && s.own === 'unanswered'
 
-/** The page question is open: the company set the upload on, and the person never answered the page. */
-export const pageOpen = (s: RecordState): boolean => s.org === 'on' && !s.pageSet
+/** The 0.6.1 page-only question under a company "on": never open since 0.6.2 (the savings question sets the page
+ * too); kept one version for callers that import it. */
+export const pageOpen = (_s: RecordState): boolean => false
 
-/** The first day the daily upload may send: 30 days (`days`) before the yes (the person's "on", or the first time
- * the company's "on" was seen); `today` minus `days` with no day known. After an account switch on this machine
- * (the upload state names another account) nothing before the new yes is sent. Never throws. */
+/** The first day the daily upload may send: 30 days (`days`) before the person's "on"; `today` minus `days` with no
+ * day known. "Upload from now on only" (backfill false): the day after the day of the choice, so nothing from before
+ * the choice is sent. After an account switch on this machine (the upload state names another account) nothing
+ * before the new yes is sent. Never throws. */
 export async function uploadFloor(kv: KV, today: string, days = 30): Promise<string> {
   try {
     const s = await recordState(kv)
     let answered: string | null = null
-    if (s.org === 'on') {
-      const o = await readOrg(kv)
-      if (o && num(o.since) !== null) answered = localDay(o.since!)
-    } else if (s.own === 'on') {
+    if (s.own === 'on') {
       const { entry } = await readEntry(kv)
       if (num(entry.at) !== null) answered = localDay(entry.at!)
+      if (entry.backfill === false) return plusDays(answered ?? today, 1)
     }
     const base = answered && answered < today ? answered : today
     return plusDays(base, (await accountSwitched(kv)) ? 0 : -days)

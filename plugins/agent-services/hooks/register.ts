@@ -217,7 +217,7 @@ function ready($: EngineInterface): Promise<Rt | null> {
 async function send($: EngineInterface, kind: string, agent: string | null, fields: Ev = {}): Promise<Answer | null> {
   const r = await ready($)
   if (!r) return null
-  if (kind === 'clear' || kind === 'compaction') pushAgain(r, agent) // phase.ts: the phase's items again
+  if (kind === 'clear' || (kind === 'compaction' && fields.done === true && fields.trigger !== 'precompute')) pushAgain(r, agent) // phase.ts: again after a real one
   const event = { v: 1, harness: HARNESS, kind, session: r.session, agent, ...fields }
   return capped(r.core.handle(event), r.sleep, EVENT_WAIT_MS, null)
 }

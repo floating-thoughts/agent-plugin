@@ -38,6 +38,7 @@ export const PENDING_NOTICE = 'agent-services: the service cannot be used right 
 export const ERROR_NOTICE ='agent-services: this answer is the open default (the plugin could not finish the call).'
 export const SESSION_FALLBACK = 'claude-code-session' // when the engine cannot tell the session id
 
+
 export type ToolSpec = { name: string; description: string; inputSchema: Record<string, unknown>; isDeferred: false }
 
 /** What registerTools passes to `$.tool.register`, in the contract's order. */
@@ -167,6 +168,7 @@ async function respond(deps: ToolDeps, name: string, args: unknown, ctx: ToolCon
     }
     return { result: render({ ...openAnswer(name, args), notice: gateNotice(st) ?? PENDING_NOTICE }) }
   }
+  // the plugin adds the speed-up rule itself: the service's forwarding instruction is not passed on
   return { result: render(ans) }
 }
 

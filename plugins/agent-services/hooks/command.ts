@@ -25,9 +25,15 @@
 //   `setup` in the engine's dialog (also right after a sign-in through the dialog). The model is never told to ask
 //   them: while any is open, the band above the prompt shows one line naming /agent-services setup (band.ts
 //   bandSetup, from setupDue). An unanswered question is shown or asked at most once per 7 days across all sessions
-//   (the shared "last asked" time); `sharing off` is never asked again.
-// - `routing off` (ROUTING_KEY, default on) makes the agent.spawn hook do nothing at all (routingOff): no request, no
-//   deny, no model change, nothing added to the subagent's prompt.
+//   (the shared "last asked" time); `sharing off` ("Don't upload") is never asked again.
+// - The savings question has three answers (0.6.2): "Upload, including the past 30 days" (`sharing on_backfill`; the
+//   0.6.1 `sharing on` is its old spelling), "Upload from now on only" (`sharing on_from_now`: the first upload sends
+//   only days after the day of the choice) and "Don't upload" (`sharing off`). A company's "on" asks its members the
+//   same question, saying the admin recommends it; nothing of a member is uploaded before they answer.
+// - Subagent routing has three levels (routing_level.ts, default suggest): `routing off` makes the agent.spawn hook do
+//   nothing at all (routingOff): no request, no deny, no model change, nothing added to the subagent's prompt;
+//   `routing suggest` asks for advice only; `routing strict` lets the service refuse a dispatch without a task type
+//   word. `routing on` is the 0.6.1 spelling of `routing suggest` (RENAMED).
 //
 // The Command class is harness-neutral (its deps are injected); the functions at the end are the Claude Code
 // adapter over `$`.
@@ -45,7 +51,7 @@ import { safeSet } from './store'
 import type { KV } from './store'
 import { gateNotice, LOCKED_LINE, NOTICE_TEXT, PAUSED_LINE, PLAN_NOTICE, SERVED_CHANNELS, SERVED_ROLES } from './svc'
 import type { Result, Svc } from './svc'
-import { ASKED_FILE, askDue, askedFrom, canAsk, dashboardUrl, pageOpen, recordState, savingsOpen, uploadOn,
+import { ASKED_FILE, askDue, askedFrom, canAsk, dashboardUrl, readEntry, recordState, savingsOpen, uploadOn,
   writeEntry } from './choice'
 import { dataDir, engineDirs, envOf, readTextOf } from './engine_env'
 import { companyCommand } from './boss'
@@ -57,6 +63,7 @@ import { bandSetup } from './band'
 import { ORG_PAUSED_LINE, ORG_SAVINGS_TEXT, ORG_SET_TEXT, orgChoice, orgNotice, sharingQuestion } from './org'
 import { hooksText } from './hooks_list'
 import { removeAll, removedMarker, resetRemoved, type RemoveDeps } from './remove'
+import { levelOf as routingLevelOf, ROUTING_KEY, ROUTING_LEVELS, routingLevel, routingRecord, type RoutingLevel } from './routing_level'
 
 export { denyReason, spawnLine } from './hooks_list'
 export { isRemoved } from './remove'
@@ -71,8 +78,9 @@ export const COMMAND_SPEC = {
   name: COMMAND_NAME,
   description: 'Sign in to agent-services, show its status, or sign out',
   argumentHint:
-    '[status | login [<email>] | logout | setup | sharing [on | off | not_now | preview | page on|off | mail on|off] | ' +
-    'savings | methods [off | suggest | on | preview | diff | accept | keep] | routing [on | off] | update | ' +
+    '[status | login [<email>] | logout | setup | sharing [on_backfill | on_from_now | off | not_now | preview | ' +
+    'page on|off | mail on|off] | ' +
+    'savings | methods [off | suggest | on | preview | diff | accept | keep] | routing [off | suggest | strict] | update | ' +
     'offline on|off | estimate [preview | send] | info [data | hooks | log [<day>]] | remove | company [mail on|off]]',
 } as const
 
@@ -90,7 +98,7 @@ export const STATUS_HELLO_MS = 4000 // status waits this long at most for a hell
 export const OUTBOX_SHOW = 10 // outbox lines shown
 export const OUTBOX_LINE_CHARS = 300
 export const ESTIMATE_KEY = 'estimate_answer' // { made_at, estimate }: the last estimate answer (wiring.ts reads it)
-export const ROUTING_KEY = 'routing' // { on: boolean, at }: the subagent routing switch; missing means on
+export { ROUTING_KEY } from './routing_level'
 
 // The one savings record: the private page, the weekly email and the daily numbers-only upload together (choice.ts).
 // One answer sets all three; the page and the email keep their own subcommands (sharing page|mail on|off).
@@ -98,10 +106,16 @@ export const SHARING_QUESTION =
   'Keep a record of what agent-services saves you? It shows your savings on a private page in your claude.ai ' +
   'account (only you can see it), emails you a weekly total, and uploads a small daily usage summary (token ' +
   'counts and costs per model, counts per task type and hashed project, savings; never your prompts, file ' +
-  'contents, paths or code). Nothing of it is uploaded before you answer.'
-export const SHARING_OPTIONS = ['Turn on (Recommended)', 'Not now', 'Never', 'Show me what is sent']
+  'contents, paths or code). Nothing is uploaded before you choose. "Upload, including the past 30 days": the ' +
+  'first upload also sends the summaries of up to 30 earlier days. "Upload from now on only": only the days after ' +
+  'today are sent, nothing from before. "Don\'t upload": nothing is uploaded and there is no page or email; you are ' +
+  'not asked again.'
+// The three answers (0.6.2), then the preview; the engine's dialog takes 2-4 options.
+export const SHARING_OPTIONS = ['Upload, including the past 30 days', 'Upload from now on only', "Don't upload",
+  'Show me what is sent']
 export const SHARING_HEADER = 'Savings'
-// Where a company turned the daily upload on for everyone: the private page stays the person's own question.
+// The 0.6.1 page-only question under a company "on": no longer asked since 0.6.2 (the member answers the savings
+// question itself); kept one version for callers that import it.
 export const PAGE_QUESTION = 'Your company turned the daily usage upload on. Show your savings on a private page in ' +
   'your claude.ai account too (only you can see it)?'
 export const PAGE_OPTIONS = ['Publish it', 'Not now', 'Never']
@@ -109,10 +123,10 @@ export const METHODS_QUESTION = 'agent-services serves working methods (planning
   'review, delivery, checkpoints). How should Claude use them?'
 export const METHODS_OPTIONS = ['As suggestions (Recommended)', 'As my own instructions', 'Off']
 export const METHODS_HEADER = 'Methods'
-export type Question = 'savings' | 'page' | 'methods'
+export type Question = 'savings' | 'methods'
 export const QUESTION_COMMANDS: Readonly<Record<Question, string>> = {
-  savings: `${COMMAND} sharing on, sharing not_now or sharing off`,
-  page: `${COMMAND} sharing page on or sharing page off`,
+  savings: `${COMMAND} sharing on_backfill (upload, including the past 30 days), sharing on_from_now (upload from ` +
+    `now on only) or sharing off (don't upload)`,
   methods: `${COMMAND} methods suggest, methods on (after methods preview) or methods off`,
 }
 export const METHODS_LINE: Readonly<Record<string, string>> = {
@@ -127,7 +141,8 @@ export const METHODS_LINE: Readonly<Record<string, string>> = {
 // The tool the model calls with the user's answers (the user asked it to change a choice); it runs the same
 // subcommands as the slash command, limited to these. The 0.5.0 setup words still work for one version (SETUP_ALIASES).
 export const SETUP_COMMANDS = [
-  'sharing on',
+  'sharing on_backfill',
+  'sharing on_from_now',
   'sharing not_now',
   'sharing off',
   'sharing preview',
@@ -138,30 +153,58 @@ export const SETUP_COMMANDS = [
   'methods diff',
   'methods accept',
   'methods keep',
-  'routing on',
   'routing off',
+  'routing suggest',
+  'routing strict',
   'update',
   'info data',
   'info hooks',
 ]
+// The routing level as status shows it, and the answer once it is set (routing_level.ts).
+export const ROUTING_STATUS: Readonly<Record<RoutingLevel, string>> = {
+  off: `Subagent routing: off. Subagents start as dispatched and nothing is asked of the service; ${COMMAND} routing ` +
+    'suggest turns it back on.',
+  suggest: 'Subagent routing: suggest (the default). Each subagent dispatch asks the service for advice on its model ' +
+    `and effort, and a dispatch without a task type word still runs; ${COMMAND} routing strict refuses those, ` +
+    `${COMMAND} routing off turns routing off.`,
+  strict: 'Subagent routing: strict. Each subagent dispatch asks the service for advice on its model and effort, and ' +
+    `the service refuses a dispatch whose description does not start with a task type word; ${COMMAND} routing ` +
+    `suggest or ${COMMAND} routing off changes it.`,
+}
+export const ROUTING_SET: Readonly<Record<RoutingLevel, string>> = {
+  off: 'Subagent routing is off: agent-services sends no routing request, denies no subagent, changes no model and ' +
+    `adds nothing to subagent prompts. ${COMMAND} routing suggest turns it back on.`,
+  suggest: 'Subagent routing is set to suggest (the default): each subagent dispatch asks the service for advice on ' +
+    `its model and effort, and a dispatch without a task type word runs as written. ${COMMAND} routing strict ` +
+    `refuses those; ${COMMAND} routing off turns routing off.`,
+  strict: 'Subagent routing is set to strict: each subagent dispatch asks the service for advice on its model and ' +
+    'effort, and the service refuses a dispatch whose description does not start with a task type word. ' +
+    `${COMMAND} routing suggest goes back to advice only; ${COMMAND} routing off turns routing off.`,
+}
 export const SETUP_ALIASES = ['savings preview', 'savings on', 'savings not_now', 'dashboard allow', 'dashboard not_now',
-  'trust on', 'trust not_now', 'trust off', 'trust preview', 'trust diff', 'trust accept', 'trust keep', 'data', 'hooks']
+  'trust on', 'trust not_now', 'trust off', 'trust preview', 'trust diff', 'trust accept', 'trust keep', 'data', 'hooks',
+  'routing on', 'sharing on']
 export const SETUP_SPEC = {
   name: 'setup',
   description:
-    "Apply the user's answer to an agent-services setup question, or read what the plugin does. \"sharing on\" turns " +
-    "the savings record on: a private Artifact page on the user's own claude.ai account (only they see it unless " +
-    'they share it), a weekly savings email, and one small daily usage summary (token counts and costs per model, ' +
-    'counts per task type and hashed project, savings; no prompt text, file contents or paths). "sharing not_now" ' +
-    'leaves it off and asks again in 7 days at the earliest; "sharing off" leaves it off for good; "sharing preview" ' +
-    'shows what one upload sends and changes nothing. "methods suggest" (the default) gives Claude the served working ' +
+    "Apply the user's answer to an agent-services setup question, or read what the plugin does. The savings " +
+    "record is a private Artifact page on the user's own claude.ai account (only they see it unless they share it), " +
+    'a weekly savings email, and one small daily usage summary (token counts and costs per model, counts per task ' +
+    'type and hashed project, savings; no prompt text, file contents or paths). Its question has three answers: ' +
+    '"sharing on_backfill" (the user chose "Upload, including the past 30 days": the first upload also sends up to 30 ' +
+    'earlier days), "sharing on_from_now" (the user chose "Upload from now on only": only days after the choice are ' +
+    'sent) and "sharing off" (the user chose "Don\'t upload": off for good). "sharing on" is the old spelling of ' +
+    '"sharing on_backfill". "sharing not_now" leaves it off and asks again in 7 days at the earliest; "sharing ' +
+    'preview" shows what one upload sends and changes nothing. "methods suggest" (the default) gives Claude the served working ' +
     'methods (planning, delegating to subagents, testing, review, delivery, checkpoints) as agent-services ' +
     'suggestions; "methods on" makes them the user\'s own instructions through one marked section in the user\'s ' +
     'CLAUDE.md and lets the planning gate hold larger file edits until there is a plan (read "methods preview" with ' +
     'the user first); "methods off" turns them off. "methods diff" shows how changed methods differ from the approved ' +
     'ones; "methods accept" takes the new text, "methods keep" keeps the approved one. "routing off" stops the ' +
-    'subagent routing advice (no request, no deny, no model change, nothing added to subagent prompts) and "routing ' +
-    'on" turns it back on. "update" updates the plugin to ' +
+    'subagent routing advice (no request, no deny, no model change, nothing added to subagent prompts); "routing ' +
+    'suggest" (the default) asks for advice on each subagent and never refuses one for a missing task type word; ' +
+    '"routing strict" lets the service refuse a dispatch whose description does not start with a task type word. ' +
+    '"update" updates the plugin to ' +
     'the newest listed version. "info data" returns the plugin\'s data note (every request it sends and when, what ' +
     'the service keeps and for how long, what a company admin sees, the local files, and what can be turned off); ' +
     '"info hooks" lists every hook the plugin registers and what it does. Only call it with an answer the user gave, ' +
@@ -237,9 +280,9 @@ export const ERROR_TEXT: Record<string, string> = {
 }
 
 export const USAGE =
-  `Usage: ${COMMAND} [status | login [<email>] | logout | setup | sharing [on | off | not_now | preview | page on|off | ` +
-  'mail on|off] | savings | methods [off | suggest | on | preview | diff | accept | keep] | routing [on | off] | ' +
-  'update | offline on|off | estimate [preview | send] | info [data | hooks | log [<day>]] | remove | company [mail on|off]]'
+  `Usage: ${COMMAND} [status | login [<email>] | logout | setup | sharing [on_backfill | on_from_now | off | not_now | ` +
+  'preview | page on|off | mail on|off] | savings | methods [off | suggest | on | preview | diff | accept | keep] | routing [off | suggest | ' +
+  'strict] | update | offline on|off | estimate [preview | send] | info [data | hooks | log [<day>]] | remove | company [mail on|off]]'
 
 // The 0.5.0 spellings, kept for one version: [old words, new words] (a trailing '*' passes the rest on).
 export const RENAMED: readonly (readonly [string, string])[] = [
@@ -251,7 +294,7 @@ export const RENAMED: readonly (readonly [string, string])[] = [
   ['trust not_now', 'methods suggest'],
   ['trust *', 'methods *'],
   ['savings preview', 'sharing preview'],
-  ['savings on', 'sharing on'],
+  ['savings on', 'sharing on_backfill'],
   ['savings off', 'sharing off'],
   ['savings not_now', 'sharing not_now'],
   ['savings status', 'status'],
@@ -259,6 +302,8 @@ export const RENAMED: readonly (readonly [string, string])[] = [
   ['dashboard', 'status'],
   ['dashboard allow', 'sharing page on'],
   ['dashboard not_now', 'sharing page off'],
+  ['routing on', 'routing suggest'], // 0.6.1
+  ['sharing on', 'sharing on_backfill'], // 0.6.1
 ]
 
 /** An old spelling as its new words, with the one line that names the new spelling; null for anything else. Pure. */
@@ -690,19 +735,27 @@ export class Command {
   /** The savings record and its page, in one line. */
   private async recordLine(): Promise<string> {
     const s = await recordState(this.d.store)
-    const head = s.org
-      ? `Savings record: ${s.org}, set by your company for everyone.`
+    const recommended = s.org === 'on' ? " Your company's admin turned it on and recommends it." : ''
+    const head = s.org === 'off'
+      ? 'Savings record: off, set by your company for everyone.'
       : s.own === 'on'
-        ? 'Savings record: on.'
+        ? `Savings record: on (${(await this.backfill()) ? 'uploads include the past 30 days' : 'upload from now on only'}).`
         : s.own === 'off'
-          ? `Savings record: off (not asked again; ${COMMAND} sharing on turns it on).`
-          : `Savings record: not answered yet (${COMMAND} sharing on turns it on).`
+          ? `Savings record: off (don't upload; not asked again; ${COMMAND} sharing on_backfill or sharing ` +
+            `on_from_now turns it on).${recommended}`
+          : `Savings record: not answered yet, nothing is uploaded (${COMMAND} setup asks).${recommended}`
     if (!s.page) return `${head} Private savings page: off.`
     const url = await this.safe(() => this.d.dashboardUrl?.() ?? Promise.resolve(null), null)
     return `${head} Private savings page: ` + (url ? `published at ${url}.` : 'on, published when Claude finishes its next reply.')
   }
 
-  // ---------------- the setup questions (the savings record, its page under a company, the methods level)
+  /** The person's "on" includes the past 30 days (every "on" kept before 0.6.2 does). */
+  private async backfill(): Promise<boolean> {
+    const { entry } = await readEntry(this.d.store)
+    return entry.backfill !== false
+  }
+
+  // ---------------- the setup questions (the savings record, the methods level)
 
   private canAsk(): boolean {
     return !!this.d.ask && (this.d.canAsk ? this.d.canAsk() : false)
@@ -723,7 +776,6 @@ export class Command {
     const out: Question[] = []
     const s = await recordState(this.d.store)
     if (savingsOpen(s)) out.push('savings')
-    else if (pageOpen(s)) out.push('page')
     if ((await readLevel(this.d.store, this.d.now())) === null) out.push('methods')
     return out
   }
@@ -789,13 +841,7 @@ export class Command {
       const a = await this.dialog(await sharingQuestion(this.d.store, SHARING_QUESTION), SHARING_OPTIONS, SHARING_HEADER)
       if (a === null) return null
       const i = SHARING_OPTIONS.indexOf(a)
-      return i === 3 ? this.sharingPreview() : this.setRecord((['on', 'not_now', 'off'] as const)[i]!)
-    }
-    if (q === 'page') {
-      const a = await this.dialog(PAGE_QUESTION, PAGE_OPTIONS, SHARING_HEADER)
-      if (a === null) return null
-      if (a === PAGE_OPTIONS[1]) return `The private savings page stays off for now; ${COMMAND} sharing page on publishes it.`
-      return this.setPage(a === PAGE_OPTIONS[0])
+      return i === 3 ? this.sharingPreview() : this.setRecord((['backfill', 'from_now', 'off'] as const)[i]!)
     }
     const a = await this.dialog(METHODS_QUESTION, METHODS_OPTIONS, METHODS_HEADER)
     if (a === null) return null
@@ -1016,7 +1062,10 @@ export class Command {
   private async sharing(rest: string[]): Promise<string> {
     const w = rest.map((x) => x.toLowerCase())
     if (!w.length) return this.recordLine()
-    if (w.length === 1 && (w[0] === 'on' || w[0] === 'off' || w[0] === 'not_now')) return this.setRecord(w[0])
+    if (w.length === 1 && (w[0] === 'off' || w[0] === 'not_now')) return this.setRecord(w[0])
+    if (w.length === 1 && (w[0] === 'on_backfill' || w[0] === 'on_from_now')) {
+      return this.setRecord(w[0] === 'on_backfill' ? 'backfill' : 'from_now')
+    }
     if (w.length === 1 && w[0] === 'preview') return this.sharingPreview()
     if (w.length === 2 && w[0] === 'page' && (w[1] === 'on' || w[1] === 'off')) return this.setPage(w[1] === 'on')
     if (w.length === 2 && w[0] === 'mail' && (w[1] === 'on' || w[1] === 'off')) return this.setMail(w[1] === 'on')
@@ -1029,46 +1078,50 @@ export class Command {
     return r.ok ? null : errorText(r.error)
   }
 
-  /** One answer for the upload, the page and the weekly email. Under a company's choice it sets the page only. */
-  private async setRecord(sub: 'on' | 'off' | 'not_now'): Promise<string> {
+  /** One answer for the upload, the page and the weekly email: "Upload, including the past 30 days" (backfill),
+   * "Upload from now on only" (from_now), "Don't upload" (off), or not now. A company's "off" refuses the two upload
+   * answers; a company's "on" is a recommendation only, so the member's own answer applies as without a company. */
+  private async setRecord(sub: 'backfill' | 'from_now' | 'off' | 'not_now'): Promise<string> {
     const s = await recordState(this.d.store)
-    if (s.org) {
-      if (sub === 'not_now') {
-        await this.stampAsked()
-        return `${ORG_SET_TEXT} Your private page stays as it is.`
-      }
-      return `Your company decides the daily upload for everyone; this changed only your private page.\n` +
-        (await this.setPage(sub === 'on'))
-    }
-    const at = this.d.now()
+    const on = sub === 'backfill' || sub === 'from_now'
+    if (s.org === 'off' && on) return `${ORG_SET_TEXT} Nothing was changed.`
+    const { entry } = await readEntry(this.d.store)
+    // the same answer again keeps its moment, so a later floor never skips days already due
+    const at = on && entry.record === 'on' && (entry.backfill !== false) === (sub === 'backfill') && typeof entry.at === 'number'
+      ? entry.at
+      : this.d.now()
     let mailError: string | null = null
-    if (sub !== 'on') mailError = await this.mail(false) // while the metrics routes are still open
-    const kept = sub === 'on'
-      ? (await this.d.svc.setService('metrics', true)) && (await writeEntry(this.d.store, { record: 'on', at, page: 'on', page_at: at }))
+    if (!on) mailError = await this.mail(false) // while the metrics routes are still open
+    const kept = on
+      ? (await this.d.svc.setService('metrics', true)) &&
+        (await writeEntry(this.d.store, { record: 'on', at, backfill: sub === 'backfill', page: 'on', page_at: this.d.now() }))
       : sub === 'off'
-        ? await writeEntry(this.d.store, { record: 'off', at, page: 'off', page_at: at })
-        : await writeEntry(this.d.store, { record: undefined, at: undefined, page: undefined, page_at: undefined })
+        ? await writeEntry(this.d.store, { record: 'off', at, backfill: undefined, page: 'off', page_at: at })
+        : await writeEntry(this.d.store, { record: undefined, at: undefined, backfill: undefined, page: undefined, page_at: undefined })
     if (!kept) return errorText('store_unavailable')
     if (sub === 'not_now') await this.stampAsked()
-    if (sub === 'on') mailError = await this.mail(true)
+    if (on) mailError = await this.mail(true)
     const mailLine = mailError
-      ? `\nThe weekly email setting was not changed: ${mailError} Run ${COMMAND} sharing mail ${sub === 'on' ? 'on' : 'off'} ` +
+      ? `\nThe weekly email setting was not changed: ${mailError} Run ${COMMAND} sharing mail ${on ? 'on' : 'off'} ` +
         'later to change it.'
       : ''
-    if (sub === 'on') {
-      return 'Savings record is on: your private savings page is published to your claude.ai account when Claude ' +
-        'finishes this reply, a weekly email sums up the savings, and a small daily usage summary is uploaded ' +
-        '(the first upload also sends up to 30 earlier days). ' +
-        `To turn one part off: ${COMMAND} sharing page off (the page), ${COMMAND} sharing mail off (the email); ` +
-        `${COMMAND} sharing off turns it all off.` + mailLine
+    if (on) {
+      const how = sub === 'backfill'
+        ? 'including the past 30 days: the first upload also sends the summaries of up to 30 earlier days'
+        : `from now on only: the first upload sends only the days after ${localDay(at)}, nothing from before`
+      return `Savings record is on (upload, ${how}). Your private savings page is published to your claude.ai ` +
+        'account when Claude finishes this reply, a weekly email sums up the savings, and a small daily usage summary ' +
+        `is uploaded. To turn one part off: ${COMMAND} sharing page off (the page), ${COMMAND} sharing mail off (the ` +
+        `email); ${COMMAND} sharing off turns it all off.` + mailLine
     }
     if (sub === 'off') {
-      return 'Savings record is off: no page is published, no weekly email is sent and nothing more is uploaded. You ' +
-        `are not asked again; turn it on any time with ${COMMAND} sharing on.` + mailLine
+      return 'Savings record is off (don\'t upload): no page is published, no weekly email is sent and nothing more is ' +
+        `uploaded. You are not asked again; turn it on any time with ${COMMAND} sharing on_backfill (including the ` +
+        `past 30 days) or ${COMMAND} sharing on_from_now (from now on only).` + mailLine
     }
     return 'Savings record is not on: nothing is uploaded, no page is published and no weekly email is sent. You are ' +
-      `asked again in 7 days at the earliest; ${COMMAND} sharing on turns it on, ${COMMAND} sharing off stops the ` +
-      'question.' + mailLine
+      `asked again in 7 days at the earliest; ${COMMAND} setup asks now, ${COMMAND} sharing off stops the question.` +
+      mailLine
   }
 
   private async setPage(on: boolean): Promise<string> {
@@ -1082,7 +1135,7 @@ export class Command {
       ((await uploadOn(this.d.store)) ? ''
         : (await recordState(this.d.store)).org === 'off'
           ? ' Your company turned the daily upload off, so the page shows no new savings until its admin turns it on.'
-          : ` It shows savings only while the daily upload is on (${COMMAND} sharing on).`)
+          : ` It shows savings only while the daily upload is on (${COMMAND} setup asks).`)
   }
 
   private async setMail(on: boolean): Promise<string> {
@@ -1116,10 +1169,11 @@ export class Command {
       'plan and service state, numbers only.\n' +
       '- A weekly email to your account address with the week\'s savings.\n' +
       `- ${upload}\n` +
-      `Nothing of it is uploaded before you turn it on; the first upload then also sends up to 30 earlier days. ` +
-      `Every other request the plugin sends (routing advice on subagents, for one) is listed by ${COMMAND} info data.\n` +
-      `Turn it on with ${COMMAND} sharing on, or leave it off with ${COMMAND} sharing not_now (asked again in 7 days) ` +
-      `or ${COMMAND} sharing off (never asked again).`
+      `Nothing of it is uploaded before you choose. "Upload, including the past 30 days" (${COMMAND} sharing ` +
+      `on_backfill): the first upload also sends up to 30 earlier days. "Upload from now on only" (${COMMAND} sharing ` +
+      `on_from_now): only the days after the day you choose are sent. "Don't upload" (${COMMAND} sharing off): ` +
+      `nothing is uploaded and you are not asked again; ${COMMAND} sharing not_now asks again in 7 days. ` +
+      `Every other request the plugin sends (routing advice on subagents, for one) is listed by ${COMMAND} info data.`
     )
   }
 
@@ -1252,7 +1306,8 @@ export class Command {
   private async savings(): Promise<string> {
     if (!(await uploadOn(this.d.store))) {
       return 'Savings are worked out by the service from the daily usage summary, and the savings record is not on ' +
-        `for this account. ${COMMAND} sharing preview shows exactly what it sends; ${COMMAND} sharing on turns it on.`
+        `for this account. ${COMMAND} sharing preview shows exactly what it sends; ${COMMAND} setup asks whether to ` +
+        'turn it on.'
     }
     const r = await this.d.svc.call('GET', '/metrics/savings')
     return r.ok ? savingsText(r.body) : `Savings could not be read: ${errorText(r.error)}`
@@ -1320,25 +1375,20 @@ export class Command {
     return `Served items: channel ${s.channel}; ${pins.length ? 'pinned: ' + pins.join(', ') : 'no pins'}.`
   }
 
-  /** The subagent routing switch, in one line. */
+  /** The subagent routing level, in one line. */
   private async routingLine(): Promise<string> {
-    const v = await this.safe(() => this.d.store.get(ROUTING_KEY), null)
-    return v && typeof v === 'object' && (v as { on?: unknown }).on === false
-      ? `Subagent routing: off. Subagents start as dispatched and nothing is asked of the service; ${COMMAND} routing on turns it back on.`
-      : `Subagent routing: on. Each subagent dispatch asks the service for advice on its model and effort; ${COMMAND} routing off turns it off.`
+    const level = await routingLevel(this.d.store)
+    return ROUTING_STATUS[level]
   }
 
-  /** routing [on | off]: the switch of the agent.spawn hook (routingOff). Works signed out: nothing is sent. */
+  /** routing [off | suggest | strict]: the level of the agent.spawn hook (routing_level.ts). Works signed out:
+   * nothing is sent. */
   private async routing(rest: string[]): Promise<string> {
-    const w = (rest[0] ?? '').toLowerCase()
+    const w = (rest[0] ?? '').toLowerCase() as RoutingLevel
     if (rest.length === 0) return this.routingLine()
-    if (rest.length !== 1 || !['on', 'off'].includes(w)) return USAGE
-    if (!(await safeSet(this.d.store, ROUTING_KEY, { on: w === 'on', at: this.d.now() }))) return errorText('store_unavailable')
-    return w === 'off'
-      ? 'Subagent routing is off: agent-services sends no routing request, denies no subagent, changes no model and ' +
-        `adds nothing to subagent prompts. ${COMMAND} routing on turns it back on.`
-      : `Subagent routing is on: each subagent dispatch asks the service for advice on its model and effort. ${COMMAND} ` +
-        'routing off turns it off.'
+    if (rest.length !== 1 || !ROUTING_LEVELS.includes(w)) return USAGE
+    if (!(await safeSet(this.d.store, ROUTING_KEY, routingRecord(w, this.d.now())))) return errorText('store_unavailable')
+    return ROUTING_SET[w]
   }
 
   private async offline(rest: string[]): Promise<string> {
@@ -1622,11 +1672,10 @@ async function servedCommand($: EngineInterface): Promise<Command> {
 }
 
 /** register.ts agent.spawn: true when the user turned subagent routing off (`routing off`); then the hook does
- * nothing at all. Reads $.store only; false on any error (the default is on). */
+ * nothing at all. Reads $.store only; false on any error (the default is suggest). */
 export async function routingOff($: EngineInterface): Promise<boolean> {
   try {
-    const v = await $.store.get(ROUTING_KEY)
-    return !!v && typeof v === 'object' && (v as { on?: unknown }).on === false
+    return routingLevelOf(await $.store.get(ROUTING_KEY)) === 'off'
   } catch {
     return false
   }
@@ -1646,8 +1695,11 @@ export async function pastedCode(
   $: EngineInterface,
   e: { text?: unknown; agentId?: unknown; origin?: { kind?: unknown } | null; attachments?: unknown },
 ): Promise<string | null> {
-  // only what the person typed in the main conversation, with nothing attached; read here and never sent
-  if (e?.agentId || e?.origin?.kind !== 'composer' || (Array.isArray(e?.attachments) && e.attachments.length)) return null
+  // only what the person sent in the main conversation (typed, through Remote Control, or the SDK host's own turn),
+  // with nothing attached; read here and never sent. Peers, tasks, schedules and plugins never count.
+  const kind = e?.origin?.kind
+  if (e?.agentId || (kind !== 'composer' && kind !== 'bridge' && kind !== 'sdk') ||
+    (Array.isArray(e?.attachments) && e.attachments.length)) return null
   const text = e?.text
   if (!servedOptions || typeof text !== 'string' || text.length > 40) return null
   if (!PASTED_CODE_RX.test(cleanCode(text))) return null // most messages: nothing is built or read

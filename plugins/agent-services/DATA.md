@@ -1,7 +1,7 @@
 # agent-services: what it sends, keeps and does
 
 This note ships with the plugin. `/agent-services info data` shows it, and so does the setup tool's `info data`
-command. The setup tool changes a choice (`sharing on`, `methods on` and the like) only in the main conversation of a
+command. The setup tool changes a choice (`sharing on_backfill`, `methods on` and the like) only in the main conversation of a
 session you are at, to apply your answer; elsewhere it refuses and changes nothing.
 `/agent-services info hooks` lists every hook the plugin registers. `/agent-services info log` shows the request log on
 this computer: each request is recorded there as it is sent, with the answer that came back. The log is written to
@@ -41,11 +41,11 @@ the device's public key, the device id, the Claude account hash, and the harness
 |---|---|
 | Each session start, and when the sign-in check is due | the plugin version and the contract version |
 | 7 days before the sign-in expires | a hash of the next token |
-| Every subagent start (forks and teammates are skipped; nothing while `routing off`) | the first word of the task description (whitespace-separated, at most 32 characters; the rest of the description is never sent), its length in characters, the subagent type (at most 64 characters), the requested model and effort, the harness, the dispatch number in this session, a hashed project id (an HMAC of the project folder with a key kept only on this computer, 16 hex digits), a random per-session id, the main session's model id (so the subagent never runs on a larger model), and yes or no for whether your latest message asked for a review (decided on this computer; your message is never sent) |
+| Every subagent start (forks and teammates are skipped; nothing while `routing off`) | at `routing strict` only, the flag strict (so the service refuses a subagent whose description does not start with a task type word); the first word of the task description (whitespace-separated, at most 32 characters; the rest of the description is never sent), its length in characters, the subagent type (at most 64 characters), the requested model and effort, the harness, the dispatch number in this session, a hashed project id (an HMAC of the project folder with a key kept only on this computer, 16 hex digits), a random per-session id, the main session's model id (so the subagent never runs on a larger model), and yes or no for whether your latest message asked for a review (decided on this computer; your message is never sent) |
 | After every turn of the main agent | counters only: context use in percent, turns, tool calls, finished todos, commits, minutes, and the per-session id |
-| Session start, the first prompt after a project's `agent-state.md` says `phase: running`, and after `/clear` or a compaction, only at methods level `suggest` (the default) | the per-session id, the role `auto`, the work phase, the version pinned, the channel (to fetch the working methods) |
+| Session start (also a resumed session), the first prompt after a project's `agent-state.md` changes between planning and `phase: running`, and after `/clear` or a compaction, only at methods level `suggest` (the default) | the per-session id, the role `auto`, the work phase, the version pinned, the channel (to fetch the working methods; the full text goes to the model once per session and again only after `/clear`, a compaction, a phase change or a new served version) |
 | Session start, only at methods level `on` (your CLAUDE.md has the agent-services section) | the same, once for each of the six phases |
-| Session start, and once a day in a session left open, only while the savings record is on for the account signed in | the daily usage summary, one per active day not uploaded yet, never a day more than 30 days before the yes (so the first upload also sends up to 30 earlier days); after a switch to another account on this computer, nothing from before that account's yes |
+| Session start, and once a day in a session left open, only after you chose to upload for the account signed in | the daily usage summary, one per active day not uploaded yet. With "Upload, including the past 30 days" never a day more than 30 days before your choice (so the first upload also sends up to 30 earlier days); with "Upload from now on only" only the days after the day of your choice; after a switch to another account on this computer, nothing from before that account's choice |
 | The band, the status line and your savings page refresh | nothing (asks for your savings and report lines) |
 | After a turn, for a company admin only | nothing (asks for the company summary, at most every 30 minutes) |
 
@@ -56,7 +56,7 @@ by kind and harness; and the savings figures (token counts, compaction sizes, fi
 compactions). It holds no prompt text, file contents, file paths or session ids. `/agent-services sharing preview`
 shows exactly what one upload sends.
 
-**Only when you run a command:** the weekly-email switch (`sharing mail on|off`, `sharing on|off|not_now`); the
+**Only when you run a command:** the weekly-email switch (`sharing mail on|off`, `sharing on_backfill|on_from_now|off|not_now`); the
 company-email switch (company admins); and the one-time savings estimate (`estimate send`, only exactly what
 `estimate preview` showed you: token and cost totals per model, dispatch counts per task type from a fixed list,
 compaction counts and a session-length histogram).
@@ -100,10 +100,13 @@ data yet" while a member uploads nothing), plus the company totals, the seats, a
 does not see token counts, costs, task types, project ids, session counts, times of use, IP addresses, prompts or
 code.
 
-The company can also pause agent-services for everyone, and can set the daily upload on or off for everyone. Set
-on, your daily upload is turned on without asking you, and only the admin can turn it off; your private savings
-page stays your own choice (`/agent-services sharing page on|off`), for an admin too. Where the company lets each
-person decide, `/agent-services sharing off` stops your upload (the admin then sees "no data yet" for you). Your
+The company can also pause agent-services for everyone, and can set the savings record on or off for everyone.
+Set off, nothing of yours is uploaded and only the admin can change it. Set on, nothing is turned on for you: you
+are asked the same three options as everyone ("Upload, including the past 30 days", "Upload from now on only",
+"Don't upload"), told that your admin turned it on and recommends it, and nothing of yours is uploaded until you
+answer (the admin sees "no data yet" for you meanwhile). Your private savings page stays your own choice
+(`/agent-services sharing page on|off`), for an admin too. `/agent-services sharing off` stops your upload unless the
+company set it off. Your
 email address and device count stay visible to the admin while you are a member.
 
 ## 4. Files on this computer
@@ -138,10 +141,13 @@ text of your messages (only to see whether one asks for a review), and the marke
 - The status line shows how many `- [ ]` lines `.agent/pending.md` has (decisions waiting for you).
 - Notes for the model at the next prompt, labelled as agent-services notes: when a foreground Bash, PowerShell or
   subagent call of the main conversation ran longer than 60 seconds (at most 3 per session), and when
-  `.agent/steps.json` lists more steps ready to start than the last turn dispatched subagents.
+  `.agent/steps.json` lists more steps ready to start than the last turn dispatched subagents. Once per session, the
+  hint the routing service sent for a subagent that ran without routing advice (a description without a task type
+  word).
 - The speed-up suggestion the routing service sends is added once to the end of each routed subagent's prompt.
-- The suggestion and the notes stop while the working methods are switched off; the suggestion also stops while
-  subagent routing is off (`/agent-services routing off`).
+- The suggestion and the notes stop while the working methods are switched off (the routing hint note does not: it
+  follows the routing level); the suggestion and the routing hint note also stop while subagent routing is off
+  (`/agent-services routing off`).
 
 ## 5. What comes back
 
@@ -174,9 +180,9 @@ Every answer has a fixed shape:
 | To stop | Run |
 |---|---|
 | everything sent to the service | `/agent-services offline on` (back: `offline off`), or `/agent-services logout` |
-| the daily upload, the weekly email and the savings page | `/agent-services sharing off` (never asked again; `sharing not_now` asks again in 7 days; each part alone: `sharing page off`, `sharing mail off`) |
+| the daily upload, the weekly email and the savings page | `/agent-services sharing off` ("Don't upload"; never asked again; `sharing not_now` asks again in 7 days; each part alone: `sharing page off`, `sharing mail off`) |
 | the working methods and the planning gate | `/agent-services methods off` (works signed out too; `methods suggest` keeps them as suggestions without the CLAUDE.md line) |
-| subagent routing (the routing request, its deny or model change, and the suggestion added to subagent prompts) | `/agent-services routing off` (back: `routing on`; works signed out too) |
+| subagent routing (the routing request, its deny or model change, and the suggestion added to subagent prompts) | `/agent-services routing off` (back: `routing suggest`, the default, or `routing strict`, which lets the service refuse a subagent without a task type word; works signed out too) |
 | everything on this computer | `/agent-services remove`, then `claude plugin uninstall agent-services@agent-plugin` |
 
 Checkpoint timing has no switch of its own: it stops when you sign out or uninstall, and offline mode stops it;
@@ -184,8 +190,8 @@ those stop subagent routing too. The planning gate follows the methods level: on
 (Edit, Write, MultiEdit, NotebookEdit) until a project's `agent-state.md` has a plan, and an Edit of at most 10
 changed lines passes (so do writes to `agent-state.md` and to files under `.agent/`); at `suggest` it holds nothing and adds one reminder to the next prompt; at `off`, in a session
 nobody can be asked in (such as `claude -p`) and for subagents it does nothing. It does not cover Bash: a file
-written through a Bash command is never held. Where your company set the daily upload for everyone, only its admin
-can change it.
+written through a Bash command is never held. Where your company set the daily upload off for everyone, only its
+admin can change it.
 
 The plugin asks its setup questions (the savings record and the methods level) together, only in the dialog of
 `/agent-services setup` (or right after a sign-in through that dialog); the model is never told to ask them. While
