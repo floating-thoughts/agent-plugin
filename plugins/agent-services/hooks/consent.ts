@@ -77,10 +77,10 @@ export function resetConsentAsk(): void {
   consentAsked = false
 }
 
-/** The published dashboard's artifact URL from <data dir>/services/dashboard.json, or null. */
-export async function dashboardUrl(readText: (path: string) => Promise<string | null>, dir: string): Promise<string | null> {
+/** The published dashboard's artifact URL from <data dir>/services/dashboard.json (O5: boss.json), or null. */
+export async function dashboardUrl(readText: (path: string) => Promise<string | null>, dir: string, file = 'dashboard.json'): Promise<string | null> {
   try {
-    const t = await readText(`${dir.replace(/[\\/]+$/, '')}/services/dashboard.json`)
+    const t = await readText(`${dir.replace(/[\\/]+$/, '')}/services/${file}`)
     const s = t === null ? null : JSON.parse(t)
     return isObj(s) && typeof s.url === 'string' && DASHBOARD_URL_RX.test(s.url) ? s.url : null
   } catch {

@@ -202,7 +202,7 @@ export function defaultKind(path: string): Kind {
 /** Metrics routes that upload nothing stay usable with the metrics switch off. */
 export function ungated(route: any): boolean {
   if (route['x-inventory']?.service !== 'metrics') return false
-  return route.method === 'GET' || route.method === 'DELETE' || (route.method === 'POST' && route.path === '/metrics/weekly-mail')
+  return route.method === 'GET' || route.method === 'DELETE' || (route.method === 'POST' && ['/metrics/weekly-mail', '/org/summary-mail'].includes(route.path))
 }
 
 export function servedProps(route: any): string[] {

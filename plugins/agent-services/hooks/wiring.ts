@@ -42,6 +42,8 @@ import { counterDays, countsOf, dayCountsFromStore, dayEmpty, normalizeDay } fro
 import { boardData, readOutboxDay, timelineOf, weeklyOf } from './board_facts'
 import { bandFacts, paused, type BandFacts } from './band'
 import { readOrg } from './org'
+import { BossBoard } from './boss'
+import { MAIN_BOARD, type Board } from './dashboard'
 
 export { counterDays, countsOf, dayCountsFromStore, normalizeDay } from './day_counts'
 export { hookFor, svcTransport } from './transport'
@@ -200,9 +202,13 @@ export class Wiring {
   private fetching = new Set<string>()
   private estimateHeld: { text: string; note: string | null; at: number } | null = null
 
+  /** O5: the company admin's board (boss.ts), rendered after the person's own board. */
+  readonly boss: BossBoard
+
   constructor(deps: WiringDeps) {
     this.d = deps
     this.clock = deps.clock ?? (() => Date.now())
+    this.boss = new BossBoard({ svc: deps.svc as any, store: deps.store, fs: deps.fs, dataDir: deps.dataDir, now: () => this.now() })
     const random = deps.random ?? ((n: number) => globalThis.crypto.getRandomValues(new Uint8Array(n)))
     this.holder = deps.holder ? String(deps.holder) : hex(random(8))
   }
@@ -446,10 +452,10 @@ export class Wiring {
 
   // ---------------- the dashboard (3.8)
 
-  private async readState(): Promise<Obj> {
+  private async readState(path = this.statePath): Promise<Obj> {
     const out: Obj = { changed_at: null, url: null, published_at: null, denied: false }
     try {
-      const got = JSON.parse(String(await this.d.fs.read(this.statePath)))
+      const got = JSON.parse(String(await this.d.fs.read(path)))
       if (isObj(got)) for (const k of Object.keys(out)) if (k in got) out[k] = got[k]
     } catch {
       // none yet
@@ -472,7 +478,7 @@ export class Wiring {
     if (this.rendering || !renderDue(this.lastRender, now)) return false
     this.lastRender = now
     this.rendering = true
-    void this.track(this.renderDashboard().finally(() => (this.rendering = false)))
+    void this.track(this.renderDashboard().then(() => this.boss.render()).finally(() => (this.rendering = false)))
     return true
   }
 
@@ -557,12 +563,14 @@ export class Wiring {
    * passed (file_path, and url or icon), the page's sha256 and size, the outcome, and a deny's reason. `run` gets
    * the `note` that takes that reason.
    */
-  async publish(run: (note: (d: { reason?: string }) => void) => Promise<string>): Promise<string> {
+  async publish(run: (note: (d: { reason?: string }) => void) => Promise<string>, board: Board = MAIN_BOARD): Promise<string> {
     if (!(await this.authOk())) return 'auth_failed'
-    const st = await this.readState()
-    const input: Record<string, string> = { file_path: this.pagePath }
+    const root = this.d.dataDir.replace(/[\\/]+$/, '')
+    const pagePath = board === MAIN_BOARD ? this.pagePath : `${root}/${board.page}`
+    const st = await this.readState(board === MAIN_BOARD ? this.statePath : `${root}/${board.state}`)
+    const input: Record<string, string> = { file_path: pagePath }
     if (typeof st.url === 'string' && ARTIFACT_URL_RX.test(st.url)) input.url = st.url
-    else input.icon = 'chart'
+    else input.icon = board.icon
     let outcome: string
     let reason: string | undefined
     try {
@@ -575,7 +583,7 @@ export class Wiring {
     if (PUBLISH_ATTEMPTS.includes(outcome) && this.d.outbox) {
       let page = ''
       try {
-        page = String(await this.d.fs.read(this.pagePath))
+        page = String(await this.d.fs.read(pagePath))
       } catch {
         page = ''
       }

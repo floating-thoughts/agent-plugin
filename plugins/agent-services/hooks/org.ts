@@ -10,6 +10,8 @@
 //   or off, applies it as the person's own savings-record choice (the record, the upload switch and the board
 //   consent). While it is on or off the savings question is not asked, the parts cannot be changed here, and the
 //   person is told the choice once (orgNotice). An answer without "org" (no org, or an older server) drops KEYS.org.
+// - O5 company admin: the org field also carries "admin": true for the org's admin (shell 0.4.0 or later); it is kept
+//   as `admin: true` in the org state (orgAdmin), and boss.ts then renders and publishes the company board.
 import { CONTRACT } from './contract'
 import { CONSENT_KEY } from './consent'
 import { KEYS, safeDelete, safeGet, safeSet } from './store'
@@ -25,20 +27,28 @@ export const ORG_SAVINGS_TEXT: Readonly<Record<string, string>> = {
 export const ORG_SET_TEXT = 'Your company set the savings record for everyone, so it cannot be changed here. Ask your admin.'
 
 export type OrgSavings = 'each' | 'on' | 'off'
-export type OrgState = { savings: OrgSavings; at: number; told: OrgSavings | null }
+export type OrgState = { savings: OrgSavings; at: number; told: OrgSavings | null; admin?: true }
 
 const isObj = (v: unknown): v is Record<string, any> => typeof v === 'object' && v !== null && !Array.isArray(v)
 
-/** The hello answer's "org" field is well formed: exactly {"savings": <OrgSavings>}. */
+/** The hello answer's "org" field is well formed: exactly {"savings": <OrgSavings>}, plus "admin": true (O5). */
 export function validOrg(v: unknown): boolean {
-  return isObj(v) && Object.keys(v).join(',') === 'savings' && ORG_SAVINGS.includes(v.savings)
+  if (!isObj(v) || !ORG_SAVINGS.includes(v.savings)) return false
+  const keys = Object.keys(v).sort().join(',')
+  return keys === 'savings' || (keys === 'admin,savings' && v.admin === true)
 }
 
 /** The stored org state, or null (no org, or unreadable). */
 export async function readOrg(kv: KV): Promise<OrgState | null> {
   const v = await safeGet(kv, KEYS.org)
   if (!isObj(v) || !ORG_SAVINGS.includes(v.savings) || typeof v.at !== 'number') return null
-  return { savings: v.savings, at: v.at, told: ORG_SAVINGS.includes(v.told) ? v.told : null }
+  const told = ORG_SAVINGS.includes(v.told) ? v.told : null
+  return v.admin === true ? { savings: v.savings, at: v.at, told, admin: true } : { savings: v.savings, at: v.at, told }
+}
+
+/** True while the signed-in account is its company's admin (O5). */
+export async function orgAdmin(kv: KV): Promise<boolean> {
+  return (await readOrg(kv))?.admin === true
 }
 
 /** 'on' or 'off' while the org set the savings record for everyone, else null. */
@@ -55,8 +65,9 @@ export async function keepOrg(kv: KV, org: unknown, now: number, setMetrics: (on
       if (prev) await safeDelete(kv, KEYS.org)
       return
     }
-    const savings = (org as { savings: OrgSavings }).savings
-    await safeSet(kv, KEYS.org, { savings, at: now, told: prev && prev.savings === savings ? prev.told : null })
+    const { savings, admin } = org as { savings: OrgSavings; admin?: true }
+    const told = prev && prev.savings === savings ? prev.told : null
+    await safeSet(kv, KEYS.org, admin === true ? { savings, at: now, told, admin } : { savings, at: now, told })
     if (savings === 'each') return
     const on = savings === 'on'
     await safeSet(kv, KEYS.sharing, { on, at: now })

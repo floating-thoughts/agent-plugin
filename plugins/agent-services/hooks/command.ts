@@ -40,6 +40,7 @@ import { gateNotice, LOCKED_LINE, NOTICE_TEXT, PAUSED_LINE, PLAN_NOTICE, SERVED_
 import type { Result, Svc } from './svc'
 import { askConsent, claimAsk, CONSENT_KEY, consentState, dashboardUrl, readConsent, sharingState } from './consent'
 import { dataDir, engineDirs, envOf, readTextOf } from './engine_env'
+import { companyCommand } from './boss'
 import { ORG_PAUSED_LINE, ORG_SAVINGS_TEXT, ORG_SET_TEXT, orgChoice, orgNotice, sharingQuestion } from './org'
 
 export {
@@ -215,6 +216,7 @@ export type CommandDeps = {
   outboxFs?: ReadFs | null
   sleep?: (ms: number) => Promise<unknown> // bounds the status hello (the command hook has about 10 s in all)
   dashboardUrl?: () => Promise<string | null> // the published dashboard's artifact URL, for status
+  bossUrl?: () => Promise<string | null> // O5: the published company board's artifact URL (company admins)
 }
 
 const isObj = (v: unknown): v is Record<string, any> => typeof v === 'object' && v !== null && !Array.isArray(v)
@@ -391,7 +393,7 @@ export class Command {
     const rest = words.slice(1)
     const svc = this.d.svc
     const known = ['status', 'login', 'code', 'logout', 'sharing', 'savings', 'dashboard', 'estimate', 'served',
-      'offline', 'outbox']
+      'offline', 'outbox', 'company']
     if (!known.includes(sub)) return `Unknown subcommand "${sub.slice(0, 40)}". ${USAGE}`
     if (!AUTH_FAIL_COMMANDS.includes(sub)) {
       const st = await svc.authState(true)
@@ -419,6 +421,8 @@ export class Command {
         return this.served(rest)
       case 'offline':
         return this.offline(rest)
+      case 'company': // O5: the company admin's board and weekly summary email
+        return companyCommand({ svc, store: this.d.store, url: () => this.d.bossUrl?.() ?? Promise.resolve(null) }, rest)
       default:
         return this.outbox(rest)
     }
@@ -1041,6 +1045,7 @@ export function engineDeps($: EngineInterface, o: EngineOptions): CommandDeps {
     outboxFs: fs,
     sleep: (ms) => Promise.resolve($.clock.sleep(ms)),
     dashboardUrl: async () => dashboardUrl(readText, await dataDir($)),
+    bossUrl: async () => dashboardUrl(readText, await dataDir($), 'boss.json'),
   }
 }
 

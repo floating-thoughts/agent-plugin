@@ -7,7 +7,7 @@ export type ToolSpec = {
   input_schema: Record<string, unknown>
 }
 
-export const CONTRACT_SHA256 = "46307e1694abf110b612a3ca109a9140be8793508d9fd95443fddb4d3d52add4"
+export const CONTRACT_SHA256 = "6ac59cfc3db2613007cc3bc8783426aea3588b7789aa8d9300dbce44f7fe2737"
 
 export const API = "svc/1" as const
 export const PREFIX = "/svc/v1" as const
@@ -695,13 +695,147 @@ export const CONTRACT = {
     "checkpoint"
    ]
   },
+  "OrgSummary": {
+   "type": "object",
+   "description": "O5 boss board: the org's reported week (the last complete ISO week, UTC, the week the weekly mails report) for an org admin. total_usd = the sum of the people's savings, each rounded to cents; prev_usd = the same people's savings the week before, null with no measured day that week; people = every member, measured first (highest saving first, then by email), then the members with no measured day that week (usd null, shown as no data yet), by email; devices = distinct devices with an active sign-in; seats_paid null = no seat limit; summary_mail = the weekly org summary mail setting; mail_to = its address, masked, or null when none is set",
+   "properties": {
+    "org": {
+     "type": "string",
+     "maxLength": 200
+    },
+    "week": {
+     "type": "object",
+     "properties": {
+      "first_day": {
+       "type": "string",
+       "pattern": "^\\d{4}-\\d{2}-\\d{2}$",
+       "maxLength": 10
+      },
+      "last_day": {
+       "type": "string",
+       "pattern": "^\\d{4}-\\d{2}-\\d{2}$",
+       "maxLength": 10
+      }
+     },
+     "required": [
+      "first_day",
+      "last_day"
+     ],
+     "additionalProperties": false
+    },
+    "total_usd": {
+     "type": "number",
+     "minimum": -1000000000,
+     "maximum": 1000000000
+    },
+    "prev_usd": {
+     "anyOf": [
+      {
+       "type": "number",
+       "minimum": -1000000000,
+       "maximum": 1000000000
+      },
+      {
+       "type": "null"
+      }
+     ]
+    },
+    "people": {
+     "type": "array",
+     "maxItems": 10000,
+     "items": {
+      "type": "object",
+      "properties": {
+       "email": {
+        "type": "string",
+        "maxLength": 254
+       },
+       "usd": {
+        "anyOf": [
+         {
+          "type": "number",
+          "minimum": -1000000000,
+          "maximum": 1000000000
+         },
+         {
+          "type": "null"
+         }
+        ]
+       },
+       "devices": {
+        "type": "integer",
+        "minimum": 0,
+        "maximum": 100000
+       }
+      },
+      "required": [
+       "email",
+       "usd",
+       "devices"
+      ],
+      "additionalProperties": false
+     }
+    },
+    "seats_used": {
+     "type": "integer",
+     "minimum": 0,
+     "maximum": 1000000
+    },
+    "seats_paid": {
+     "anyOf": [
+      {
+       "type": "integer",
+       "minimum": 0,
+       "maximum": 1000000
+      },
+      {
+       "type": "null"
+      }
+     ]
+    },
+    "paused": {
+     "type": "boolean"
+    },
+    "savings": {
+     "$ref": "#/definitions/OrgSavings"
+    },
+    "summary_mail": {
+     "type": "boolean"
+    },
+    "mail_to": {
+     "anyOf": [
+      {
+       "type": "string",
+       "maxLength": 254
+      },
+      {
+       "type": "null"
+      }
+     ]
+    }
+   },
+   "required": [
+    "org",
+    "week",
+    "total_usd",
+    "prev_usd",
+    "people",
+    "seats_used",
+    "seats_paid",
+    "paused",
+    "savings",
+    "summary_mail",
+    "mail_to"
+   ],
+   "additionalProperties": false
+  },
   "OrgSavings": {
    "enum": [
     "each",
     "on",
     "off"
    ],
-   "description": "O3: the org admin's savings-record choice (each = each person decides; on or off = for everyone). The POST /auth/hello answer carries it as {\"org\": {\"savings\": <this>}} for an account in an org, only to a shell release 0.3.0 or later (an older shell, and a dev shell, may refuse an unknown key). 423 org_paused (O2) answers every signed request and the sign-in while the org's admin has paused the org; sign-out still works"
+   "description": "O3: the org admin's savings-record choice (each = each person decides; on or off = for everyone). The POST /auth/hello answer carries it as {\"org\": {\"savings\": <this>}} for an account in an org, only to a shell release 0.3.0 or later (an older shell, and a dev shell, may refuse an unknown key). O5: for an active org admin (account role admin) the field is {\"savings\": <this>, \"admin\": true}, only to a shell release 0.4.0 or later. 423 org_paused (O2) answers every signed request and the sign-in while the org's admin has paused the org; sign-out still works"
   },
   "PackTarget": {
    "enum": [
@@ -2647,6 +2781,83 @@ export const CONTRACT = {
     "purpose": "turn the weekly savings email on or off",
     "default": "off; sent only when the customer turns the weekly savings email off or back on (the email itself is on by default for customers with the usage upload on)",
     "retention": "the setting and the time it changed, kept while the account exists; audit record 13 months",
+    "sent_to": [
+     "our_service"
+    ]
+   }
+  },
+  {
+   "method": "GET",
+   "path": "/org/summary",
+   "request": null,
+   "responses": {
+    "200": {
+     "$ref": "#/definitions/OrgSummary"
+    }
+   },
+   "errors": {
+    "403": [
+     "not_in_plan",
+     "not_org_admin"
+    ]
+   },
+   "x-inventory": {
+    "service": "metrics",
+    "purpose": "the company admin's board: the company's savings last week, each person's figure and devices, seats, pause and savings settings; sends no content",
+    "default": "only for an account the operator made its company's admin; fetched for the admin's private board while the board is allowed",
+    "retention": "nothing stored; access log 30 days",
+    "sent_to": [
+     "our_service"
+    ]
+   }
+  },
+  {
+   "method": "POST",
+   "path": "/org/summary-mail",
+   "request": {
+    "type": "object",
+    "properties": {
+     "on": {
+      "type": "boolean",
+      "description": "false = stop the weekly company summary email; true = send it again"
+     }
+    },
+    "required": [
+     "on"
+    ],
+    "additionalProperties": false
+   },
+   "responses": {
+    "200": {
+     "type": "object",
+     "properties": {
+      "on": {
+       "type": "boolean"
+      }
+     },
+     "required": [
+      "on"
+     ],
+     "additionalProperties": false
+    }
+   },
+   "errors": {
+    "400": [
+     "bad_json"
+    ],
+    "403": [
+     "not_in_plan",
+     "not_org_admin"
+    ],
+    "422": [
+     "bad_request"
+    ]
+   },
+   "x-inventory": {
+    "service": "metrics",
+    "purpose": "the company admin turns the weekly company summary email on or off",
+    "default": "off; sent only when the company admin turns the summary email off or back on",
+    "retention": "the setting, kept while the company exists; audit record 13 months",
     "sent_to": [
      "our_service"
     ]

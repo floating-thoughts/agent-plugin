@@ -16,7 +16,8 @@
 import type { EngineInterface, Register } from 'claude-code'
 import { dataDir, declareCommand, engineClaudeHash, engineDirs, MARKETPLACE, onboardingNote, serveCommand } from './command'
 import { Core, type Answer } from './core'
-import { dashboardGrant, GRANT_REASON, PUBLISH_START_WAIT_MS, publishDashboard } from './dashboard'
+import { dashboardGrant, GRANT_REASON, PUBLISH_START_WAIT_MS } from './dashboard'
+import { publishBoards } from './boss' // O5: the person's board, then the company admin's
 import { Guard } from './guard'
 import { migrate, OLD_SIGNIN_KEY, OLD_SIGNIN_LINE } from './migrate'
 import { FLUSH_EVERY_MS, Outbox } from './outbox'
@@ -351,7 +352,7 @@ export const register: Register = (on) => {
       // the publish starts inside this hook (awaited up to 4 s): a $ call after it returns skips our tool.check grant
       const report = (session: string, kind: string, f: Record<string, unknown> = {}) =>
         r.core.handle({ v: 1, harness: HARNESS, kind, session, agent: null, ...f })
-      const pub = r.wiring.publish((note) => publishDashboard($, report, { interactive, note })).catch(() => undefined)
+      const pub = publishBoards($, r.wiring, report, interactive).catch(() => undefined)
       await capped(pub, r.sleep, PUBLISH_START_WAIT_MS, undefined)
     }
     return done

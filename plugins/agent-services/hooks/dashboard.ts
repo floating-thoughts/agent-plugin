@@ -9,6 +9,9 @@
 // publish that is due asks once in the dialog (not in a -p run, at most once per session; "Not now" holds 7 days).
 // With consent, register.ts's tool.check hook allows exactly this module's own calls (dashboardGrant), so the
 // Artifact tool runs without a permission rule; the user's settings are never written.
+//
+// O5: the same path publishes a second board, the company admin's (boss.ts, BOSS_BOARD: <data dir>/boss/index.html
+// and services/boss.json), with its own throttle and denial; the grant allows the calls of either board.
 import type { EngineInterface } from 'claude-code'
 import { consentState, readConsent } from './consent'
 import { dataDir } from './engine_env'
@@ -23,15 +26,20 @@ const UNREAD_RX = /\bread\b/i
 export const GRANT_REASON = 'agent-services dashboard (user allowed)' // the tool.check verdict's reason
 const INPUT_KEYS = ['action', 'file_path', 'url', 'icon'] // what this module's publish call carries
 
+/** One published board: its page and state file under the data dir, and the icon of its first publish. */
+export type Board = { page: string; state: string; icon: string }
+export const MAIN_BOARD: Board = { page: 'dashboard/index.html', state: 'services/dashboard.json', icon: 'chart' }
+export const BOSS_BOARD: Board = { page: 'boss/index.html', state: 'services/boss.json', icon: 'chart' }
+
 type State = { changed_at: number | null; url: string | null; published_at: number | null; denied: boolean }
 type Res = { deny?: string; text?: string; isError?: boolean; result?: unknown }
 /** Where the outcome goes: (kind, fields) as a core event of this session (dashboard_published, dashboard_denied). */
 export type Report = (session: string, kind: string, fields?: Record<string, unknown>) => unknown
 /** interactive: false in a -p run (no consent dialog then); note: receives a denied call's reason. */
-export type PublishOptions = { interactive?: boolean; note?: (d: { reason?: string }) => void }
+export type PublishOptions = { interactive?: boolean; note?: (d: { reason?: string }) => void; board?: Board }
 
-let lastAttempt: number | null = null
-let deniedIn: string | null = null // the session whose call was denied
+const lastAttempt = new Map<string, number>() // per board page
+const deniedIn = new Map<string, string>() // per board page: the session whose call was denied
 
 const num = (v: unknown): number | null => (typeof v === 'number' && Number.isFinite(v) ? v : null)
 const textOf = (r: Res | null): string => {
@@ -48,9 +56,9 @@ const textOf = (r: Res | null): string => {
   }
 }
 
-async function readState($: EngineInterface, dir: string): Promise<State | null> {
+async function readState($: EngineInterface, dir: string, board: Board = MAIN_BOARD): Promise<State | null> {
   try {
-    const s = JSON.parse(String(await $.fs.read(`${dir}/services/dashboard.json`)))
+    const s = JSON.parse(String(await $.fs.read(`${dir}/${board.state}`)))
     if (!s || typeof s !== 'object') {
       return null
     }
@@ -76,16 +84,18 @@ const send = async (report: Report | undefined, session: string, kind: string, f
 // Called after each main-agent turn; resolves to what it did (for the log and the tests), never rejects.
 export async function publishDashboard($: EngineInterface, report?: Report, opts: PublishOptions = {}): Promise<string> {
   try {
+    const board = opts.board ?? MAIN_BOARD
     const session = String(await $.session.id())
-    if (deniedIn === session) {
+    if (deniedIn.get(board.page) === session) {
       return 'denied_before'
     }
     const now = Number(await $.clock.now())
-    if (lastAttempt !== null && now - lastAttempt < PUBLISH_INTERVAL_MS) {
+    const last = lastAttempt.get(board.page)
+    if (last !== undefined && now - last < PUBLISH_INTERVAL_MS) {
       return 'throttled'
     }
     const dir = await dataDir($)
-    const st = await readState($, dir)
+    const st = await readState($, dir, board)
     if (!st || st.changed_at === null) {
       return 'no_page'
     }
@@ -104,8 +114,8 @@ export async function publishDashboard($: EngineInterface, report?: Report, opts
     if (consentState(await readConsent(engineStore($)), now) !== 'allow') {
       return 'not_allowed'
     }
-    lastAttempt = now
-    const input: Record<string, unknown> = { file_path: `${dir}/dashboard/index.html`, ...(st.url ? { url: st.url } : { icon: 'chart' }) }
+    lastAttempt.set(board.page, now)
+    const input: Record<string, unknown> = { file_path: `${dir}/${board.page}`, ...(st.url ? { url: st.url } : { icon: board.icon }) }
     let res = await call($, input)
     if (res.deny === undefined && res.isError === true && st.url && UNREAD_RX.test(textOf(res))) {
       const read = await call($, { action: 'read', url: st.url })
@@ -116,7 +126,7 @@ export async function publishDashboard($: EngineInterface, report?: Report, opts
       }
     }
     if (res.deny !== undefined) {
-      deniedIn = session
+      deniedIn.set(board.page, session)
       try {
         opts.note?.({ reason: typeof res.deny === 'string' ? res.deny : undefined })
       } catch {
@@ -141,7 +151,8 @@ const isObj = (v: unknown): v is Record<string, unknown> => typeof v === 'object
 /**
  * Whether a tool.check of the Artifact tool is this module's own call, to be allowed: consent is "allow" and the
  * input is the publish of <data dir>/dashboard/index.html (to the stored dashboard URL when it has one, icon chart
- * otherwise) or the read of the stored dashboard URL. The caller checks that this plugin raised the call.
+ * otherwise) or the read of the stored dashboard URL, or the same for the company board (BOSS_BOARD). The caller
+ * checks that this plugin raised the call.
  */
 export async function dashboardGrant($: EngineInterface, input: unknown): Promise<boolean> {
   try {
@@ -152,28 +163,36 @@ export async function dashboardGrant($: EngineInterface, input: unknown): Promis
       return false
     }
     const dir = await dataDir($)
-    const url = (await readState($, dir))?.url ?? null
-    const keys = Object.keys(input)
-    if (input.action === 'read') {
-      return url !== null && input.url === url && keys.every(k => k === 'action' || k === 'url')
+    for (const board of [MAIN_BOARD, BOSS_BOARD]) {
+      if (boardCall(input, dir, board, (await readState($, dir, board))?.url ?? null)) {
+        return true
+      }
     }
-    if (input.action !== undefined && input.action !== 'publish') {
-      return false
-    }
-    if (!keys.every(k => INPUT_KEYS.includes(k)) || input.file_path !== `${dir}/dashboard/index.html`) {
-      return false
-    }
-    if (input.url !== undefined) {
-      return url !== null && input.url === url && input.icon === undefined
-    }
-    return input.icon === undefined || input.icon === 'chart'
+    return false
   } catch {
     return false
   }
 }
 
+function boardCall(input: Record<string, unknown>, dir: string, board: Board, url: string | null): boolean {
+  const keys = Object.keys(input)
+  if (input.action === 'read') {
+    return url !== null && input.url === url && keys.every(k => k === 'action' || k === 'url')
+  }
+  if (input.action !== undefined && input.action !== 'publish') {
+    return false
+  }
+  if (!keys.every(k => INPUT_KEYS.includes(k)) || input.file_path !== `${dir}/${board.page}`) {
+    return false
+  }
+  if (input.url !== undefined) {
+    return url !== null && input.url === url && input.icon === undefined
+  }
+  return input.icon === undefined || input.icon === board.icon
+}
+
 // For the tests: forget this process's attempt and denial.
 export function resetDashboard(): void {
-  lastAttempt = null
-  deniedIn = null
+  lastAttempt.clear()
+  deniedIn.clear()
 }
