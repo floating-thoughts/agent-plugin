@@ -2,6 +2,7 @@ import type { EngineInterface } from 'claude-code'
 import { ensureAgentIgnore } from './agent_files'
 import { CHECK_MAX } from './brief_check'
 import { redact } from './redact'
+import { finishedFromList, finishedFromNotification, finishedFromSpawn, isFinished, markFinished, markLive } from './quiet'
 import { jobsDir } from './task_state_io'
 import { vaultMask } from './vault'
 
@@ -54,6 +55,12 @@ const STATUSES: readonly string[] = ['running', 'waiting', 'stalled', 'failed', 
 export const jobIdOk = (v: unknown): v is string => typeof v === 'string' && /^[A-Za-z0-9_.:-]{1,80}$/.test(v)
 export const jobOpen = (j: Job): boolean => j.status === 'running' || j.status === 'waiting' || j.status === 'stalled'
 export const jobHasResult = (j: Job): boolean => j.status === 'done_unverified' || j.status === 'done_verified' || j.status === 'failed'
+export function jobUnread(j: Job, now: number): boolean {
+  if (!j || j.unread !== true) return false
+  if (j.status !== 'done_unverified') return true
+  const end = [j.ended_at, j.updated_at, j.last_activity_at].find((v) => typeof v === 'number' && Number.isFinite(v))
+  return typeof end !== 'number' || !Number.isFinite(now) || now - end <= 24 * 3600_000
+}
 
 export function fitLines(head: string, lines: readonly string[], max: number, extra = 0): string {
   const more = (n: number): string => `- and ${n} more`
@@ -270,17 +277,19 @@ function remember($: EngineInterface, jobs: Job[]): void {
 }
 
 export async function listJobs($: EngineInterface): Promise<Job[]> {
+  return (await readJobs($)).jobs
+}
+
+export async function readJobs($: EngineInterface): Promise<{ path: string | null; ok: boolean; jobs: Job[] }> {
   try {
     const p = await pathOf($)
-    if (p === null) {
-      return []
-    }
+    if (p === null) return { path: null, ok: false, jobs: [] }
     const raw = await readRaw($, p)
     const jobs = raw.kind === 'ok' ? raw.ledger.jobs : []
     if (raw.kind === 'ok' || raw.kind === 'absent') remember($, jobs)
-    return jobs
+    return { path: p, ok: raw.kind === 'ok', jobs }
   } catch {
-    return []
+    return { path: null, ok: false, jobs: [] }
   }
 }
 
@@ -498,8 +507,15 @@ function listedStatus(status: unknown): JobStatus | 'live' | null {
 const listWaitingNote = 'the engine lists it as waiting'
 const askNote = 'a permission question waits for you'
 
-export function jobsAfterList(jobs: Job[], listed: readonly Obj[], now: number): Job[] | null {
+export function jobsAfterList(jobs: Job[], listed: readonly Obj[], now: number, finished?: (id: string) => boolean): Job[] | null {
   let changed = false
+  if (typeof finished === 'function') {
+    for (const j of jobs) {
+      if (!jobOpen(j) || !(finished(j.id) || (typeof j.call === 'string' && finished(j.call)))) continue
+      putRow(jobs, { id: j.id, status: 'done_unverified', note: 'its end was reported (task notification or agent result); its result is not checked yet', last_activity_at: now }, now)
+      changed = true
+    }
+  }
   for (const a of listed) {
     const id = str(a?.id)
     const j = id ? jobs.find((x) => x.id === id) : undefined
@@ -537,6 +553,7 @@ async function sessionOf($: EngineInterface): Promise<string> {
 export async function jobSpawned($: EngineInterface, ev: Obj, spawned: Obj, rt?: Ready): Promise<void> {
   try {
     if (!isObj(ev) || !isObj(spawned)) return
+    finishedFromSpawn(spawned)
     const id = str(spawned.agentId)
     if (!id || (ev.background !== true && ev.run_in_background !== true)) return
     if (!(await jobsLive(rt))) return
@@ -573,6 +590,9 @@ export async function jobsToolEnd($: EngineInterface, e: Obj, done: Obj, rt?: Re
     const stopId = tool === 'TaskStop' && ok ? str(e.task_id) ?? str(e.shell_id) ?? str(e.agent_id) : null
     const resumeId = tool === 'SendMessage' && ok ? str(e.to) ?? str(e.agentId_to) ?? str(e.recipient) ?? str(e.agent_id) : null
     const agent = str(e.agentId)
+    if (ok && (tool === 'Agent' || tool === 'Task')) finishedFromSpawn(done.result)
+    if (stopId) markFinished(stopId)
+    if (resumeId) markLive(resumeId)
     const at = Date.now()
     const touch = agent !== null && at - (touchedAt.get(agent) ?? 0) >= JOB_TOUCH_EVERY_MS
     if (!start && !stopId && !resumeId && !touch) return
@@ -611,6 +631,7 @@ export async function jobsToolEnd($: EngineInterface, e: Obj, done: Obj, rt?: Re
 
 export async function jobsNotification($: EngineInterface, text: unknown, rt?: Ready): Promise<void> {
   try {
+    finishedFromNotification(text)
     const notes = noticesOf(text)
     if (!notes.length || !(await jobsLive(rt))) return
     const session = await sessionOf($)
@@ -641,6 +662,7 @@ export async function jobsNotification($: EngineInterface, text: unknown, rt?: R
 export async function jobSubagentStop($: EngineInterface, agentId: unknown, rt?: Ready): Promise<void> {
   try {
     const id = str(agentId)
+    if (id) markFinished(id)
     if (!id || !(await jobsLive(rt))) return
     await updateJobs($, (jobs, now) => {
       const j = jobs.find((x) => x.id === id)
@@ -676,7 +698,8 @@ export async function jobsFromList($: EngineInterface, listed: unknown, rt?: Rea
   try {
     if (!(await jobsLive(rt))) return
     const list = Array.isArray(listed) ? listed.filter(isObj) : []
-    await updateJobs($, (jobs, now) => jobsAfterList(jobs, list, now))
+    finishedFromList(list)
+    await updateJobs($, (jobs, now) => jobsAfterList(jobs, list, now, isFinished))
   } catch {}
 }
 

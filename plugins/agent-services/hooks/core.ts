@@ -8,14 +8,14 @@ import { sha256Hex } from './e2e'
 import { pyRound } from './pyfmt'
 import { Records } from './records'
 import { SessionSummary } from './summary'
-import type { Clock, GateState, KV, Random, ReadText, SvcResult, Transport } from './engine_types'
-import { indexed, isAbsPath, joinPath, normpath, normPath } from './paths'
+import type { Clock, GateState, KV, Random, SvcResult, Transport } from './engine_types'
+import { filesAnswer, install, KIT_WAIT_MS, KitFilesError, kitJob, onDisk, type KitFilesOptions, type KitResult, type ServedFile } from './kit_files'
 import { GATE_NOTICES, LOCKED_LINE, PAUSED_LINE as SIGN_IN_LINE, PLAN_NOTICE } from './svc'
 import { checkpointToolName, explicitFor, noteCallBrief, noteCallExplicit, noteCallRoute, noteRouteHint, setTableAsk, userAskedOverride, userAskedReview } from './flow_state'
 import { ADVICE_LABEL, adviceIn, takeTurn } from './delegate'
 import { RX_INPUT_MAX, servedRegex } from './rules'
 
-export { indexed, normpath, normPath } from './paths'
+export { normpath, normPath } from './paths'
 
 export const HARNESSES = ['claude-code', 'opencode', 'codex', 'cursor', 'gemini', 'other']
 export const KINDS = ['session_start', 'dispatch', 'dispatched', 'step', 'step_end', 'pre_tool', 'post_tool', 'turn_end',
@@ -28,8 +28,8 @@ export const HELLO_DEADLINE_MS = 30000
 export const AUTH_FAIL_REASONS = ['login', 'locked', 'paused']
 
 export const CHECKPOINT_MARK = 'Checkpoint reached:'
-export const CHECKPOINT_NOW = ADVICE_LABEL + ' The server suggests a checkpoint now: once this ' +
-  'stretch is done, call the checkpoint tool and keep the items below in the summary.'
+export const CHECKPOINT_NOW = ADVICE_LABEL + ' The server suggests a checkpoint now: call the checkpoint tool once this ' +
+  'stretch is done.'
 export const CHECKPOINT_SHOWN = 'agent-services: the context is large; a checkpoint is suggested now. Claude compacts at the next ' +
   'finished step and carries on from the summary.'
 const CKPT_KEY = 'checkpoint_counts'
@@ -42,11 +42,6 @@ export { GATE_NOTICES, LOCKED_LINE, PLAN_NOTICE, SIGN_IN_LINE }
 
 export function isCommit(cmd: string): boolean {
   return servedRegex('patterns', 'commit')?.test(cmd.slice(0, RX_INPUT_MAX)) === true
-}
-
-export function sedRangePath(cmd: string): string | null {
-  const m = servedRegex('patterns', 'sed_range')?.exec(cmd.slice(0, RX_INPUT_MAX))
-  return m && typeof m[1] === 'string' ? m[1].replace(/^["']|["']$/g, '') : null
 }
 
 const DEFS = (CONTRACT as unknown as { definitions: Record<string, { enum: string[] }> }).definitions
@@ -232,6 +227,7 @@ export function checkArgs(tool: string, args: unknown): void {
     const rx = /^[a-z][a-z0-9-]{1,39}$/
     if (typeof args.key !== 'string' || !rx.test(args.key)) bad('key')
     if (has(args, 'topic') && (typeof args.topic !== 'string' || !rx.test(args.topic))) bad('topic')
+    if (has(args, 'files') && typeof args.files !== 'boolean') bad('files')
   } else if (tool === 'savings') {
     if (has(args, 'detail') && !((schema.properties.detail as { enum: unknown[] }).enum).includes(args.detail)) bad('detail')
   } else if (tool === 'checkpoint_advice') {
@@ -290,6 +286,7 @@ class Session {
   routed = new Map<string, unknown>()
   dispatches: [unknown, unknown][] = []
   tableDue = true
+  tablePointer = false
 
   constructor(harness: string, cwd: string | null = null, transcript: string | null = null, injectOn: string[] | null = null, now = 0) {
     this.harness = harness
@@ -313,6 +310,7 @@ export interface Guard {
   fetch(token: string, phase: string): Promise<{ version?: unknown; catalog?: unknown; items?: { id: unknown; text: unknown }[] }>
   close(token: string): unknown
   fetchToolbox?(token: string, key: string, topic?: string): Promise<Record<string, unknown>>
+  fetchToolboxFiles?(token: string, key: string, version: string): Promise<ServedFile[]>
 }
 
 export type CoreOptions = {
@@ -320,7 +318,6 @@ export type CoreOptions = {
   store: KV
   clock?: Clock
   random?: Random
-  readText?: ReadText
   gated?: boolean
   guard?: Guard | null
   metrics?: { savings(): Promise<SvcResult> } | null
@@ -328,6 +325,7 @@ export type CoreOptions = {
   dashboard?: { onTurnEnd(): unknown; published(url: string): unknown; denied(): unknown } | null
   counters?: Omit<CountersOptions, 'clock' | 'random'>
   harness?: string
+  kitFiles?: KitFilesOptions | null
 }
 
 const OFF: SvcResult = { ok: false, status: null, body: null, error: 'service_off' }
@@ -340,12 +338,12 @@ export class Core {
   readonly receipts: Receipts
   readonly summary = new SessionSummary()
   private readonly clock: Clock
-  private readonly readText: ReadText | null
   private readonly gated: boolean
   private readonly guard: Guard | null
   private readonly metrics: { savings(): Promise<SvcResult> } | null
   private readonly status: { update(): unknown } | null
   private readonly dashboard: CoreOptions['dashboard']
+  private readonly kitFiles: KitFilesOptions | null
   private readonly sessionsMap = new Map<string, Session>()
   private lastSession: string | null = null
   private readonly noticed = new Set<string>()
@@ -361,12 +359,12 @@ export class Core {
     this.store = o.store
     this.clock = o.clock ?? (() => Date.now())
     const random = o.random ?? ((n: number) => globalThis.crypto.getRandomValues(new Uint8Array(n)))
-    this.readText = o.readText ?? null
     this.gated = o.gated !== false
     this.guard = o.guard ?? null
     this.metrics = o.metrics ?? null
     this.status = o.status ?? null
     this.dashboard = o.dashboard ?? null
+    this.kitFiles = o.kitFiles ?? null
     this.records = new Records(o.transport, { store: o.store, random, harness: o.harness })
     setTableAsk(() => this.routingTable())
     this.counters = new Counters(o.store, { ...(o.counters ?? {}), clock: this.clock, random })
@@ -657,7 +655,10 @@ export class Core {
     const notice = r.notice
     const fb = r.fallback
     noteCallBrief(e.call, r.brief_rule)
-    const routeText = [r.note, r.table].filter((x): x is string => typeof x === 'string' && x !== '').join('\n')
+    const pointer = s.tablePointer && typeof r.table !== 'string' && r.decision !== 'deny'
+      ? 'The routing table was given earlier in this session; /agent-services models table shows it again.' : null
+    if (pointer !== null) s.tablePointer = false
+    const routeText = [r.note, r.table, pointer].filter((x): x is string => typeof x === 'string' && x !== '').join('\n')
     if (r.decision === 'route') {
       s.dispatches.push([e.call, r.effort ?? null])
       if (s.dispatches.length > 64) s.dispatches.splice(0, s.dispatches.length - 64)
@@ -744,36 +745,8 @@ export class Core {
           s.todosDone += 1
         }
       }
-      const model = (e.agent !== null ? s.models.get(e.agent as string) : undefined) || s.mainModel
-      const cwd = s.cwd
-      this.spawn(() => this.indexRead(e, cwd, model ?? null))
     }
     return this.deliver(s, e) ?? answer()
-  }
-
-  private async indexRead(e: Ev, cwd: string | null, model: string | null): Promise<void> {
-    const readText = this.readText
-    if (!readText) return
-    const tool = e.tool
-    const inp = e.input as Ev
-    let path: string | null = null
-    if (tool === 'Read' && typeof inp.file_path === 'string' && (!nil(inp.offset) || !nil(inp.limit))) {
-      path = inp.file_path
-    } else if (tool === 'Bash' && typeof inp.command === 'string') {
-      path = sedRangePath(inp.command)
-    }
-    if (!path) return
-    let file = normPath(path)
-    if (!isAbsPath(file)) {
-      if (typeof cwd !== 'string') return
-      file = normPath(normpath(joinPath(cwd, path)))
-    } else if (/^[A-Za-z]:\//.test(file)) {
-      file = normPath(normpath(file))
-    }
-    if (!model || !(await indexed(file, readText))) return
-    const text = await readText(file)
-    if (text === null) return
-    await this.counters.index(e.session as string, model, { text: text.replace(/\r\n?/g, '\n') })
   }
 
   private onTurnEnd(e: Ev): Answer {
@@ -841,10 +814,9 @@ export class Core {
       const r = await this.records.checkpoint(session, { ...counts, turn } as never)
       if (r && !r.fallback && r.note) adviceIn(r.note, r.cases)
       if (r && r.now === true && !r.fallback) {
-        const lines = (r.keep_lines ?? []).filter((x) => typeof x === 'string')
         const tool = checkpointToolName()
         const note = tool ? CHECKPOINT_NOW.replace('the checkpoint tool', `the checkpoint tool (${tool})`) : CHECKPOINT_NOW
-        if (!s.advised) s.pendingContext = [note, ...lines]
+        if (!s.advised) s.pendingContext = [note]
       }
     } catch {
     } finally {
@@ -859,7 +831,7 @@ export class Core {
 
   private async onCompaction(e: Ev): Promise<Answer> {
     const s = this.state(e)
-    if (e.agent === null && e.done === true && e.trigger !== 'precompute') s.tableDue = true
+    if (e.agent === null && e.done === true && e.trigger !== 'precompute' && !s.tableDue) s.tablePointer = true
     const mainModel = s.mainModel
     if (e.agent !== null || e.trigger === 'precompute' || e.done !== true) return answer()
     const ins = e.instructions
@@ -897,7 +869,7 @@ export class Core {
     } catch {
     }
     s.reset(this.now())
-    s.tableDue = true
+    if (!s.tableDue) s.tablePointer = true
     await this.keepCounts(s, e.session as string)
     return answer()
   }
@@ -958,6 +930,29 @@ export class Core {
     }
   }
 
+  private async toolboxFiles(token: string, key: string, b: Record<string, unknown>, left: () => number): Promise<Record<string, unknown>> {
+    const head = { key, title: b.title ?? null, version: b.version ?? null, fallback: null }
+    const o = this.kitFiles
+    const g = this.guard
+    if (b.kind !== 'pack' || typeof b.version !== 'string') return { ...head, files: { status: 'no_files' } }
+    if (!o || !g || typeof g.fetchToolboxFiles !== 'function') return { ...head, files: { status: 'unavailable' } }
+    const version = b.version
+    const job = kitJob(o, key, version, async () => (await onDisk(o, key, version)) ?? install(o, key, version, await g.fetchToolboxFiles!(token, key, version)))
+    let timer: ReturnType<typeof setTimeout> | undefined
+    const late = new Promise<null>((res) => { timer = setTimeout(() => res(null), Math.max(0, Math.min(o.waitMs ?? KIT_WAIT_MS, left() - 1500))) })
+    try {
+      const r: KitResult | null = await Promise.race([job, late])
+      if (!r) return { ...head, files: { status: 'downloading', hint: 'The files are still downloading; call the toolbox tool again with files true in a moment.' } }
+      return { ...head, files: filesAnswer(r, key) }
+    } catch (e) {
+      if (e instanceof KitFilesError) return { ...head, files: { status: 'failed', reason: e.reason } }
+      const code = typeof (e as { code?: unknown })?.code === 'string' ? (e as { code: string }).code : 'failed'
+      return { ...head, files: code === 'no_files' ? { status: 'no_files' } : { status: 'failed', reason: code } }
+    } finally {
+      clearTimeout(timer)
+    }
+  }
+
   private async answerTool(tool: string, args: Ev, session: string, harness: string, cwd: string | null,
     left: () => number): Promise<Record<string, unknown>> {
     if (tool === 'router_advice') {
@@ -1001,6 +996,7 @@ export class Core {
       if (!this.guard || typeof this.guard.fetchToolbox !== 'function') return openAnswer(tool, args)
       const g = await this.guardSession(session, 'auto')
       const b = await this.guard.fetchToolbox(g.session_token, args.key as string, has(args, 'topic') ? args.topic as string : undefined)
+      if (args.files === true) return this.toolboxFiles(g.session_token, args.key as string, b, left)
       return { ...b, fallback: null }
     }
     if (tool === 'savings') {

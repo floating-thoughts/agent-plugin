@@ -25,10 +25,10 @@ export const HOOK_EFFECTS: Readonly<Record<string, string>> = {
 export const HOOKS: readonly HookRow[] = [
   {
     event: 'session.start', matcher: '', file: 'register.ts', does: ['network', 'file', 'process', 'ui', 'count'],
-    what: 'Registers the slash command and the setup tool; once signed in (or right after you sign in) also the savings, toolbox, status, run_command and task_state tools. In the background: the sign-in check, whether this session id was seen at an earlier start (a resumed session; the id is kept in the plugin store and the service is asked once for the resume items, sending only the event name), the daily upload of the savings record ' +
+    what: 'Registers the slash command and the setup tool; once signed in (or right after you sign in) also the savings, toolbox, status and task_state tools. In the background: the sign-in check, whether this session id was seen at an earlier start (a resumed session; the id is kept in the plugin store and the service is asked once for the resume items, sending only the event name), the daily upload of the savings record ' +
       '(only after you chose to upload, never before your own answer, also when your company turned the savings ' +
       'record on; with "Upload from now on only" nothing from before the day you chose), the request-log cleanup (90 days), the working methods for the first ' +
-      'prompt (only at methods level suggest) and the CLAUDE.md methods file (only at methods on), the layered memory\'s git facts (signed in, not at methods level off: git rev-parse, ls-files and log of the project run on this computer and written to .agent/memory-facts.json; nothing sent), a one-time move ' +
+      'prompt (only at methods level suggest) and the CLAUDE.md methods file (only at methods on), a one-time move ' +
       'from an older version, and the update check (`claude plugin list --json` and `claude plugin marketplace ' +
       'update agent-plugin`; it never updates the plugin; not in a session nobody can be asked in), and, only when a usage scan tool sits at ' +
       '~/.agent-services/tools/usage_scan.py, that tool with Python (`py -3`, `python3` or `python`; at most every 15 minutes; ' +
@@ -60,10 +60,6 @@ export const HOOKS: readonly HookRow[] = [
       'methods level is off, the service\'s speed-up suggestion is added once to the end of the subagent\'s prompt, ' +
       'labelled as an agent-services suggestion. ' +
       'With the served rule tables (signed in): a subagent whose task names a step with [step:ID] is denied while that step\'s dependencies in the plan are not done (the ## Plan step lines of agent-state.md; the old .agent/steps.json only when there are none) (a step counts as done only with its evidence written down; [override: reason] lets it start; not while routing is off); the weekly usage line that stops new subagents applies to every signed-in account with the served rules (a plan or replan dispatch of the main conversation stops a few points earlier), and not while routing is off; the main conversation\'s subagents are started in the background. A subagent whose task names a step that a running or waiting background job already claims (one that showed life in the last 2 hours), or that another subagent started a moment ago took, is denied ([override: reason] lets it start; not while routing is off). A background subagent gets a row in the project\'s .agent/jobs.json. These checks send nothing. ' +
-      'Signed in, also while routing is off: a fingerprint of the brief (a hash of the project folder, the description and ' +
-      'the prompt, never the text) goes into the new agent\'s row of the project\'s job ledger (.agent/jobs.json), and when ' +
-      'the same brief finished in this project within 24 hours, the Agent call\'s result gets a suggestion naming that ' +
-      'agent and its result file. Nothing is sent and nothing is denied for it. ' +
       'Write ownership (signed in, also while routing is off): for a new background subagent the brief is checked for its goal, the command that checks success, the files it may change, what it must not touch and the form of its hand-back; the parts missing, owns: entries not taken as claims, and claims that overlap another open background job\'s are said in a note on the Agent call\'s result; its owns: and check: lines are written to the project\'s .agent/jobs.json. Nothing is sent. ' +
       'The globs on an "acceptance:" line of a subagent\'s brief (signed in, also while routing is off) are kept in the project\'s .agent/evidence.json for the acceptance lock. ' +
       'Signed in, not while routing is off: a subagent that would be the 4th level below the main conversation, or whose ' +
@@ -84,9 +80,8 @@ export const HOOKS: readonly HookRow[] = [
   {
     event: 'turn.step', matcher: '', file: 'register.ts', does: ['rewrite', 'count'],
     what: 'Counts token usage locally. For a subagent whose model agent-services set, it also sets the effort of ' +
-      'its model requests to the advised effort. Signed in or not, it also notes in memory whether each main request ' +
-      'gave text or a tool call, how it ended and its token counts, and the model each subagent request names (for the ' +
-      'empty-turn guard, the cache-break line and the model circuit of recover.ts).',
+      'its model requests to the advised effort. Signed in or not, it also notes in memory the token counts of each main request ' +
+      '(for the cache-break line of cache_break.ts).',
     shown: 'The dim line at the subagent\'s start names it.',
   },
   {
@@ -104,7 +99,6 @@ export const HOOKS: readonly HookRow[] = [
       'With the served rule tables (signed in): browser tools and WebFetch are denied on webmail sites and on a tab seen showing one (navigating that tab away or closing it stays allowed); secrets in a tool\'s output are masked again; a subagent report longer than the served cap is saved whole in a file in the agent-services data folder and the conversation gets its opening and the file\'s path; the test-author lock denies another subagent\'s change to a test file an agent wrote in this session and, where the served rules hide test reads (product accounts: only in a project whose .agent/test-lock.json sets "hide_tests": true), another subagent\'s reads of it (a Glob, or a Grep over a folder, is not checked); a requirements file the served rules name (agent-requirements.md on product accounts), locked by a marker line among its opening lines that the served rules also give ("Status: locked" on product accounts; a file marked "Status: draft" is not locked), takes only an amendment appended at its end by the main conversation (never a shell command); on an account whose served rules include the commit check (not product accounts), a commit whose Co-Authored-By names another model than the agent runs on is denied; when the calls of the main conversation in one turn reach a count or a result size the served delegation table names, the result gets the note of that table suggesting a subagent for such work (counted in memory only). None of this sends anything.' +
       ' Run limits (signed in, not at methods level off): the first foreground Bash or PowerShell call of the main conversation with a command head from the public list asks the service about that head, once per head and session (only the head is sent; it waits at most 1 second, then goes on without an answer); when the answer says such commands are better run in the background, its note is added once to the result of a call with that head.' +
       ' Just-in-time items (signed in, not at methods level off, main conversation): the first edit of a UI file, or a write of agent-state.md that makes it running, adds plan steps or checks every step done, asks the service once per moment and session for that moment\'s items (only the event name is sent; agent-state.md is read on this computer before and after the write); the labelled note goes with this call\'s result when it comes within 1 second, else with a later one.' +
-      ' Layered memory (signed in, not at methods level off): the first Read, Edit, Write, MultiEdit or NotebookEdit of a file in a module listed in the project\'s .agent/memory/modules.md adds that module\'s introduction (.agent/memory/modules/<id>.md, masked) to the result, once per module and agent, at most the served number per agent; a write of an introduction records the module\'s current git hash in .agent/memory-facts.json (local git only). Nothing is sent.' +
       ' Background jobs (signed in): a subagent, workflow or shell command started in the background gets a row in the project\'s .agent/jobs.json; TaskStop marks it cancelled, a SendMessage to a finished or stalled one marks it running again, and a subagent\'s tool calls count as its signs of life (written at most every 30 seconds). Nothing of it is sent.' +
       ' The acceptance lock: it denies a subagent\'s Edit, Write, MultiEdit or NotebookEdit of a file its own brief names on ' +
       'an "acceptance:" line. The evidence gate: after a Bash or PowerShell call it keeps, in the project\'s ' +
@@ -164,7 +158,7 @@ export const HOOKS: readonly HookRow[] = [
   },
   {
     event: 'turn.complete', matcher: '', file: 'register.ts', does: ['network', 'file', 'process', 'ui'],
-    what: 'Asks the service whether this is a good moment to compact (counters only). Layered memory: when the project\'s git commit moved since the facts were last computed, .agent/memory-facts.json is computed again in the background (local git only; the turn does not wait; nothing sent). Refreshes the usage panel\'s ' +
+    what: 'Asks the service whether this is a good moment to compact (counters only). Refreshes the usage panel\'s ' +
       'figures at most every 10 minutes, running the usage scan tool at ~/.agent-services/tools/usage_scan.py first ' +
       'when it is there (in the background, at most every 15 minutes, nothing sent). Keeps your private ' +
       'savings page (and a company admin\'s board) current, only when you allowed it: the page is published once ' +
@@ -203,8 +197,8 @@ export const HOOKS: readonly HookRow[] = [
       'of the plan ready to start (the ## Plan step lines of agent-state.md, or the old .agent/steps.json when there are none), the just-in-time items that are due (a resumed session, a new module or every plan step done in agent-state.md, read on this computer; the service gets only the event name, once per moment and session), and once per session the hint the routing service sent for a subagent ' +
       'without a task type word, each labelled as an agent-services note. It notes locally whether ' +
       'your message asks for a review (the routing request carries only yes or no). ' +
-      'With the served rule tables (signed in): choices kept for an earlier account of the same person may be moved to the signed-in account, and a one-line notice is shown once if a choice kept for another account was not moved; secrets in your prompt (API keys, tokens, private keys, passwords after key= or --password) are replaced by {{secret:NAME}} placeholders before the model sees them; the real values stay in memory for this session only, never written or sent. A long background subagent report is shortened the same way as in tool.call, and the shell watch adds its notes (queued run_command output, usage-limit alerts) for the main conversation. A task notification closes its background job in the project\'s .agent/jobs.json, and a main prompt gets a note naming the jobs of this session whose status changed since the last prompt (not for the notification\'s own job). Once per conversation (and again after a compaction): a note ' +
-      'pointing at the project\'s .agent/handover.md when it lists open work, a block with the project\'s layered memory (signed in, not at methods level off: .agent/memory/project.md and modules.md with each module\'s introduction marker from .agent/memory-facts.json, masked, read on this computer), and naming the jobs stopped because ' +
+      'With the served rule tables (signed in): choices kept for an earlier account of the same person may be moved to the signed-in account, and a one-line notice is shown once if a choice kept for another account was not moved; secrets in your prompt (API keys, tokens, private keys, passwords after key= or --password) are replaced by {{secret:NAME}} placeholders before the model sees them; the real values stay in memory for this session only, never written or sent. A long background subagent report is shortened the same way as in tool.call, and the shell watch adds its usage-limit alerts for the main conversation. A task notification closes its background job in the project\'s .agent/jobs.json, and a main prompt gets a note naming the jobs of this session whose status changed since the last prompt (not for the notification\'s own job). Once per conversation (and again after a compaction): a note ' +
+      'pointing at the project\'s .agent/handover.md when it lists open work, and naming the jobs stopped because ' +
       'their session ended. Signed in: notes when you last wrote (in the plugin store, key reach_gate) so no alert ' +
       'interrupts you while you are here. After you were away for 20 minutes or more, adds one note listing what waits ' +
       'for you (decisions, results to confirm, failures, finished work), the same list as /agent-services inbox. The ' +
@@ -257,11 +251,9 @@ export const HOOKS: readonly HookRow[] = [
   },
   {
     event: 'session.append', matcher: '', file: 'register.ts', does: ['rewrite'],
-    what: 'With the served rule tables (signed in): after a compaction, the re-attached rows of skills invoked ' +
-      'earlier, files read earlier and the deferred tool list are rewritten to one line each (instruction, memory, ' +
-      'plan and task files stay whole), and a secret in any kept row is ' +
-      'masked. It counts, per day and model, the estimated tokens removed; nothing else is kept or sent.',
-    shown: 'Nothing; the transcript keeps the one-line rows.',
+    what: 'With the served rule tables (signed in): a secret in any kept conversation row is masked, and a task ' +
+      'notification read mid-turn closes its background job. Nothing is kept or sent.',
+    shown: 'Nothing; the transcript keeps the masked rows.',
   },
   {
     event: 'tool.call', matcher: 'tool: Bash, PowerShell', file: 'cmdguard.ts', does: ['deny', 'file'],
@@ -271,12 +263,6 @@ export const HOOKS: readonly HookRow[] = [
       'while other agents are running; each denial says how to write the command instead, and is appended to the ' +
       'project\'s .agent/audit.jsonl (never the command). Runs locally; sends nothing.',
     shown: 'The denial reason.',
-  },
-  {
-    event: 'tool.call', matcher: 'tool: mcp__agent-services__run_command', file: 'engines.ts', does: ['answer'],
-    what: 'Answers the run_command tool (main conversation only): /reload-plugins or /context is queued for the ' +
-      'idle session, any other command is refused. Answered on this machine; nothing is sent.',
-    shown: 'The tool call and its answer; the command output comes with the next message.',
   },
   {
     event: 'tool.call', matcher: 'tool: mcp__agent-services__task_state', file: 'engines.ts', does: ['answer', 'file'],
@@ -298,12 +284,6 @@ export const HOOKS: readonly HookRow[] = [
       'first, files git tracks are never deleted, and files changed after the next snapshot stop it unless they are ' +
       'left as they are. It runs git on this machine; nothing is sent.',
     shown: 'The tool call and its answer.',
-  },
-  {
-    event: 'tool.call', matcher: 'tool: mcp__agent-services__brief_pack', file: 'engines.ts', does: ['answer'],
-    what: 'Answers the brief_pack tool: packs a subagent brief (task word, goal, owns, check, hand-back) and checks it ' +
-      'with the same rules the spawn check uses, or says what is missing. Answered on this machine; nothing is sent.',
-    shown: 'The packed brief, or the reasons it was refused, to Claude only.',
   },
   {
     event: 'tool.describe', matcher: 'tool: mcp__agent-services__undo', file: 'engines.ts', does: ['answer'],
@@ -347,14 +327,7 @@ export const HOOKS: readonly HookRow[] = [
       'with run_in_background) and asks the agent whether it ' +
       'was stuck. Signed in, every automatic continuation (this stop\'s send-back and the idle one) is also capped at 5 per ' +
       'prompt of yours, never follows a turn you interrupted (until you write again) and the idle one never a turn ' +
-      'that ended on an error; after 3 rounds without progress (no file edited, no green check) or 5 with the same ' +
-      'error it pauses for 30 minutes and says why once. The watch tick also reads the background subagent and ' +
-      'workflow rows of the project\'s .agent/jobs.json: one quiet past 15 minutes (20 for a workflow; judged by its ' +
-      'output file, its activity and its tool calls) is marked stalled and the main conversation is told to resume it ' +
-      'by id with SendMessage, the second time to use one model tier up, the third time you are told and the advice ' +
-      'stops (the retry wait doubles from 10 seconds to 5 minutes; kept in the plugin store, key stall_ladder). ' +
-      'A main turn whose requests gave no text and no tool call is sent back to continue, at most twice per prompt of ' +
-      'yours, never after you interrupted, under the same caps. ' +
+      'that ended on an error. ' +
       'The watch tick also sends one notification when a background job, a question or a task has waited for you for ' +
       'more than 5 seconds and you have not written in the last 3 minutes. Every alert of the plugin goes through one ' +
       'gate: at most 20 a day, one per subject per 30 minutes, none while you are here, and never more than 120 ' +
@@ -367,23 +340,12 @@ export const HOOKS: readonly HookRow[] = [
     event: 'classic.SubagentStop', matcher: 'stop_hook_active: [true, false]', file: 'watch.ts', does: ['deny', 'context', 'file'],
     what: 'The same check as classic.Stop, for a subagent that stops with a moved command still running. A stop that is not ' +
       'sent back marks the subagent\'s background job done (not checked yet) in the project\'s .agent/jobs.json, then ' +
-      'verified when the job\'s declared check passed after its last edit, and writes the ended agent\'s brief ' +
-      'fingerprint and transcript path into its row. Sends nothing.',
+      'verified when the job\'s declared check passed after its last edit, and writes the ended agent\'s ' +
+      'transcript path into its row. Sends nothing.',
     shown: 'A note to the subagent.',
   },
   {
-    event: 'classic.StopFailure', matcher: 'error: rate_limit, overloaded, server_error, timeout, authentication_failed, oauth_org_not_allowed, account_on_hold, verification_required, billing_error, cloud_credential_error, invalid_request, model_not_found, max_output_tokens, unknown', file: 'recover.ts', does: ['context', 'ui', 'count'],
-    what: 'With the served rule tables (signed in): a turn of the main conversation that ended on an API error is handled by the error\'s class, a word Claude Code gives (never the error\'s text). ' +
-      'A temporary one (overloaded, server_error) is retried after 30 seconds, then 1, 2 and 4 minutes, at most 4 times per prompt of yours; an unknown one once. ' +
-      'Each retry is said in a dim line and is sent only when the continuation gate allows it (never after a turn you interrupted, at most 5 automatic rounds per prompt of yours, ' +
-      'paused after 3 rounds without progress) and only while someone can see the session; a prompt of any kind cancels a waiting retry. ' +
-      'An account, sign-in or billing error, or a request the API refused, is never retried: you always get a notification (through the alert gate with its presence, cooldown and daily limits off); a retry held back by the gate is told too (presence and daily limits off). The usage limit (rate_limit) stays with the wait of watch.ts. ' +
-      'A subagent\'s rate-limit or server error counts against its model: two within 5 minutes open that model\'s circuit, and the routing line of the next subagent calls advises another tier ' +
-      'until, after 60 seconds, one run of that model succeeds. Memory only; sends nothing; no model is changed.',
-    shown: 'A dim line for each retry and when a model\'s circuit opens or closes; a notification when a turn stops on an error that is not retried.',
-  },
-  {
-    event: 'tool.describe', matcher: 'tool: /^mcp__/', file: 'recover.ts', does: ['count'],
+    event: 'tool.describe', matcher: 'tool: /^mcp__/', file: 'cache_break.ts', does: ['count'],
     what: 'Notes the names of MCP and plugin tools as Claude Code first lists them in the prompt (not those behind ToolSearch), in memory only, so a tool that joins the list after the first request ' +
       'can be named as the likely cause of a prompt-cache break. Changes no description and sends nothing.',
     shown: 'Nothing.',
@@ -426,6 +388,7 @@ export function hooksSummary(fullCommand: string): string {
 }
 
 export function spawnLine(a: { action?: unknown; set?: { model?: unknown; effort?: unknown } | null; notice?: unknown } | null): string | null {
+  if (a?.notice === '') return null
   const notice = typeof a?.notice === 'string' && a.notice ? a.notice : null
   const model = a?.action === 'rewrite' && typeof a.set?.model === 'string' && a.set.model ? a.set.model : null
   if (!model) return notice

@@ -1,7 +1,8 @@
 import { CONTRACT } from './contract'
 import { b64Encode, hex, sha256Hex, utf8 } from './e2e'
 import type { Random, SvcResult, Transport } from './engine_types'
-import { checkSchema, TOOLBOX_ROUTE } from './svc_wire'
+import { KIT_FILES_DEADLINE_MS, type ServedFile } from './kit_files'
+import { checkSchema, TOOLBOX_FILES_ROUTE, TOOLBOX_ROUTE } from './svc_wire'
 
 export const REFUSAL_EN =
   'These agent-services working methods are open: ask and they are shown in full.'
@@ -70,7 +71,7 @@ export type GuardAnswer = {
 }
 export type ToolboxAnswer =
   | { kind: 'index'; version: string; note: string; entries: Record<string, string> }
-  | { kind: 'pack'; key: string; title: string; version: string; topic: string | null; items: GuardItem[]; branched: number }
+  | { kind: 'pack'; key: string; title: string; version: string; topic: string | null; items: GuardItem[]; branched: number; files?: { count: number; bytes: number } }
 
 export type GuardOpened = {
   session_token: string
@@ -270,6 +271,7 @@ export class Guard {
         return { id: i.id, text: wrapPack(key, version, i.id, i.text) }
       })
       answer = { kind: 'pack', key, title: clean(b.title as string), version, topic: topic ?? null, items, branched: b.branched as number }
+      if (isObj(b.files)) answer.files = { count: b.files.count as number, bytes: b.files.bytes as number }
     }
     if (!this.sessions.has(s.token)) throw new GuardError(401, 'session_token_required')
     const again = s.toolbox.get(ck)
@@ -278,5 +280,32 @@ export class Guard {
     s.bytes += size
     s.toolbox.set(ck, answer)
     return answer
+  }
+
+  async fetchToolboxFiles(token: string, key: string, version: string): Promise<ServedFile[]> {
+    const s = this.get(token)
+    if (typeof key !== 'string' || !/^[a-z][a-z0-9-]{1,39}$/.test(key) || key === 'index') throw new GuardError(400, 'bad_request')
+    if (typeof version !== 'string' || !/^\d+\.\d+\.\d+([-+][0-9A-Za-z.-]+)?$/.test(version) || version.length > 40) throw new GuardError(400, 'bad_request')
+    const body = { session_ref: s.ref, pack: key, version }
+    const opts = { kind: 'daily', deadlineMs: KIT_FILES_DEADLINE_MS }
+    let res: SvcResult
+    try {
+      res = await this.transport.call('POST', TOOLBOX_FILES_ROUTE, body, opts)
+      if (res && !res.ok && res.status === 409 && res.error === 'session_required') {
+        const opened = await this.transport.call('POST', SESSION_ROUTE, { session_ref: s.ref, role: s.role }, { kind: 'served', deadlineMs: this.deadlineMs })
+        if (opened && opened.ok) res = await this.transport.call('POST', TOOLBOX_FILES_ROUTE, body, opts)
+      }
+    } catch {
+      throw new GuardError(503, 'failed')
+    }
+    if (!res || !res.ok) {
+      const code = (res && res.error) || 'failed'
+      throw new GuardError(res && (res.status === 404 || res.status === 403) ? res.status : 503, code)
+    }
+    const b = res.body
+    if (!isObj(b) || checkSchema(b, route(TOOLBOX_FILES_ROUTE).responses['200']).length || b.pack !== key || b.version !== version) {
+      throw new GuardError(503, 'bad_response')
+    }
+    return b.files as ServedFile[]
   }
 }

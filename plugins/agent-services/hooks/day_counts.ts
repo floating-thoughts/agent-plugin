@@ -1,4 +1,4 @@
-import { COUNTER_PREFIX, MAX_COMPACT_ROWS, MAX_INDEX_ROWS, MAX_ROUTE_ROWS, MAX_STEP_MODELS, MAX_STEPS, MAX_TRIM_ROWS, readDay } from './counters'
+import { COUNTER_PREFIX, MAX_COMPACT_ROWS, MAX_INDEX_ROWS, MAX_ROUTE_ROWS, MAX_STEP_MODELS, MAX_STEPS, readDay } from './counters'
 import type { DayCounters } from './counters'
 import type { KV } from './engine_types'
 import { isDay } from './metrics'
@@ -54,29 +54,14 @@ export function normalizeDay(dc: DayCounters): DayCounters {
     index: [...index.values()].sort((a, b) => cmp(a.model, b.model) || a.file_tokens - b.file_tokens).slice(0, MAX_INDEX_ROWS),
     compact: compact.slice(0, MAX_COMPACT_ROWS),
   }
-  if (dc.trim?.length) {
-    const trim = new Map<string, { model: string; tokens: number; runs: number }>()
-    for (const r of dc.trim) {
-      const model = normModel(r.model)
-      const have = trim.get(model)
-      if (!have) trim.set(model, { model, tokens: r.tokens, runs: r.runs })
-      else {
-        have.tokens += r.tokens
-        have.runs += r.runs
-      }
-    }
-    out.trim = [...trim.values()].sort((a, b) => cmp(a.model, b.model)).slice(0, MAX_TRIM_ROWS)
-  }
   return out
 }
 
 export function uploadDay(dc: DayCounters): DayCounters {
-  const out = normalizeDay(dc)
-  if (out.trim) out.trim = out.trim.map((r) => ({ ...r, net: true }))
-  return out
+  return normalizeDay(dc)
 }
 
-export const dayEmpty =(dc: DayCounters): boolean => !dc.route.length && !dc.index.length && !dc.compact.length && !dc.trim?.length
+export const dayEmpty =(dc: DayCounters): boolean => !dc.route.length && !dc.index.length && !dc.compact.length
 
 export function countsOf(dc: DayCounters): Record<string, number> {
   const out: Record<string, number> = {}

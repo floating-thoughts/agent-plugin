@@ -1,11 +1,12 @@
 import type { EngineInterface } from 'claude-code'
-import { checkOf, CHECK_MAX, globProblem, isWriterType, missingParts, missingText, noToolsOf, ownsOf, type NoTool } from './brief_check'
+import { checkOf, CHECK_MAX, editTaskWord, globProblem, isWriterType, missingParts, missingText, noToolsOf, ownsOf, type NoTool } from './brief_check'
 import { commandsOf } from './cmdguard'
 import { BRIEF_LABEL, EDIT_TOOLS, globMatch } from './flow'
 import { jobOpen, jobText, listJobs, upsertJob, JOBS_FILE, type Job } from './jobs'
 import { oneLine } from './placeholders'
 import { relNum, relText } from './reliability'
 import { NOTE_PREFIX, SUGGESTION_PREFIX } from './review'
+import { onceKey } from './quiet'
 import { signedIn, spellPath } from './subagents'
 import { projectDir } from './task_state_io'
 import { toolInput } from './tools'
@@ -277,7 +278,7 @@ export type SpawnPlan = {
   note: string | null
 }
 
-export function spawnPlan(e: Obj, refuse: boolean = num('BRIEF_REFUSE') === 1): SpawnPlan {
+export function spawnPlan(e: Obj, refuse: boolean = num('BRIEF_REFUSE') === 1, fresh: (part: string) => boolean = () => true): SpawnPlan {
   const contract = contractSpawn(e)
   const body = briefBody(e?.prompt)
   const writer = isWriterType(e?.subagentType)
@@ -286,7 +287,9 @@ export function spawnPlan(e: Obj, refuse: boolean = num('BRIEF_REFUSE') === 1): 
   const missing = contract ? missingParts(`${typeof e?.description === 'string' ? e.description : ''}\n${body}`, writer) : []
   const notes: (string | undefined)[] = []
   const parts = missing.length ? missingText(missing) : ''
-  if (parts) notes.push(txt('brief_lacks', { parts }))
+  const told = editTaskWord(e?.description) ? missing.filter((p) => fresh(p)) : []
+  const lacks = told.length ? missingText(told) : ''
+  if (lacks) notes.push(txt('brief_lacks', { parts: lacks }))
   if (contract && dropped.length) notes.push(txt('owns_dropped', { list: dropped.slice(0, 5).map((d) => `"${d.glob}" (${d.why})`).join(', ') }))
   const said = notes.filter((n): n is string => n !== undefined)
   const note = said.length ? `${SUGGESTION_PREFIX}: ${said.join(' ')}` : null
@@ -319,8 +322,10 @@ let told = new Set<string>()
 let ledgerLock: Promise<unknown> = Promise.resolve()
 let claimsHeld = new Map<string, { owns: string[]; title: string; session: string }>()
 let noToolsHeld = new Map<string, NoTool[]>()
+let onceGen = 0
 
 export function resetOwnershipForTest(): void {
+  onceGen++
   parentOf = new Map<string, string | null>()
   notesByCall = new Map<string, string[]>()
   told = new Set<string>()
@@ -434,7 +439,7 @@ export async function ownershipSpawn($: EngineInterface, e: Obj, next: (e: Obj) 
     const id = isObj(spawned) && typeof spawned.agentId === 'string' && spawned.agentId ? spawned.agentId : null
     if (id === null) return spawned
     if (!e.resume) parentOf.set(id, typeof e.parentAgentId === 'string' && e.parentAgentId ? e.parentAgentId : null)
-    noteFor(e.tool_use_id, plan.note)
+    noteFor(e.tool_use_id, plan.missing.length ? spawnPlan(e, k.refuse, (p) => onceKey(`brief_lacks.${onceGen}.${p}`)).note : plan.note)
     if (plan.noTools.length) {
       if (noToolsHeld.size >= k.toldMax) noToolsHeld = new Map()
       noToolsHeld.set(id, plan.noTools)

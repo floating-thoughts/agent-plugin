@@ -1,4 +1,3 @@
-import type { ReadText } from './engine_types'
 
 
 export function normPath(path: string): string {
@@ -34,47 +33,3 @@ export function normpath(p: string): string {
 }
 
 export const joinPath = (a: string, b: string): string => (/[\\/]$/.test(a) || a === '' ? a + b : a + '/' + b)
-const inDir = (dir: string, name: string): string => (dir.endsWith('/') ? dir + name : dir + '/' + name)
-
-export function listsPath(text: string, entry: string): boolean {
-  if (!entry) return false
-  const word = /[A-Za-z0-9_\-]/
-  for (let i = text.indexOf(entry); i >= 0; i = text.indexOf(entry, i + 1)) {
-    let b = i - 1
-    if (b >= 1 && text[b] === '/' && text[b - 1] === '.' && !(b >= 2 && /[A-Za-z0-9_.\-\/]/.test(text[b - 2]!))) b -= 2
-    const before = b < 0 ? '' : text[b]!
-    if (before && (word.test(before) || before === '.' || before === '/')) continue
-    const a = text[i + entry.length] ?? ''
-    if (a && (word.test(a) || a === '/' || (a === '.' && /[A-Za-z0-9_]/.test(text[i + entry.length + 1] ?? '')))) continue
-    return true
-  }
-  return false
-}
-
-export async function indexed(file: string, readText: ReadText): Promise<boolean> {
-  const parts = file.split('/')
-  for (let i = parts.length - 1; i > 0; i--) {
-    const d = parts.slice(0, i).join('/')
-    const dd = !d || d.endsWith(':') ? d + '/' : d
-    const rel = file.slice(d.length + 1)
-    let text: string | null = null
-    try {
-      text = await readText(inDir(dd, 'DOCINDEX.md'))
-    } catch {
-      text = null
-    }
-    if (text !== null) {
-      const fold = (s: string) => (/^[A-Za-z]:\//.test(file) ? s.toLowerCase() : s)
-      const t = fold(text.replace(/\\/g, '/'))
-      if (listsPath(t, fold(rel)) || listsPath(t, fold(file))) return true
-    }
-    let page: string | null = null
-    try {
-      page = await readText(inDir(dd, 'codeindex/files/' + rel.split('/').join('__') + '.md'))
-    } catch {
-      page = null
-    }
-    if (page !== null) return true
-  }
-  return false
-}

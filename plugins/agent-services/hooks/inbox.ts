@@ -1,5 +1,6 @@
 import type { EngineInterface } from 'claude-code'
-import { ago, jobOpen, jobsLive, jobText, listJobs, statusWord, type Job } from './jobs'
+import { ago, jobOpen, jobsLive, jobText, jobUnread, listJobs, statusWord, type Job } from './jobs'
+import { onceKey } from './quiet'
 import { reachPerson } from './reach'
 import { NOTE_PREFIX } from './review'
 import { COMMAND } from './status'
@@ -207,8 +208,8 @@ export function askInputSchema(): Obj {
 
 
 export type InboxGroup = { key: 'decide' | 'confirm' | 'trouble' | 'finished'; title: string; lines: string[]; count: number }
-export type Inbox = { groups: InboxGroup[]; count: number }
-export type InboxInput = { jobs: readonly Job[] | null | undefined; state: unknown; now: number; since?: number | null }
+export type Inbox = { groups: InboxGroup[]; count: number; keys?: string[] }
+export type InboxInput = { jobs: readonly Job[] | null | undefined; state: unknown; now: number; since?: number | null; skip?: readonly string[] | null; openMaxMs?: number | null }
 
 const endOf = (j: Job): number => num(j.ended_at) ?? num(j.updated_at) ?? num(j.last_activity_at) ?? 0
 
@@ -226,37 +227,48 @@ export function inboxOf(input: InboxInput): Inbox {
     { key: 'finished', title: input?.since != null ? 'Finished since you left' : 'Finished, not seen yet', lines: [], count: 0 },
   ]
   const rows = new Map<InboxGroup['key'], { at: number; lines: string[] }[]>()
+  const keys: string[] = []
   try {
     const now = num(input?.now) ?? 0
     const since = num(input?.since)
+    const skip = new Set(Array.isArray(input?.skip) ? input.skip : [])
+    const openMax = num(input?.openMaxMs)
     const jobs = Array.isArray(input?.jobs) ? input.jobs.filter((j) => isObj(j) && typeof j.id === 'string') : []
     const recent = N('INBOX_RECENT_MS')
     const lineCap = N('INBOX_LINES')
-    const fresh = (j: Job): boolean => (since !== null ? endOf(j) >= since : j.unread === true || (recent !== undefined && now - endOf(j) <= recent))
-    const add = (k: InboxGroup['key'], at: number, lines: string[]) => rows.set(k, [...(rows.get(k) ?? []), { at, lines }])
+    const fresh = (j: Job): boolean => (since !== null ? endOf(j) >= since : jobUnread(j, now) || (recent !== undefined && now - endOf(j) <= recent))
+    const add = (k: InboxGroup['key'], at: number, lines: string[], key: string, open = false) => {
+      if (skip.has(key) || (open && openMax !== null && at > 0 && now - at > openMax)) return
+      keys.push(key)
+      rows.set(k, [...(rows.get(k) ?? []), { at, lines }])
+    }
     for (const j of jobs) {
-      if (j.status === 'waiting') add('decide', num(j.updated_at) ?? j.last_activity_at ?? 0, [jobLine(j, now)])
-      else if (j.status === 'stalled') add('trouble', num(j.updated_at) ?? j.last_activity_at ?? 0, [jobLine(j, now)])
-      else if (j.status === 'failed' && fresh(j)) add('trouble', endOf(j), [jobLine(j, now)])
-      else if (j.status === 'done_unverified' && fresh(j)) add('confirm', endOf(j), [jobLine(j, now)])
-      else if (j.status === 'done_verified' && fresh(j)) add('finished', endOf(j), [jobLine(j, now)])
+      const key = `job:${j.id}:${j.status}`
+      if (j.status === 'waiting') add('decide', num(j.updated_at) ?? j.last_activity_at ?? 0, [jobLine(j, now)], key, true)
+      else if (j.status === 'stalled') add('trouble', num(j.updated_at) ?? j.last_activity_at ?? 0, [jobLine(j, now)], key, true)
+      else if (j.status === 'failed' && fresh(j)) add('trouble', endOf(j), [jobLine(j, now)], key)
+      else if (j.status === 'done_unverified' && fresh(j)) add('confirm', endOf(j), [jobLine(j, now)], key)
+      else if (j.status === 'done_verified' && fresh(j)) add('finished', endOf(j), [jobLine(j, now)], key)
     }
     const s: Obj = isObj(input?.state) ? (input!.state as Obj) : {}
     const questions = (Array.isArray(s.questions) ? s.questions : []).filter((q: unknown) => isObj(q) && typeof (q as Obj).id === 'string' && !(q as Obj).answer)
     for (const q of [...questions.filter((x: Obj) => x.needs_user !== false), ...questions.filter((x: Obj) => x.needs_user === false)]) {
       const [head, ...rest] = renderQuestion(q)
-      if (head) add('decide', (q.needs_user === false ? -1e15 : 0) + (timeOf(q.asked_at) ?? 0), [`question ${head}`, ...rest.map((l) => `  ${l}`)])
+      if (!head) continue
+      const asked = timeOf(q.asked_at) ?? 0
+      if (openMax !== null && asked > 0 && now - asked > openMax) continue
+      add('decide', (q.needs_user === false ? -1e15 : 0) + asked, [`question ${head}`, ...rest.map((l) => `  ${l}`)], `q:${q.id}`)
     }
     for (const t of Array.isArray(s.tasks) ? s.tasks : []) {
       if (!isObj(t) || typeof t.id !== 'string') continue
       const title = `task ${jobText(t.id, 40)} "${jobText(t.title || t.id, 80)}"`
       if (t.status === 'waiting_user') {
         const ref = isObj(t.waiting_for) ? t.waiting_for.ref : ''
-        add('decide', timeOf(t.updated) ?? 0, [`${title}: waiting for ${ref ? jobText(ref, 120) : 'you'}`])
+        add('decide', timeOf(t.updated) ?? 0, [`${title}: waiting for ${ref ? jobText(ref, 120) : 'you'}`], `task:${t.id}:waiting_user`, true)
       } else if (t.status === 'delivered' && isObj(t.result)) {
         const at = timeOf(t.result.at)
         if (at === null || (since !== null ? at < since : recent === undefined || now - at > recent)) continue
-        add('confirm', at, [`${title} delivered ${ago(now - at)} ago${t.result.summary ? `: ${jobText(t.result.summary, 120)}` : ''}`])
+        add('confirm', at, [`${title} delivered ${ago(now - at)} ago${t.result.summary ? `: ${jobText(t.result.summary, 120)}` : ''}`], `task:${t.id}:delivered`)
       }
     }
     for (const g of groups) {
@@ -267,12 +279,13 @@ export function inboxOf(input: InboxInput): Inbox {
       if (list.length > shown.length) g.lines.push(`- and ${list.length - shown.length} more`)
     }
   } catch {
+    keys.length = 0
     for (const g of groups) {
       g.lines = []
       g.count = 0
     }
   }
-  return { groups: groups.filter((g) => g.count > 0), count: groups.reduce((n, g) => n + g.count, 0) }
+  return { groups: groups.filter((g) => g.count > 0), count: groups.reduce((n, g) => n + g.count, 0), keys }
 }
 
 export function inboxText(inbox: Inbox | null | undefined, opts: { stateError?: string | null } = {}): string {
@@ -287,20 +300,25 @@ export function inboxText(inbox: Inbox | null | undefined, opts: { stateError?: 
 }
 
 export function inboxIdleNote(prev: number | null, at: number, jobs: readonly Job[] | null | undefined, state: unknown): string | null {
+  return idleNoteOf(prev, at, jobs, state, null).note
+}
+
+export function idleNoteOf(prev: number | null, at: number, jobs: readonly Job[] | null | undefined, state: unknown, shown: readonly string[] | null): { note: string | null; keys: string[] } {
+  const none = { note: null, keys: [] as string[] }
   try {
     const idle = N('INBOX_IDLE_MS')
     const max = N('INBOX_NOTE_MAX')
-    if (idle === undefined || max === undefined || num(prev) === null || num(at) === null || at - (prev as number) < idle) return null
-    const inbox = inboxOf({ jobs, state, now: at, since: prev })
-    if (!inbox.count) return null
+    if (idle === undefined || max === undefined || num(prev) === null || num(at) === null || at - (prev as number) < idle) return none
+    const inbox = inboxOf({ jobs, state, now: at, since: prev, skip: shown, openMaxMs: 7 * 24 * 3600_000 })
+    if (!inbox.count) return none
     const body = relText('inbox.text.idle_note', {
       ago: ago(at - (prev as number)), jobs_file: '.agent/jobs.json', state_file: '.agent/task-state.json', command: COMMAND,
     })
-    if (body === undefined) return null
+    if (body === undefined) return none
     const lines = inbox.groups.flatMap((g) => [`${g.title} (${g.count}):`, ...g.lines])
-    return [`${NOTE_PREFIX}: ${body}`, ...lines].join('\n').slice(0, max)
+    return { note: [`${NOTE_PREFIX}: ${body}`, ...lines].join('\n').slice(0, max), keys: inbox.keys ?? [] }
   } catch {
-    return null
+    return none
   }
 }
 
@@ -314,7 +332,10 @@ export async function inboxPrompt($: EngineInterface, e: Obj, rt?: Ready): Promi
       const idle = N('INBOX_IDLE_MS')
       if (prev !== null && idle !== undefined && at - prev >= idle) {
         const got = await loadTaskState($)
-        const note = inboxIdleNote(prev, at, await listJobs($), got.state)
+        const jobs = await listJobs($)
+        const all = idleNoteOf(prev, at, jobs, got.state, null).keys
+        const fresh = new Set(all.filter((k) => onceKey(`inbox.idle:${k}`)))
+        const note = fresh.size ? idleNoteOf(prev, at, jobs, got.state, all.filter((k) => !fresh.has(k))).note : null
         if (note) blocks.push(note)
       }
     }

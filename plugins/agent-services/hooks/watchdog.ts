@@ -1,3 +1,4 @@
+import { bindSession, isFinished, isSilencedHere } from './quiet'
 import { vaultMask } from './vault'
 
 type Obj = Record<string, any>
@@ -20,7 +21,7 @@ export type StallSnapshot = {
   main?: { running?: boolean; turnId?: string | null; turnStartedAt?: number | null }
   calls?: StallCall[]
   agents?: { id: string; description?: string; startedAt?: number; lastToolAt?: number | null }[]
-  autoTasks?: { id: string; command?: string; description?: string; agentId?: string | null; outputChangedAt?: number | null; output?: string; user?: boolean }[]
+  autoTasks?: { id: string; command?: string; description?: string; agentId?: string | null; outputChangedAt?: number | null; redirectChangedAt?: number | null; output?: string; user?: boolean }[]
   state?: Obj | null
   ledger?: StallLedger
 }
@@ -136,6 +137,71 @@ function prune(ledger: StallLedger): StallLedger {
   return Object.fromEntries([...keys.filter(held), ...kept].map((k) => [k, ledger[k]!]))
 }
 
+export function redirectTargetOf(command: unknown): string | null {
+  try {
+    const text = typeof command === 'string' ? command.slice(0, 4000) : ''
+    if (!text.trim()) return null
+    let masked = ''
+    let q: string | null = null
+    for (let i = 0; i < text.length; i++) {
+      const ch = text[i]!
+      if (q) {
+        masked += ch === q ? ch : 'x'
+        if (ch === q) q = null
+      } else {
+        if (ch === '"' || ch === "'") q = ch
+        masked += ch
+      }
+    }
+    let from = 0
+    for (let i = 0; i < masked.length; i++) {
+      const c = masked[i]
+      if (c === ';' || c === '\n' || c === '|') from = i + 1
+      else if (c === '&' && masked[i - 1] !== '>' && masked[i + 1] !== '>') from = i + 1
+    }
+    const seg = text.slice(from)
+    const mseg = masked.slice(from)
+    if (!seg.trim()) return null
+    const word = (i: number): string | null => {
+      while (i < seg.length && /\s/.test(seg[i]!)) i++
+      if (i >= seg.length) return null
+      const open = seg[i]
+      if (open === '"' || open === "'") {
+        const end = seg.indexOf(open, i + 1)
+        const w = end < 0 ? seg.slice(i + 1) : seg.slice(i + 1, end)
+        return w.trim() || null
+      }
+      let j = i
+      while (j < mseg.length && !/[\s;|&<>()]/.test(mseg[j]!)) j++
+      return seg.slice(i, j) || null
+    }
+    const ps = /^\s*(?:out-file|set-content|add-content)\b/i.exec(mseg)
+    if (ps) {
+      const parts = seg.slice(ps[0].length).trim().split(/\s+/).filter(Boolean)
+      const unq = (x: string | undefined) => (x ?? '').replace(/^["']|["']$/g, '') || null
+      const named = parts.findIndex((x) => /^-(?:file|literal)?path$/i.test(x))
+      if (named >= 0) return unq(parts[named + 1])
+      return unq(parts.find((x, k) => !x.startsWith('-') && !(k > 0 && parts[k - 1]!.startsWith('-'))))
+    }
+    let target: string | null = null
+    for (let i = 0; i < mseg.length; i++) {
+      if (mseg[i] !== '>' || mseg[i - 1] === '>') continue
+      const before = mseg[i - 1] ?? ''
+      if (/\d/.test(before) && before !== '1') continue
+      if (before === '-' || before === '=') continue
+      let k = i + 1
+      if (mseg[k] === '>') k++
+      if (mseg[k] === '&') continue
+      if (mseg[k] === '|') k++
+      const w = word(k)
+      if (w) target = w
+    }
+    return target
+  } catch {
+    return null
+  }
+}
+
 function keptBy(pattern: unknown, text: string): boolean {
   if (typeof pattern !== 'string' || pattern === '' || pattern.length > 2000) return false
   try {
@@ -165,10 +231,11 @@ export function stallDue(snapshot: StallSnapshot, at: number, table: Obj | null)
     const cap = countOf(s.max_per_subject, 3)
     const mainRunning = snapshot.main?.running === true
     const calls = Array.isArray(snapshot.calls) ? snapshot.calls.filter((c) => c && typeof c.id === 'string' && typeof c.startedAt === 'number') : []
-    const quiet = (subject: string) => isSilenced(state, subject, session)
+    if (session) bindSession(session)
+    const quiet = (subject: string) => isSilenced(state, subject, session) || isSilencedHere(subject)
     const toMain = (text: string) => (mainRunning ? out.contexts.push({ agentId: null, text }) : out.prompts.push(text))
-    const signal = (subject: string, text: string | null, deliver: (t: string) => void) => {
-      if (text === null || quiet(subject) || !repeatDue(ledger, subject, at, start, max, cap)) return
+    const signal = (subject: string, text: string | null, deliver: (t: string) => void, most: number = cap) => {
+      if (text === null || quiet(subject) || !repeatDue(ledger, subject, at, start, max, most)) return
       mark(ledger, subject, at)
       deliver(text)
     }
@@ -211,25 +278,40 @@ export function stallDue(snapshot: StallSnapshot, at: number, table: Obj | null)
     }
 
     const silent = minutesOf(s.subagent_silent_minutes, 15)
+    const agentCap = countOf(s.subagent_silent_max, Math.min(cap, 2))
     for (const a of Array.isArray(snapshot.agents) ? snapshot.agents : []) {
-      if (!a || typeof a.id !== 'string' || hanging.has(a.id)) continue
+      if (!a || typeof a.id !== 'string' || hanging.has(a.id) || isFinished(a.id)) continue
       if (calls.some((c) => c.agentId === a.id)) continue
       const last = typeof a.lastToolAt === 'number' ? a.lastToolAt : typeof a.startedAt === 'number' ? a.startedAt : null
       if (last === null || at - last < silent) continue
       const subject = `agent:${a.id}`
-      signal(subject, textOf(s.subagent_silent) && fill(s.subagent_silent, { agent: a.id, description: oneLine(a.description ?? ''), minutes: mins(at - last), subject }), toMain)
+      signal(subject, textOf(s.subagent_silent) && fill(s.subagent_silent, { agent: a.id, description: oneLine(a.description ?? ''), minutes: mins(at - last), subject }), toMain, agentCap)
     }
 
     const still = minutesOf(s.auto_task_still_minutes, 10)
+    const taskCap = countOf(s.auto_task_still_max, Math.min(cap, 2))
     const live = new Set((Array.isArray(snapshot.agents) ? snapshot.agents : []).map((a) => a?.id))
     for (const t of Array.isArray(snapshot.autoTasks) ? snapshot.autoTasks : []) {
-      if (!t || typeof t.id !== 'string' || typeof t.outputChangedAt !== 'number' || at - t.outputChangedAt < still) continue
+      if (!t || typeof t.id !== 'string' || isFinished(t.id)) continue
+      const target = redirectTargetOf(t.command)
+      const watched = target !== null && typeof t.redirectChangedAt === 'number' ? t.redirectChangedAt : t.outputChangedAt
+      if (typeof watched !== 'number' || at - watched < still) continue
       if (keptBy(table!.kept, String(t.description ?? ''))) continue
       const subject = `task:${t.id}`
       const owner = typeof t.agentId === 'string' && t.agentId !== '' && live.has(t.agentId) ? t.agentId : null
-      const shown = textOf(s.auto_task_still) && fill(s.auto_task_still, { task: t.id, command: oneLine(t.command ?? ''), minutes: mins(at - t.outputChangedAt), subject })
-      const text = shown && t.user === true && t.output ? `${shown} Output file: ${oneLine(t.output)}.` : shown
-      signal(subject, text, owner ? (x) => out.sends.push({ agentId: owner, text: x }) : toMain)
+      const deliver = owner ? (x: string) => out.sends.push({ agentId: owner, text: x }) : toMain
+      const command = oneLine(t.command ?? '')
+      if (target !== null && typeof t.redirectChangedAt !== 'number') {
+        const key = `redirect:${t.id}`
+        if (quiet(subject) || ledger[key] || !textOf(s.auto_task_still)) continue
+        mark(ledger, key, at)
+        deliver(`${(textOf(s.auto_task_still) ?? "").split(': ', 1)[0]}: background task ${t.id} ("${command}") writes its output to ${oneLine(target)}, so its own output file stays empty by design; read ${oneLine(target)} to follow it. This note comes once.`)
+        continue
+      }
+      const shown = textOf(s.auto_task_still) && fill(s.auto_task_still, { task: t.id, command, minutes: mins(at - watched), subject })
+      const file = target !== null ? target : t.user === true && t.output ? t.output : null
+      const text = shown && file ? `${shown} Output file: ${oneLine(file)}.` : shown
+      signal(subject, text, deliver, taskCap)
     }
 
     const long = minutesOf(s.main_turn_minutes, 45)

@@ -4,10 +4,11 @@ import { sha256Hex, utf8 } from './e2e'
 import { fitLines, getJob, jobOpen, listJobs, setJobStatus, upsertJob, type Job } from './jobs'
 import { redact } from './redact'
 import { relNum, relText } from './reliability'
-import { NOTE_PREFIX, SUGGESTION_PREFIX } from './review'
+import { NOTE_PREFIX } from './review'
 import { loadTaskState, projectDir, projectWriteDir } from './task_state_io'
 import type { TaskState } from './task_state'
 import { vaultMask } from './vault'
+import { forgetSlot, sameAsLast } from './quiet'
 
 export const RESUME_LIVE_KEY = 'resume_live'
 export const RESUME_GONE_NOTE = 'its session ended'
@@ -22,9 +23,6 @@ const N = (k: string): number | undefined => relNum(`resume.${k}`)
 const T = (k: string, vars?: Record<string, string | number>): string | undefined => relText(`resume.text.${k}`, vars)
 
 let loadedAt = Date.now()
-let pending: Record<string, string> = {}
-let children: Record<string, string> = {}
-let replays: Record<string, { job: Job; id: string | null }> = {}
 let changed: string[] = []
 let nextStep: string | null = null
 let beatAt = 0
@@ -78,27 +76,6 @@ async function active(rt: Ready): Promise<boolean> {
 export function briefHash(project: unknown, description: unknown, prompt: unknown): string {
   const dir = slashed(String(project ?? '')).toLowerCase()
   return sha256Hex(utf8(`${dir}\u0000${String(description ?? '')}\u0000${String(prompt ?? '')}`)).slice(0, 16)
-}
-
-export function replayMatch(jobs: readonly Job[], hash: string, now: number, windowMs: number | undefined = N('RESUME_REPLAY_MS')): Job | null {
-  if (typeof windowMs !== 'number') return null
-  let best: Job | null = null
-  for (const j of jobs) {
-    if (!hash || j.brief_hash !== hash || (j.status !== 'done_verified' && j.status !== 'done_unverified')) continue
-    const at = Number(j.last_activity_at)
-    if (!Number.isFinite(at) || now - at > windowMs) continue
-    if (!best || at > Number(best.last_activity_at)) best = j
-  }
-  return best
-}
-
-export function replayNote(job: Job, newId: string | null = null): string | null {
-  const how = T(job.status === 'done_verified' ? 'replay_verified' : 'replay_unverified')
-  const where = job.output ? T('replay_where_path', { path: oneLine(mask(job.output), 200) }) : T('replay_where')
-  const stop = newId ? T('replay_stop_id', { id: newId }) : T('replay_stop')
-  if (how === undefined || where === undefined || stop === undefined) return null
-  const body = T('replay', { id: job.id, title: mask(oneLine(job.title, 120)), how, where, stop })
-  return body === undefined ? null : `${SUGGESTION_PREFIX}: ${body}`
 }
 
 export function goneJobs(jobs: readonly Job[], c: {
@@ -253,59 +230,11 @@ export async function resumeSessionEnd($: EngineInterface, rt?: Ready, capMs = 5
   await Promise.race([work, cap])
 }
 
-export async function resumeSpawnCheck($: EngineInterface, e: Obj, rt?: Ready): Promise<string | null> {
-  try {
-    if (!isObj(e) || e.fork === true || e.isTeammate === true || !(await active(rt))) return null
-    const dir = await projectDir($)
-    if (!dir) return null
-    const hash = briefHash(dir, e.description, e.prompt)
-    const call = typeof e.tool_use_id === 'string' && e.tool_use_id ? e.tool_use_id : null
-    if (call) pending[call] = hash
-    const hit = replayMatch(await listJobs($), hash, await nowOf($))
-    if (!hit) return null
-    const note = replayNote(hit)
-    if (!note) return null
-    if (call) replays[call] = { job: hit, id: null }
-    return note
-  } catch {
-    return null
-  }
-}
-
-export async function resumeSpawned($: EngineInterface, e: Obj, spawned: Obj): Promise<void> {
-  try {
-    const call = isObj(e) && typeof e.tool_use_id === 'string' ? e.tool_use_id : ''
-    const id = isObj(spawned) && typeof spawned.agentId === 'string' ? spawned.agentId : ''
-    const hash = call ? pending[call] : undefined
-    if (!id || !hash) return
-    delete pending[call]
-    children[id] = hash
-    if (replays[call]) replays[call] = { ...replays[call]!, id }
-    const row = await getJob($, id)
-    if (row && row.brief_hash !== hash) await upsertJob($, { id, brief_hash: hash })
-  } catch {}
-}
-
-export function replayContext(e: Obj, done: Obj): Obj {
-  try {
-    const call = isObj(e) && typeof e.tool_use_id === 'string' ? e.tool_use_id : ''
-    const hit = call ? replays[call] : undefined
-    if (!hit) return done
-    delete replays[call]
-    const note = replayNote(hit.job, hit.id)
-    if (!note || !isObj(done) || done.deny !== undefined) return done
-    return { ...done, context: [...(Array.isArray(done.context) ? done.context : []), note] }
-  } catch {
-    return done
-  }
-}
-
 async function agentEnded($: EngineInterface, id: string, output: string | null): Promise<void> {
   if (!id) return
   const row = await getJob($, id)
   if (!row) return
   const patch: Partial<Job> = {}
-  if (children[id] && row.brief_hash !== children[id]) patch.brief_hash = children[id]
   if (output && !row.output) patch.output = output
   if (Object.keys(patch).length) await upsertJob($, { id, ...patch })
 }
@@ -420,6 +349,8 @@ export async function handoverNote($: EngineInterface, first: boolean): Promise<
       : undefined
     if (pointer !== undefined) lines.unshift(pointer)
     if (!lines.length) return null
+    const key = [pointer !== undefined && head ? `handover ${head.counts}` : '', ...lines.slice(pointer !== undefined ? 1 : 0), String(cutAll.length)]
+    if (sameAsLast('round.handover', key.join('\n'))) return null
     return fitLines(`${NOTE_PREFIX}: ${head0}`, lines, 1500, cutAll.length - cut.length)
   } catch {
     return null
@@ -428,11 +359,9 @@ export async function handoverNote($: EngineInterface, first: boolean): Promise<
 
 export function resumeResetForTest(o: { loadedAt?: number } = {}): void {
   loadedAt = o.loadedAt ?? Date.now()
-  pending = {}
-  children = {}
-  replays = {}
   changed = []
   nextStep = null
   beatAt = 0
   interrupted = []
+  forgetSlot('round.handover')
 }

@@ -227,7 +227,9 @@ async function servedVersioned(r: MethodsRuntime): Promise<{ text: string | null
   const ask = (phase: string) => r.core.ask('lesson_lookup', { role: 'auto', phase }, { session: r.session, harness: 'claude-code' })
   const answers = await Promise.all(METHODS_PHASES.map((p) => ask(p).catch(() => null)))
   const v = answers.find((a) => isObj(a) && typeof a.version === 'string' && a.version)
-  return { text: methodsText(answers, until()), version: v ? String((v as Obj).version) : '' }
+  const version = v ? String((v as Obj).version) : ''
+  if (!answers.every((a) => isObj(a) && a.fallback === null)) return { text: null, version }
+  return { text: methodsText(answers, until()), version }
 }
 
 async function approved(): Promise<string | null> {

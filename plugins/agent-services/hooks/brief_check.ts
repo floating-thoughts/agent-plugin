@@ -50,6 +50,10 @@ export function missingParts(text: unknown, writer = true): BriefPart[] {
   return needed.filter((p) => !PART_RX[p].some((r) => r.test(t)))
 }
 
+export function editTaskWord(description: unknown): boolean {
+  return typeof description === 'string' && /^\s*(implement|debug|tests|refactor|merge)(?![\w-])/i.test(description)
+}
+
 export function missingText(missing: readonly BriefPart[]): string {
   const names = missing.map((p) => relText(`brief_check.text.part_${p}`))
   if (names.some((n) => n === undefined)) return ''

@@ -3,7 +3,7 @@ import { onRulesClear, RULES_OFF_LINE, RULES_PENDING_LINE, rulesState, rulesTabl
 
 type Obj = Record<string, any>
 type Pat = { kind: string; re: RegExp; group: number; mixed: boolean }
-type Table = { note: string; pats: Pat[]; unmask: boolean }
+type Table = { note: string; pats: Pat[] }
 
 let vault: Record<string, string> = {}
 let foreign = new Set<string>()
@@ -38,7 +38,7 @@ function table(): Table | null {
         mixed: p.mixed === true,
       })
     }
-    if (typeof src.note === 'string' && pats.length) t = { note: src.note, pats, unmask: src.unmask === true }
+    if (typeof src.note === 'string' && pats.length) t = { note: src.note, pats }
   } catch {
     t = null
   }
@@ -86,10 +86,6 @@ function maskText(text: string, t: Table, found: string[]): string {
     out = res + out.slice(last)
   }
   return out
-}
-
-function reveal(text: string): string {
-  return text.replace(/\{\{secret:([a-z0-9_]+)\}\}/g, (whole: string, name: string) => (Object.hasOwn(vault, name) ? vault[name] : whole))
 }
 
 function mapStrings(value: unknown, fn: (text: string) => string): unknown {
@@ -149,26 +145,6 @@ export function vaultPendingLine(): string | null {
   if (!pendingSkipped || pendingTold) return null
   pendingTold = true
   return RULES_PENDING_LINE
-}
-
-export function vaultToolIn(e: Obj): Obj | null {
-  try {
-    if (table()?.unmask !== true || !Object.keys(vault).length || !e || typeof e !== 'object') return null
-    if (!['Bash', 'PowerShell', 'Write', 'Edit', 'MultiEdit', 'NotebookEdit'].includes(String(e.tool))) return null
-    const out: Obj = { ...e }
-    let changed = false
-    for (const [k, v] of Object.entries(e)) {
-      if (k === 'tool' || k === 'tool_use_id' || k === 'agentId') continue
-      const r = mapStrings(v, reveal)
-      if (JSON.stringify(r) !== JSON.stringify(v)) {
-        out[k] = r
-        changed = true
-      }
-    }
-    return changed ? out : null
-  } catch {
-    return null
-  }
 }
 
 export function vaultToolOut($: EngineInterface, done: Obj): Obj | null {
