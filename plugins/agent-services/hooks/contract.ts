@@ -7,7 +7,7 @@ export type ToolSpec = {
   input_schema: Record<string, unknown>
 }
 
-export const CONTRACT_SHA256 = "d67e81a66a27ab0da083b9a43acd1a76d67d3e27beef129741501d4f956e2e46"
+export const CONTRACT_SHA256 = "bcee0ca74c3efd0e8d95297193f83e782594c0e5a11ce173146c39ae7293ff5b"
 
 export const API = "svc/1" as const
 export const PREFIX = "/svc/v1" as const
@@ -96,7 +96,7 @@ export const TOOLS: readonly ToolSpec[] = [
   },
   {
     "name": "savings",
-    "description": "Show what the agent services saved so far, as worked out by the service from the local savings log. Returns local_only when the service cannot be reached.",
+    "description": "Show what the agent services saved so far: the estimated dollars saved by routing subagents to cheaper models (compared with running them on Opus), by checkpoint compactions and by indexed file reads, worked out by the service from the daily usage summaries of the local savings log. Returns local_only when the service cannot be reached.",
     "input_schema": {
       "type": "object",
       "properties": {},
@@ -553,7 +553,7 @@ export const CONTRACT = {
   },
   {
    "name": "savings",
-   "description": "Show what the agent services saved so far, as worked out by the service from the local savings log. Returns local_only when the service cannot be reached.",
+   "description": "Show what the agent services saved so far: the estimated dollars saved by routing subagents to cheaper models (compared with running them on Opus), by checkpoint compactions and by indexed file reads, worked out by the service from the daily usage summaries of the local savings log. Returns local_only when the service cannot be reached.",
    "input_schema": {
     "type": "object",
     "properties": {},

@@ -3,7 +3,8 @@
 agent-services is a Claude Code plugin. It connects Claude Code's hook events (subagent dispatch, tool calls,
 checkpoints and usage) to our service. Everything runs inside Claude Code itself, in the plugin's hooks module.
 
-Every service needs a signed-in account. Until you sign in, or whenever the sign-in is no longer valid, the plugin is
+Every service needs a signed-in account; accounts are created by us, so send us your email address first (sign-in
+codes are mailed only to addresses we have set up). Until you sign in, or whenever the sign-in is no longer valid, the plugin is
 paused: hooks pass through unchanged, every one of its tools answers only with the sign-in line, and nothing is sent
 except the sign-in itself and a health check.
 
@@ -99,13 +100,21 @@ Each user then signs in once with `/agent-services login <email>`.
 `/agent-services` (or `/agent-services status`) shows the sign-in, the plan, the service state and the auto-update
 setup. The others: `login [<email>]`, `code`, `logout`, `savings [preview | on | off | status | mail on | mail off]`,
 `estimate [preview | send]`, `served [status | pin <role> <version> | unpin <role> | channel <name>]`,
-`offline on | off` and `outbox [<day>]`. While the plugin is paused only `status`, `login`, `code` and `logout` work.
+`dashboard [allow | not_now]`, `offline on | off` and `outbox [<day>]`. While the plugin is paused only `status`, `login`, `code` and `logout` work.
 The command answers by itself: no model reads the code or the answers.
 
 The tools the model can call are `mcp__agent-services__router_advice`, `lesson_lookup`, `savings`,
-`checkpoint_advice` and `status`. Earlier versions named them `mcp__plugin_agent-services_agent-services__<name>`;
+`checkpoint_advice`, `status` and `setup` (it applies your answers to the setup questions below, and only those). Earlier versions named them `mcp__plugin_agent-services_agent-services__<name>`;
 permission rules you wrote for the old names do nothing now and can be removed from your settings by hand. The
 plugin never writes your settings or permission rules.
+
+## Setup questions
+
+With the first message of a session, while the dashboard or the savings report is not set up yet, Claude asks you
+about them once, in its question dialog: whether to publish your dashboard (Allow or Not now), and, after showing you
+exactly what one daily upload contains, whether to turn on the daily savings report (Turn on or Not now). "Not now"
+is asked again after 7 days. You can change either answer at any time with `/agent-services dashboard allow`,
+`/agent-services dashboard not_now`, `/agent-services savings on` or `/agent-services savings off`.
 
 ## What you see
 
@@ -150,9 +159,10 @@ once.
 - **The dashboard.** After a turn, at most every 10 minutes and only when it changed, the plugin asks Claude Code's
   own Artifact tool to publish a dashboard page to your claude.ai account. That is the one thing that goes anywhere
   but our service. The page holds only numbers (savings, counts, plan, service on or off), never text from a session,
-  a path or a host name. The call goes through Claude Code's normal permission check, so it happens only if you allow
-  the Artifact tool; if you deny it, the plugin stops trying for that session. Each attempt is logged in the request
-  log.
+  a path or a host name. It is published only after you chose Allow (see Setup questions); the plugin then answers
+  Claude Code's permission check for that one call of its own, its dashboard page, and for nothing else. It never
+  writes your settings or permission rules. Without your Allow nothing is published. Each attempt is logged in the
+  request log.
 - **Your sign-in.** The token and the device key are kept in Claude Code's plugin store, a plain file in your Claude
   Code configuration folder (`~/.claude/plugins/store/`), protected only by your user account's file permissions.
   Other plugins you install, and any program running as you, can read that file; a copy of it works as your sign-in

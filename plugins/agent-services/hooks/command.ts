@@ -77,8 +77,11 @@ export const SETUP_SPEC = {
   name: 'setup',
   description:
     "Apply the user's answer to the agent-services setup question: \"savings preview\" shows what the daily savings " +
-    'upload sends; "savings on" / "savings not_now"; "dashboard allow" / "dashboard not_now". Only call it with an ' +
-    'answer the user gave.',
+    'upload sends; "savings on" / "savings not_now"; "dashboard allow" / "dashboard not_now". The dashboard is a ' +
+    "private Artifact page on the user's own claude.ai account (only they see it unless they share it) with numbers " +
+    'only: savings, counts, plan and service state. The savings report is one small daily usage summary (counts and ' +
+    'token totals, never prompts, file contents or paths) that the service turns into the saved-dollars figure. Only ' +
+    'call it with an answer the user gave.',
   inputSchema: {
     type: 'object',
     properties: { command: { type: 'string', enum: SETUP_COMMANDS } },
