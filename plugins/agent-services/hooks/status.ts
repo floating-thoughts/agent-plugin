@@ -11,6 +11,9 @@
 //              or null (refresh it when savingsDue says so, keep the old one when a fetch fails)
 //   counts     today's counts { route, compact_start, index } (todayCounts builds them from savings events)
 //   update     optional: the update command line (updateCommand) when updateHintDue says it is time
+//   gate       optional: the reason the service gate is closed (svc.ts GateState.reason), or null while open
+// Owner decision 2026-11-01: the line always says something, in the same words as the band above the prompt
+// (band.ts BAND_TEXT says each state in full).
 // The readers are not technical: the line says what was saved in dollars and what was done today in plain words.
 // weeklyText is the once-a-week summary line (wiring.ts weeklySummary keeps the figure it compares against).
 import { pyFixed } from './pyfmt'
@@ -25,8 +28,8 @@ export const COMMAND = '/agent-services'
 export const UPDATE_HINT_MS = 7 * 86_400_000 // plan 3.8: the update line at most once per 7 days
 export const HINT_OFF = `to see how much it saves you, run ${COMMAND} savings on`
 export const HINT_OFF_SHORT = `see savings: ${COMMAND} savings on`
-export const HINT_WAIT = 'savings appear after the first day'
-export const HINT_WAIT_SHORT = 'savings after day one'
+export const HINT_WAIT = 'savings from tomorrow' // after "on": signed in, no figure yet (band.ts BAND_TEXT.wait)
+export const HINT_WAIT_SHORT = 'savings from tomorrow'
 // Shown once (log line and toast) where the daily upload is on by default (wiring.ts startNotices).
 export const DEFAULT_ON_NOTICE =
   `${NAME} now shows how much it saves you. To do that it uploads a daily summary of usage counts, never your code ` +
@@ -35,6 +38,13 @@ export const DEFAULT_ON_NOTICE =
 export const SIGN_IN_LINE = `${NAME}${SEP}signed out: ${COMMAND} login <email>`
 export const LOCKED_LINE = `${NAME}${SEP}paused: this account is locked; contact support, then ${COMMAND} login <email>`
 export const ORG_PAUSED_STATUS = `${NAME}${SEP}paused by your company; ask your admin` // O2
+// The status line while the service gate is closed for a reason other than sign-in (band.ts BAND_TEXT in full).
+export const GATE_STATUS: Readonly<Record<string, string>> = {
+  offline: `${NAME}${SEP}offline mode is on`,
+  unavailable: `${NAME}${SEP}can't reach its server`,
+  unverified: `${NAME}${SEP}can't reach its server`,
+  upgrade: `${NAME}${SEP}update needed`,
+}
 // today's counts: [event kind, one, many]
 export const COUNTED: [string, string, string][] = [
   ['route', 'job on a cheaper model', 'jobs on a cheaper model'],
@@ -44,7 +54,7 @@ const DAY_RX = /^[0-9]{4}-([0-9]{2})-([0-9]{2})\n?$/
 
 export type Counts = Record<string, number>
 export type Auth = 'ok' | 'signed_out' | 'auth_failed' | 'locked' | 'paused'
-export type StatusInput = { auth: Auth; metricsOn: boolean; saved: unknown; counts: Counts; update?: string | null }
+export type StatusInput = { auth: Auth; metricsOn: boolean; saved: unknown; counts: Counts; update?: string | null; gate?: string | null }
 
 const isObj = (v: unknown): v is Record<string, any> => typeof v === 'object' && v !== null && !Array.isArray(v)
 const num = (v: unknown): v is number => typeof v === 'number' && Number.isFinite(v)
@@ -86,6 +96,7 @@ export function render(metricsOn: boolean, saved: unknown, counts: Counts): stri
     const since = shortDay((saved as Record<string, unknown>).first_day)
     head.push(`saved you $${fixed(usd, 2, true)} ${since ? `since ${since}` : 'so far'}`)
   } else {
+    head.push('on')
     tail = HINT_WAIT
     short = HINT_WAIT_SHORT
   }
@@ -108,6 +119,9 @@ export function statusText(input: StatusInput): string {
   if (input.auth === 'paused') return ORG_PAUSED_STATUS
   if (input.auth !== 'ok') return SIGN_IN_LINE
   if (typeof input.update === 'string' && input.update) return input.update
+  const gate = typeof input.gate === 'string' ? input.gate : ''
+  if (gate === 'login' || gate === 'locked' || gate === 'paused') return gate === 'login' ? SIGN_IN_LINE : gate === 'locked' ? LOCKED_LINE : ORG_PAUSED_STATUS
+  if (GATE_STATUS[gate]) return GATE_STATUS[gate]
   return render(input.metricsOn === true, input.saved, input.counts ?? {})
 }
 

@@ -40,7 +40,7 @@ import { collect, pageChanged, publishedUrlOk, render as renderPage, renderDue }
 import { DEFAULT_ON_NOTICE, savingsDue, statusText, updateCommand, updateHintDue, weeklyText } from './status'
 import { counterDays, countsOf, dayCountsFromStore, dayEmpty, normalizeDay } from './day_counts'
 import { boardData, readOutboxDay, timelineOf, weeklyOf } from './board_facts'
-import { bandFacts, paused, type BandFacts } from './band'
+import { bandFacts, paused, type BandFacts, type BandKind, type BandState } from './band'
 import { readOrg } from './org'
 import { BossBoard } from './boss'
 import { MAIN_BOARD, type Board } from './dashboard'
@@ -82,7 +82,7 @@ export type WiringDeps = {
   prices: Prices // modules/usage/prices.json, parsed
   template: () => Promise<string | null> // <plugin>/dashboard/index.html text
   setStatus?: (text: string) => unknown // $.ui.status
-  setBand?: (facts: BandFacts | null) => unknown // band.ts bandSetter: the band above the prompt (R9)
+  setBand?: (state: BandState | null) => unknown // band.ts bandSetter: the band above the prompt (R9)
   outbox?: Outbox | null
   clock?: () => number // ms since the epoch
   random?: (n: number) => Uint8Array
@@ -364,7 +364,17 @@ export class Wiring {
     const st = await this.authState()
     if (st !== 'ok') return statusText({ auth: st === 'locked' || st === 'paused' ? st : 'signed_out', metricsOn: false, saved: null, counts: {} })
     const on = await this.metricsOnNow()
-    return statusText({ auth: 'ok', metricsOn: on, saved: on ? saved : null, counts: await this.todayCounts(), update })
+    return statusText({ auth: 'ok', metricsOn: on, saved: on ? saved : null, counts: await this.todayCounts(), update, gate: this.closedGate() })
+  }
+
+  /** The reason the service gate is closed ('unknown' before the first hello counts as open), or null. */
+  private closedGate(): string | null {
+    try {
+      const g = this.d.svc.gateState()
+      return paused(g) ? (g.reason as string) : null
+    } catch {
+      return null
+    }
   }
 
   private show(text: string): void {
@@ -426,12 +436,41 @@ export class Wiring {
     }
   }
 
+  /**
+   * The band's state (owner decision 2026-11-01: the band always shows something): the sign-in, lock and company
+   * pause as the status line takes them, then a closed gate, then the facts (bandFacts, plus the status line's
+   * total figure for when there is no 7-day one), else 'wait' or, with the savings record off, 'off'.
+   */
+  async bandState(): Promise<BandState> {
+    try {
+      const st = await this.authState()
+      if (st !== 'ok') return { state: st === 'locked' ? 'locked' : st === 'paused' ? 'paused' : 'signed_out' }
+      const gate = this.closedGate()
+      if (gate !== null) {
+        const kinds: Record<string, BandKind> = { login: 'signed_out', locked: 'locked', paused: 'paused', offline: 'offline', upgrade: 'upgrade' }
+        return { state: kinds[gate] ?? 'unreachable' }
+      }
+      const on = await this.metricsOnNow()
+      const s = on ? await this.savingsBody(false) : null
+      const usd = isObj(s) ? num(s.usd) : null
+      const total = usd !== null && usd >= 0.005 ? { usd, since: typeof s!.first_day === 'string' ? s!.first_day : null } : null
+      const facts = await this.bandFacts()
+      if (facts || total) {
+        const f: BandFacts = facts ?? { saved_usd: null, days: 7, counts: {}, latest: null }
+        return { state: 'facts', facts: { ...f, total } }
+      }
+      return { state: on ? 'wait' : 'off' }
+    } catch {
+      return { state: 'starting' }
+    }
+  }
+
   /** The band's state after a status-line refresh (nothing when no band is wired). */
   private async band(): Promise<void> {
     if (!this.d.setBand) return
-    const facts = await this.bandFacts()
+    const state = await this.bandState()
     try {
-      this.d.setBand(facts)
+      this.d.setBand(state)
     } catch {
       // the band never breaks a hook
     }

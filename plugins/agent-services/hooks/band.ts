@@ -3,24 +3,35 @@
 //   "agent-services saved you $3.10 in the last 7 days | today: 5 jobs on a cheaper model | latest: ... at 2:05 pm"
 //   (the parts joined by status.ts SEP, a middle dot, shown here as |)
 //
+// Owner decision 2026-11-01 (replaces R9's "hidden while signed out, paused or with nothing to show"): the band
+// always shows something. wiring.ts bandState() says which state the session is in and hands the facts along;
+// bandText() turns it into the line, in plain words for readers who are not technical, saying in full what the
+// status line (status.ts statusText) says in short:
+//   facts        the saved figure (the 7-day one, else the total the status line shows), today's counts, the latest
+//   wait / off   signed in with no figure yet / the savings record turned off
+//   signed_out, locked, paused, offline, unreachable, upgrade: one BAND_TEXT line each
+//   starting     nothing written yet by this copy of the module (just loaded, or reloaded after a self-update)
+// Only a survey holding the band passes the event on.
+//
 // Nothing here computes a figure of its own: wiring.ts bandFacts() builds board_facts.ts timelineOf and weeklyOf
 // over cached reads only (no request) after every status-line refresh, and bandFacts() below keeps the parts the
-// line shows. bandSetter keeps them in this module and asks the engine to draw the band again when they changed,
-// so drawing reads one value and makes no request or file read. Nothing is drawn (the hook passes the event on) while signed out,
-// while the plugin is paused (the gate closed: sign-in, an org pause, offline, the server), while a survey holds
-// the band, or when there is nothing to show yet.
+// line shows. bandSetter keeps the state in this module and asks the engine to draw the band again when it
+// changed, so drawing reads one value and makes no request or file read.
 //
 // The module is .ts, not .tsx: register.ts is also run under node (type stripping, no JSX) by the test harnesses,
-// so the one element is built with the surface's Text constructor, which is what JSX compiles to.
+// so the one element is built with the surface's Text constructor, which is what JSX compiles to. Text is in every
+// surface's element table, and both the terminal and the desktop app raise AbovePrompt.
 //
 //   bandFacts(timeline, weekly)   -> BandFacts | null   (the parts the line uses; null: nothing to show)
 //   bandLine(facts, columns, tz?) -> string | null      (the longest form that fits the band's width)
+//   bandText(state, columns, tz?) -> string             (the line for any state: never null)
 //   paused(gate)                  -> boolean            (a closed gate with a known reason)
-//   bandSetter($)                 -> (facts) => void    (wiring.ts setBand: keeps them, redraws when changed)
+//   bandSetter($)                 -> (state) => void    (wiring.ts setBand: keeps it, redraws when changed)
 //   installBand(on)               -> the ui.render hook on { component: 'AbovePrompt' }
 import type { EngineInterface } from 'claude-code'
 import { money, type Timeline } from './board_facts'
-import { NAME, SEP, todayText } from './status'
+import { ORG_PAUSED_LINE } from './org'
+import { COMMAND, NAME, SEP, shortDay, todayText } from './status'
 
 type Obj = Record<string, any>
 export type BandFacts = {
@@ -28,11 +39,28 @@ export type BandFacts = {
   days: number // the window of saved_usd (board_facts WEEK_DAYS)
   counts: Record<string, number> // board_facts timelineOf counts: today's, in the status line's terms
   latest: { text: string; at: string } | null // board_facts timelineOf items[0]: the newest thing done today
+  total?: { usd: number; since: string | null } | null // the status line's figure, used when there is no 7-day one
+}
+export type BandKind = 'facts' | 'wait' | 'off' | 'signed_out' | 'locked' | 'paused' | 'offline' | 'unreachable' | 'upgrade' | 'starting'
+export type BandState = { state: BandKind; facts?: BandFacts | null }
+
+// The band's line for every state but 'facts'. The status line says the same in short (status.ts SIGN_IN_LINE,
+// LOCKED_LINE, ORG_PAUSED_STATUS, GATE_STATUS, HINT_WAIT, HINT_OFF).
+export const BAND_TEXT: Readonly<Record<string, string>> = {
+  wait: `${NAME} is on. Your savings show here after your first full day of use.`,
+  off: `${NAME} is on. To see how much it saves you, type ${COMMAND} savings on.`,
+  signed_out: `${NAME}: signed out. Type ${COMMAND} login to sign in.`,
+  locked: `${NAME}: this account is locked. Contact support, then type ${COMMAND} login.`,
+  paused: ORG_PAUSED_LINE,
+  offline: `${NAME}: offline mode is on, so nothing is sent. Type ${COMMAND} offline off to turn it off.`,
+  unreachable: `${NAME} can't reach its server right now. It tries again at the next session.`,
+  upgrade: `${NAME}: this version is no longer accepted. Update the plugin to keep using it.`,
+  starting: `${NAME} is starting. Its status shows here after your next message.`,
 }
 
-// The facts the band draws, as bandSetter last wrote them. Not $.state: a value there must be declared in a types
+// The state the band draws, as bandSetter last wrote it (null: nothing written yet, the 'starting' line). Not $.state: a value there must be declared in a types
 // contract named by plugin.json; a hot reload empties this, and the next status-line refresh writes it again.
-let shown: BandFacts | null = null
+let shown: BandState | null = null
 
 const isObj = (v: unknown): v is Obj => typeof v === 'object' && v !== null && !Array.isArray(v)
 const num = (v: unknown): number | null => (typeof v === 'number' && Number.isFinite(v) ? v : null)
@@ -71,7 +99,15 @@ export function bandLine(facts: unknown, columns?: unknown, timeZone?: string): 
   if (!isObj(facts)) return null
   const usd = num(facts.saved_usd)
   const days = num(facts.days) ?? 7
-  const head = usd !== null && usd >= 0.005 ? `${NAME} saved you ${money(usd)} in the last ${days} days` : null
+  const t = isObj(facts.total) ? facts.total : null
+  const all = t ? num(t.usd) : null
+  const since = t ? shortDay(t.since) : null
+  const head =
+    usd !== null && usd >= 0.005
+      ? `${NAME} saved you ${money(usd)} in the last ${days} days`
+      : all !== null && all >= 0.005
+        ? `${NAME} saved you ${money(all)} ${since ? `since ${since}` : 'so far'}` // the status line's figure and words
+        : null
   const today = isObj(facts.counts) ? todayText(facts.counts as Record<string, number>) : null
   const l = isObj(facts.latest) && typeof facts.latest.text === 'string' && facts.latest.text ? facts.latest : null
   const at = l && typeof l.at === 'string' ? clockText(l.at, timeZone) : null
@@ -98,13 +134,25 @@ export function paused(gate: unknown): boolean {
   return typeof gate.reason === 'string' && gate.reason !== '' && gate.reason !== 'unknown'
 }
 
-/** The facts the band draws now (tests). */
-export const bandShown = (): BandFacts | null => shown
+/** The band's line for a state (a BandState, or bare BandFacts as before); never null: the band always shows. */
+export function bandText(state: unknown, columns?: unknown, timeZone?: string): string {
+  const st: Obj | null = isObj(state) ? (typeof state.state === 'string' ? state : { state: 'facts', facts: state }) : null
+  if (st === null) return BAND_TEXT.starting
+  if (st.state === 'facts') return bandLine(st.facts, columns, timeZone) ?? BAND_TEXT.wait
+  return BAND_TEXT[st.state] ?? BAND_TEXT.starting
+}
 
-/** wiring.ts setBand: the band's facts, and a redraw of the band when they changed. Never throws. */
-export function bandSetter($: EngineInterface): (facts: BandFacts | null) => void {
-  return (facts) => {
-    const next = isObj(facts) ? facts : null
+/** The state the band draws now (tests). */
+export const bandShown = (): BandState | null => shown
+
+/** wiring.ts setBand: the band's state (bare facts are the 'facts' state), and a redraw when it changed. Never throws. */
+export function bandSetter($: EngineInterface): (state: BandState | BandFacts | null) => void {
+  return (state) => {
+    const next: BandState | null = isObj(state)
+      ? typeof state.state === 'string'
+        ? (state as BandState)
+        : { state: 'facts', facts: state as BandFacts }
+      : null
     if (JSON.stringify(next) === JSON.stringify(shown)) return
     shown = next
     try {
@@ -115,12 +163,12 @@ export function bandSetter($: EngineInterface): (facts: BandFacts | null) => voi
   }
 }
 
-/** The band: one dim line above the prompt from the facts bandSetter wrote; the event goes on when there are none. */
+/** The band: one dim line above the prompt from the state bandSetter wrote, on the terminal and the desktop app alike;
+ *  the event goes on only while a survey holds the band. */
 export function installBand(on: any): void {
   on('ui.render', { component: 'AbovePrompt' }, async ($: EngineInterface, e: Obj, next: (e: Obj) => unknown) => {
     if (e.props?.hasSurvey === true) return next(e)
-    const line = bandLine(shown, e.props?.bodyColumns)
-    if (line === null) return next(e)
+    const line = bandText(shown, e.props?.bodyColumns)
     const { Text } = $.ui.resolve(e as any) as any
     return Text({ dimColor: true, children: line })
   }).catch(($: EngineInterface, e: Obj, next: (e: Obj) => unknown) => next(e))
