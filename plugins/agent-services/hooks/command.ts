@@ -1598,6 +1598,8 @@ export type EngineOptions = {
   outbox?: Outbox | null
   prices?: Prices | null // the shipped price table; without it the estimate has no data
   dailyBody?: (day: string) => Promise<Record<string, unknown>>
+  refreshTime?: () => Promise<string> // wiring.ts refreshTime
+  panel?: () => Promise<string[]> // wiring.ts panelLines
   clientVersion?: string
   marketplace?: string
   now?: () => number
@@ -1642,6 +1644,8 @@ export function engineDeps($: EngineInterface, o: EngineOptions): CommandDeps {
       return estimateScan.step(`${d.configDir}/projects`) // a part of a long history per run (fits the hook)
     },
     dailyBody: o.dailyBody,
+    refreshTime: o.refreshTime,
+    panel: o.panel,
     clientVersion: o.clientVersion,
     outbox: o.outbox ?? null,
     outboxFs: fs,

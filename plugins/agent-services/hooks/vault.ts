@@ -163,10 +163,12 @@ export function vaultPendingLine(): string | null {
 }
 
 /** tool.call, before the call: the event to run with this vault's placeholders swapped for the real values (only for
- * the call itself, locally), or null when there is nothing to swap. The fields tool, tool_use_id and agentId stay. */
+ * the call itself, locally), or null when there is nothing to swap. The fields tool, tool_use_id and agentId stay.
+ * Only shell commands and file writes get real values; every other tool (web, browser, MCP, Agent) keeps placeholders. */
 export function vaultToolIn(e: Obj): Obj | null {
   try {
     if (table()?.unmask !== true || !Object.keys(vault).length || !e || typeof e !== 'object') return null // served per account
+    if (!['Bash', 'PowerShell', 'Write', 'Edit', 'MultiEdit', 'NotebookEdit'].includes(String(e.tool))) return null
     const out: Obj = { ...e }
     let changed = false
     for (const [k, v] of Object.entries(e)) {
@@ -183,17 +185,17 @@ export function vaultToolIn(e: Obj): Obj | null {
   }
 }
 
-/** tool.call, after the call: the answer with secrets in its result masked again ({ result, context }), or null when
- * nothing changed, the call was denied or failed (the kept row is masked by vaultAppend then). */
+/** tool.call, after the call: the answer with secrets in its result masked again ({ result, isError, context }), or
+ * null when nothing changed, the call was denied or has no result. A failed call's output is masked too. */
 export function vaultToolOut($: EngineInterface, done: Obj): Obj | null {
   try {
     const t = table()
-    if (!t || !done || done.deny !== undefined || done.isError || done.result === undefined) return null
+    if (!t || !done || done.deny !== undefined || done.result === undefined) return null
     const found: string[] = []
     const result = mapStrings(done.result, (s) => maskText(s, t, found))
     if (JSON.stringify(result) === JSON.stringify(done.result)) return null
     if (found.length) log($, `Secret masking: ${count(found.length)} in a tool's output masked (${kinds(found)}).`)
-    return { result, ...(done.context ? { context: done.context } : {}) }
+    return { result, ...(done.isError ? { isError: done.isError } : {}), ...(done.context ? { context: done.context } : {}) }
   } catch {
     return null
   }

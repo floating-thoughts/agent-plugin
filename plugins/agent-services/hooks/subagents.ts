@@ -333,7 +333,7 @@ export async function ownerCheck($: EngineInterface, e: Obj, cwd: string | null,
 export function reportFile(dirs: { home: string; data: string }, session: string, agentId: string): string | null {
   const folder = part('reports')?.folder
   if (typeof folder !== 'string' || !folder) return null
-  const clean = (t: string) => String(t).replace(/[^\w.-]/g, '_')
+  const clean = (t: string) => String(t).replace(/[^\w.-]/g, '_').replace(/^\.*$/, '_') // never '', '.' or '..'
   const values = { home: dirs.home.replace(/\\/g, '/').replace(/\/+$/, ''), data: dirs.data.replace(/\\/g, '/').replace(/\/+$/, ''), session: clean(session) }
   if ((folder.includes('{home}') && !values.home) || (folder.includes('{data}') && !values.data)) return null
   return `${fill(folder, values)}/${clean(agentId)}.md`

@@ -42,7 +42,8 @@ export type UsageDay = {
 }
 export type Limit = { pct: number; resets_at: string | null }
 export type Plan = { week: Limit | null; five_hour: Limit | null; context: { tokens: number; window: number } | null }
-export type Column = { title: string; rows: string[][] }
+// align: per cell position, how the band lines a sub-column up (default: the first left, the others right)
+export type Column = { title: string; rows: string[][]; align?: ('left' | 'center' | 'right')[] }
 export type Panel = { columns: Column[]; method: string }
 
 const isObj = (v: unknown): v is Obj => typeof v === 'object' && v !== null && !Array.isArray(v)
@@ -186,7 +187,7 @@ export function resetText(resetsAt: string | null, nowMs: number, withDays: bool
   if (minutes <= 0) return 'resetting'
   const rest = minutes % 60
   return withDays
-    ? `${Math.floor(minutes / 1440)}d ${Math.floor((minutes % 1440) / 60)}h ${rest}m`
+    ? `${Math.floor(minutes / 1440)}d ${Math.floor((minutes % 1440) / 60)}h` // the week: to the hour
     : `${Math.floor(minutes / 60)}h ${rest}m`
 }
 
@@ -216,10 +217,11 @@ export function panelOf(days: unknown, p: Plan | null, savings: unknown, today: 
     ],
   }
   const pl = p ?? { week: null, five_hour: null, context: null }
-  const limit = (l: Limit | null, withDays: boolean): string => {
-    if (!l) return '--'
+  // [percent, "(time to reset)"]: two cells, so the band centres the percent and right-aligns the reset
+  const limit = (l: Limit | null, withDays: boolean): string[] => {
+    if (!l) return ['--', '']
     const left = resetText(l.resets_at, nowMs, withDays)
-    return `${Math.round(l.pct)}%${left ? ` (${left})` : ''}`
+    return [`${Math.round(l.pct)}%`, left ? `(${left})` : '']
   }
   const ctx = pl.context
   const s = isObj(savings) && !('error' in savings) ? savings : null
@@ -227,10 +229,11 @@ export function panelOf(days: unknown, p: Plan | null, savings: unknown, today: 
   const quota: Column = {
     title: ctx ? `Quota${DOT}context ${Math.round((ctx.tokens / ctx.window) * 100)}% (${tokensText(ctx.tokens)})` : `Quota${DOT}context --`,
     rows: [
-      ['Week', limit(pl.week, true)],
-      ['5-hour', limit(pl.five_hour, false)],
-      ['Saved', usd === null ? '--' : moneyText(usd)],
+      ['Week', ...limit(pl.week, true)],
+      ['5-hour', ...limit(pl.five_hour, false)],
+      ['Saved', '', usd === null ? '--' : moneyText(usd)],
     ],
+    align: ['left', 'center', 'right'],
   }
   // the service's time figures when it has them, else this computer's (all its stored days)
   const t = s && isObj(s.time) && num(s.time.agent_seconds) !== null ? s.time : null

@@ -13,6 +13,7 @@
 // table is read in memory and the notes only reach this session's model.
 import type { EngineInterface } from 'claude-code'
 import { rulesLive, rulesTable } from './rules'
+import { vaultMask } from './vault'
 
 type Obj = Record<string, any>
 type Rule = { pattern?: string; tool?: string; first_alert_minutes?: number; repeat_minutes?: number; never?: boolean; foreground?: boolean; until?: string; reason?: string }
@@ -48,6 +49,13 @@ let loadedAt = Date.now()
 function table(): Table | null {
   const t = rulesTable<Table>('watch')
   return t && typeof t === 'object' ? t : null
+}
+
+/** Model-written text (a task's description) put into a prompt: secrets masked, line breaks and control characters
+ * collapsed to single spaces, at most 160 characters with an ellipsis. */
+function oneLine(text: string): string {
+  const s = vaultMask(String(text ?? '')).replace(/[\s\p{Cc}\p{Cf}\p{Zl}\p{Zp}]+/gu, ' ').trim()
+  return s.length > 160 ? s.slice(0, 159) + '\u2026' : s
 }
 
 function fill(text: string | undefined, vars: Record<string, string | number>): string {
@@ -170,7 +178,7 @@ export async function watchBash($: EngineInterface, e: Obj, next: (e: Obj) => Pr
       const task: AutoTask = {
         id: moved.id,
         tool: String(e.tool),
-        command: (typeof e.command === 'string' ? e.command : '').replace(/\s+/g, ' ').trim().slice(0, 200),
+        command: vaultMask(typeof e.command === 'string' ? e.command : '').replace(/\s+/g, ' ').trim().slice(0, 200), // placeholders, never revealed values
         agentId: e.agentId ?? null,
         output: moved.output,
         startedAt,
@@ -307,7 +315,7 @@ export function watchDue(at: number, live: string[]): { prompts: string[]; sends
     const s = t.shells ?? {}
     const lines = due.map((x) => {
       shellAsked[x.id] = at
-      return fill(s.line, { description: x.description ?? '', task: x.id, minutes: mins(at - x.startedAt) })
+      return fill(s.line, { description: oneLine(x.description ?? ''), task: x.id, minutes: mins(at - x.startedAt) })
     })
     out.prompts.push(fill(s.text, { lines: lines.join('\n') }))
   }

@@ -97,7 +97,8 @@ What the engines do on this computer, with the tables:
 - Secret masking: secrets in your prompt, in tool output and in kept conversation rows (API keys, tokens, private keys,
   passwords after `key=` or `--password`) are replaced by `{{secret:NAME}}` placeholders before the model sees them.
   The real values stay in memory for this session only. A tool's input is not changed: the value is not put back into
-  tool calls, except on an account whose served rules turn that on. `/agent-services secrets` lists the placeholder
+  tool calls, except on an account whose served rules turn that on, and there only into shell commands and file
+  writes (Bash, PowerShell, Write, Edit, MultiEdit, NotebookEdit), never into web, browser, MCP or subagent calls. `/agent-services secrets` lists the placeholder
   names (never values); `secrets forget` empties the list. The outbound redaction of what this plugin itself sends is
   separate and works signed out too.
 - Row trimming: after a compaction, the re-attached rows of skills invoked earlier, files read earlier and the

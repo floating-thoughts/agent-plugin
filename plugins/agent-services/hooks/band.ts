@@ -218,19 +218,31 @@ export function installBand(on: any): void {
     const { Text, Box } = $.ui.resolve(e as any) as any
     const panel = bandPanel(shown)
     if (!panel) return Text({ dimColor: true, children: line })
-    if (typeof Box !== 'function') return Text({ dimColor: true, children: [line, ...panelLines(panel)].join('\n') })
+    // the band leaves out the disclosure (panel.method): the status command and the board still show it
+    if (typeof Box !== 'function') return Text({ dimColor: true, children: [line, ...panelLines(panel).slice(0, -1)].join('\n') })
     const column = (c: Panel['columns'][number], i: number) =>
       Box({
         key: String(i), flexDirection: 'column', borderStyle: 'round', borderDimColor: true, paddingX: 1, flexShrink: 0,
-        children: [Text({ key: 't', bold: true, children: c.title }),
-          ...c.rows.map((r, j) => Text({ key: String(j), children: r.filter((x) => x !== '').join(' ') }))],
+        children: [Text({ key: 't', bold: true, children: c.title }), cells(c.rows, c.align)],
       })
+    // one sub-column per cell position, so the figures line up in proportional fonts (the desktop app) as well:
+    // labels flush left, figures flush right
+    const cells = (rows: string[][], align?: string[]) => {
+      const n = Math.max(...rows.map((r) => r.length))
+      return Box({
+        key: 'cells', flexDirection: 'row', columnGap: 2,
+        children: Array.from({ length: n }, (_, k) => Box({
+          key: String(k), flexDirection: 'column',
+          alignItems: { left: 'flex-start', center: 'center', right: 'flex-end' }[align?.[k] ?? (k === 0 ? 'left' : 'right')] ?? 'flex-end',
+          children: rows.map((r, j) => Text({ key: String(j), children: r[k] || ' ' })),
+        })),
+      })
+    }
     return Box({
       flexDirection: 'column',
       children: [
         Text({ key: 'line', dimColor: true, children: line }),
         Box({ key: 'cols', flexDirection: 'row', columnGap: 1, flexWrap: 'nowrap', children: panel.columns.map(column) }),
-        Text({ key: 'method', dimColor: true, children: panel.method }),
       ],
     })
   }).catch(($: EngineInterface, e: Obj, next: (e: Obj) => unknown) => next(e))
