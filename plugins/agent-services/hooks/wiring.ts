@@ -41,6 +41,7 @@ import { readOrg } from './org'
 import { accountOf, accountSwitched, uploadFloor, uploadOn } from './choice'
 import { boardLines, heldPlan, panelLines, panelOf, refreshUsage, USAGE_DAYS_KEY, type Panel } from './panel'
 import { Scanner } from './transcripts'
+import { refreshToolDays, type ProcessRun } from './usage_tool'
 export { notePlan } from './panel' // register.ts imports it through this module
 import { BossBoard } from './boss'
 import { MAIN_BOARD, type Board } from './dashboard'
@@ -92,6 +93,7 @@ export type WiringDeps = {
   update?: { marketplace: string | null; selfUpdates: boolean } | null // selfUpdates false: show the update line
   holder?: string // this session's id, for the metrics lease
   clientVersion?: string
+  run?: ProcessRun | null // $.process.run: the local usage scan tool (usage_tool.ts); absent or null: never run
 }
 
 export type TickResult = { sent: string[]; error: string | null } | { skipped: string }
@@ -665,12 +667,15 @@ export class Wiring {
 
   /** The transcript facts (the diagnostic tool's scan) of the projects root. `full`: one file at a time (no text
    * kept), and the days of the days file (TIME_DAYS_FILE, written by the owner tool that reads every transcript,
-   * over-4-MiB ones included) take the place of the scan's time figures and go to `full_days` for the panel. */
+   * over-4-MiB ones included; usage_tool.ts runs it when it is on this computer) take the place of the scan's time
+   * figures and go to `full_days` for the panel. */
   async facts(bound: { since?: number; maxBytes?: number } = {}, full = false): Promise<Facts> {
     if (!full) return scan(await loadTranscripts(this.d.fs, this.d.projectsRoot, 6, bound), this.d.prices ?? {})
     const s = new Scanner(this.d.prices ?? {})
     await loadTranscripts(this.d.fs, this.d.projectsRoot, 6, { ...bound, onFile: (f) => s.add(f) })
     const facts = s.finish()
+    // usage_tool.ts: the local scan tool, when it is on this computer and due, writes the days file first
+    await refreshToolDays({ fs: this.d.fs, store: this.d.store, dataDir: this.d.dataDir, projectsRoot: this.d.projectsRoot ?? null, prices: this.d.prices, run: this.d.run ?? null, now: this.now() })
     const file = await this.timeDays()
     if (file) {
       facts.full_days = file
@@ -691,9 +696,12 @@ export class Wiring {
     try {
       const o = JSON.parse(String(await this.d.fs.read(`${this.d.dataDir}/services/${TIME_DAYS_FILE}`)))
       if (!isObj(o) || !isObj(o.days)) return null
-      // the day the tool ran (and any later one) was not over yet: those come from the scan
-      const cut = num(o.at) !== null ? localDay(o.at) : this.today()
-      return Object.fromEntries(Object.entries(o.days).filter(([d, v]) => d < cut && isObj(v))) as Record<string, Obj>
+      // the day the tool ran counts when the file is under an hour old (the plugin runs the tool every 15 minutes:
+      // usage_tool.ts); in an older file that day was not over yet, so it and any later one come from the scan
+      const at = num(o.at)
+      const fresh = at !== null && this.now() >= at && this.now() - at < 60 * 60 * 1000
+      const cut = at !== null ? localDay(at) : this.today()
+      return Object.fromEntries(Object.entries(o.days).filter(([d, v]) => (d < cut || (fresh && d === cut)) && isObj(v))) as Record<string, Obj>
     } catch {
       return null
     }

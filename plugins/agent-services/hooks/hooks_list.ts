@@ -34,7 +34,9 @@ export const HOOKS: readonly HookRow[] = [
       'record on; with "Upload from now on only" nothing from before the day you chose), the request-log cleanup (90 days), the working methods for the first ' +
       'prompt (only at methods level suggest) and the CLAUDE.md methods file (only at methods on), a one-time move ' +
       'from an older version, and the update check (`claude plugin list --json` and `claude plugin marketplace ' +
-      'update agent-plugin`; it never updates the plugin; not in a session nobody can be asked in). After the other plugins\' start hooks: registers the ' +
+      'update agent-plugin`; it never updates the plugin; not in a session nobody can be asked in), and, only when a usage scan tool sits at ' +
+      '~/.agent-services/tools/usage_scan.py, that tool with Python (`py -3`, `python3` or `python`; at most every 15 minutes; ' +
+      'it reads your transcripts and writes services/time-days.json, nothing is sent). After the other plugins\' start hooks: registers the ' +
       'checkpoint tool, unless another plugin in the session already has a tool named checkpoint (then the notes ' +
       'name that one), and reads the open count of .agent/pending.md in the project.',
     shown: 'A dim line when the sign-in check has something to say.',
@@ -105,8 +107,10 @@ export const HOOKS: readonly HookRow[] = [
     shown: 'Its answer.',
   },
   {
-    event: 'turn.complete', matcher: '', file: 'register.ts', does: ['network', 'file', 'ui'],
-    what: 'Asks the service whether this is a good moment to compact (counters only). Keeps your private ' +
+    event: 'turn.complete', matcher: '', file: 'register.ts', does: ['network', 'file', 'process', 'ui'],
+    what: 'Asks the service whether this is a good moment to compact (counters only). Refreshes the usage panel\'s ' +
+      'figures at most every 10 minutes, running the usage scan tool at ~/.agent-services/tools/usage_scan.py first ' +
+      'when it is there (in the background, at most every 15 minutes, nothing sent). Keeps your private ' +
       'savings page (and a company admin\'s board) current, only when you allowed it: the page is published once ' +
       'with Claude Code\'s Artifact tool, then its figures are written to the page\'s own data with the ' +
       'ArtifactData tool, which does not publish the page again. ' +

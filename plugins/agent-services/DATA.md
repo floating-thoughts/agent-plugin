@@ -45,7 +45,7 @@ the device's public key, the device id, the Claude account hash, and the harness
 | Each session start, and when the sign-in check is due | the plugin version and the contract version |
 | 7 days before the sign-in expires | a hash of the next token |
 | Every subagent start (forks and teammates are skipped; nothing while `routing off`) | at `routing strict` only, the flag strict (so the service refuses a subagent whose description does not start with a task type word); the first word of the task description (whitespace-separated, at most 32 characters; the rest of the description is never sent), its length in characters, the subagent type (at most 64 characters), the requested model and effort, the harness, the dispatch number in this session, a hashed project id (an HMAC of the project folder with a key kept only on this computer, 16 hex digits), a random per-session id, the main session's model id (so the subagent never runs on a larger model), and yes or no for whether your latest message asked for a review (decided on this computer; your message is never sent) |
-| After every turn of the main agent | counters only: context use in percent, turns, tool calls, finished todos, commits, minutes, and the per-session id |
+| After every turn of the main agent | counters only: context use in percent and in tokens, turns, tool calls, finished todos, commits, minutes, and the per-session id |
 | Session start (also a resumed session), the first prompt after a project's `agent-state.md` changes between planning and `phase: running`, and after `/clear` or a compaction, only at methods level `suggest` (the default) | the per-session id, the role `auto`, the work phase, the version pinned, the channel (to fetch the working methods; the full text goes to the model once per session and again only after `/clear`, a compaction, a phase change or a new served version) |
 | Session start, only at methods level `on` (your CLAUDE.md has the agent-services section) | the same, once for each of the six phases |
 | Session start, and once a day in a session left open, only after you chose to upload for the account signed in | the daily usage summary, one per active day not uploaded yet. With "Upload, including the past 30 days" never a day more than 30 days before your choice (so the first upload also sends up to 30 earlier days); with "Upload from now on only" only the days after the day of your choice; after a switch to another account on this computer, nothing from before that account's choice |
@@ -135,10 +135,10 @@ What the engines do on this computer, with the tables:
 
 | What | Kept | For how long |
 |---|---|---|
-| Request log: time, route, status, error code (for a failed sign-in, the reason), account id, device id, a token hash prefix, keyed hashes of IP addresses (of the connecting address and of your address as the network edge reports it; the same address gives the same hash on this server, so abuse can be traced from line to line, but the log alone does not give the address back), the rate limit hit (IP addresses taken out), whether the request was sealed, latency | yes | no time limit: the log is capped only by size (about 20 MiB, plus one older copy), so how long a line stays depends on traffic |
-| Mail log: time, kind of mail, the recipient's address masked, whether it was sent | yes | no time limit: capped by size (about 5 MiB, plus one older copy) |
-| Your account: email, company, plan, status, role | yes | while the account exists (deleting an account only marks it deleted) |
-| Each sign-in: device id, device public key, Claude account hash, harness, a token check value, plugin version, times | yes | while the account exists (ended sign-ins are kept) |
+| Request log: time, route, status, error code (for a failed sign-in, the reason), account id, device id, a token hash prefix, keyed hashes of IP addresses (of the connecting address and of your address as the network edge reports it; the same address gives the same hash on this server, so abuse can be traced from line to line, but the log alone does not give the address back), the rate limit hit (IP addresses taken out), whether the request was sealed, latency | yes | 90 days (lines older are removed by a daily pass; the log is also capped by size, about 20 MiB plus one older copy) |
+| Mail log: time, kind of mail, the recipient's address masked, whether it was sent | yes | 90 days (also capped by size, about 5 MiB plus one older copy) |
+| Your account: email, company, plan, status, role | yes | while the account exists; a deleted account is signed out at once and erased for good 7 days later (every row linked to it) |
+| Each sign-in: device id, device public key, Claude account hash, harness, a token check value, plugin version, times | yes | while the sign-in is active, then 30 days after it ended |
 | Sign-in code | a check value, and the code encrypted with a server key (so the same code can be mailed again) | deleted when used; an unused or expired code stays until the next code request for that account replaces it |
 | Sign-in IP addresses | as keyed hashes only, for rate limits and known-address checks | from 1 hour to 30 days after use, deleted at the next sign-in activity after that (known addresses: at that account's next successful sign-in), so a row can stay longer |
 | Anti-abuse records: failed signed requests and lockouts, per IP address (not hashed) and per account | yes | about 10 to 15 minutes, deleted at the next failed request after that |
@@ -147,9 +147,11 @@ What the engines do on this computer, with the tables:
 | Working-methods sessions | per-session id, role, device id, phase, the item versions delivered and when; no text from you | 395 days |
 | The working-methods channel you fetch (stable or beta) | one row per account | while the account exists |
 | The one-time estimate | not kept; one count per account per day | 30 days |
-| Weekly-email setting and sends | yes | while the account exists |
-| Audit and alert records (sign-ins, sign-outs, rotations, setting changes, limits hit; they can name account, device and session ids and a masked email address; IP addresses and email hashes are taken out of alerts before they are stored) | yes | the newest 100,000 audit and 50,000 alert records |
-| Backups of the database (everything above except the request and mail logs) | daily copies on the server itself, not encrypted and readable only by its administrator; encrypted copies off the server | 14 days on the server and up to about 30 days off it, so deleted data can survive that long in a backup |
+| Weekly-email setting and sends | yes | while the account exists (the weekly email is off until you turn it on) |
+| Consent records: what you agreed to or withdrew (weekly email, company summary, usage upload, terms, privacy policy, the business-use and 18+ declaration), when, how and the text version; your account id, never your email | yes | the current answer while the account exists; older answers 3 years; after an erase the rows stay as proof under a random id that no longer leads to you |
+| Audit log of administrative actions (time, a random id for who and what, action, approval, outcome; no email or IP address), chained by hashes | yes | 3 years; the table that links the random ids to accounts is kept 13 months after the account is gone and deleted at once when an account is erased |
+| Audit and alert records (sign-ins, sign-outs, rotations, setting changes, limits hit; they can name account, device and session ids and a masked email address; IP addresses and email hashes are taken out of alerts before they are stored) | yes | audit records 13 months, alert records 90 days |
+| Backups of the database (everything above except the request and mail logs) | daily copies on the server itself, encrypted (once the operator has set up the backup key) and readable only by its administrator; encrypted copies off the server | 14 days on the server and up to about 30 days off it, so deleted data can survive that long in a backup |
 
 Mail (sign-in codes, the weekly savings email, a company's weekly summary to its admin) is sent through an email
 delivery service.
@@ -185,24 +187,41 @@ fetched, never another member's. For the admin, the same command still shows the
 | `~/.agent-services/dashboard/`, `~/.agent-services/boss/`, `~/.agent-services/services/*.json` | your savings page (a company admin's board, with member emails) and their publish state (`dashboard.json`, `boss.json`), and for each board the page format last published and the version of its figures document (`dashboard-live.json`, `boss-live.json`) |
 | `~/.agent-services/methods.md`, `methods.approved.md`, `methods.pending.md` | the working-methods text |
 | `~/.agent-services/methods.seen.md`, `methods.previous.md` | the served working-methods text of the version last seen and of the one before it, so `/agent-services methods diff` can show what changed |
+| Claude Code's plugin store (see above), keys `checkpoint_counts`, `terms_accepted`, `redline_override` | checkpoint counters per hashed session id; the terms version you accepted at sign-in (sent with the code, with "business use, 18 or older"); the weekly reset until which you let your agent start subagents past the usage line |
 | `~/.agent-services/services/asked.json` | when a setup question was last asked, by any session (an unanswered question waits 7 days) |
 | `plugin-update.json` (in Claude Code's data folder for this plugin, else `~/.agent-services/services/`) | the update check's state |
 | `~/.agent-services/MIGRATED` | what the one-time move from an older version did |
 | `~/.agent-services/REMOVED` | left by `/agent-services remove`; while it holds text, the plugin does nothing in any session; a sign-in empties it |
 | `~/.claude/CLAUDE.md` | one marked section importing `~/.agent-services/methods.md`, only after you chose `methods on` |
 | Claude Code's plugin store (see above), key `usage_days` | this computer's figures per day for the usage panel: tokens and their cost at API prices, typed bytes, agent seconds and turns; never sent as such |
+| `~/.agent-services/tools/usage_scan.py` | not part of the plugin: a usage scan tool you may put there yourself; when it is there, the plugin runs it (see "Local helpers" below) |
+| `~/.agent-services/services/time-days.json` | per-day figures of every transcript (tokens, cache reads, cost at API prices, typed bytes, agent seconds, turns) written by the usage scan tool, or by the plugin from that tool's answer; read for the usage panel and the daily summary's time figures |
 | `.agent/test-lock.json`, `.agent/pending.md`, `.agent/steps.json` in a project | read only, never written or sent by the plugin; you or the model write them (see "Local helpers" below) |
 
 `~/.agent-services` is `AGENT_SVC_DATA_DIR` when that is set. The plugin reads, and does not send: your Claude
 account id (only its hash leaves), your Claude Code transcripts (to count tokens for the summary and the estimate,
 and the time figures; Claude Code lets a plugin read files of up to 4 MiB, so larger transcripts are left out unless
 `~/.agent-services/services/time-days.json` holds per-day figures written by a separate tool, which then take the
-place of the plugin's own for the days it covers), your plan's usage and context figures as Claude Code reports them
+place of the plugin's own for the days it covers, today included while the file is under an hour old), your plan's usage and context figures as Claude Code reports them
 (shown in the panel, never sent),
 files read in parts (to count their size), a project's `agent-state.md` and the three `.agent/` files above, the
 text of your messages (only to see whether one asks for a review), and the marketplace list.
 
 **Local helpers** (they send nothing of their own):
+
+- The usage scan tool: only when a file named `usage_scan.py` sits in `~/.agent-services/tools/` (the plugin ships
+  none and never writes there), the plugin runs it with Python, trying `py -3`, then `python3`, then `python` from
+  your PATH, as a program with fixed arguments (`usage_scan.py --days`, no shell), in the background when the usage
+  panel's figures are refreshed or the daily summary is built, at most once every 15 minutes across sessions, with
+  a 5-minute time limit. It gets on its input your Claude Code projects folder, the start of the day the last
+  `time-days.json` was written (it then reads only transcripts changed since) and the plugin's price table, and it
+  reads your transcripts, larger ones included. Its answer must be per-day figures in the expected shape, at most
+  8 MiB; anything else is ignored. A good answer is written to `~/.agent-services/services/time-days.json`; for every
+  day it covers, today included, its figures then take the place of the plugin's own in the usage panel, and its
+  time figures in the daily summary (the summary's token counts per model still come from the plugin's own scan). Nothing of it is sent as such; the time
+  figures of a day go with that day's daily summary only while the savings record is on. Without the file, on a
+  surface where the plugin cannot run programs, or when the tool fails, times out or answers anything else, the
+  plugin's own scan is used as before. Removing the file stops it.
 
 - The checkpoint tool (`checkpoint`: milestone, keep, next), registered only when no other plugin in the session has a
   tool named `checkpoint`. After the reply in which the model called it, the plugin compacts the conversation keeping
@@ -245,7 +264,8 @@ Every answer has a fixed shape:
   model is never a larger one of these (another main model sets no cap, and neither does a plugin older than
   0.6.0), and the configuration for a deep review comes only when your latest message asked for a review.
 - Checkpoint timing: now or not, and short lines to keep in a summary (at most 300 characters each), given to the
-  model at the next prompt.
+  model at the next prompt; when it says now, you also see a short notice. The counters are kept per session (under a
+  hash of the session id, at most 50 sessions) in Claude Code's plugin store, so a plugin reload does not reset them.
 - Working methods: a version and items of text (at most 20,000 characters each, each checked against its SHA-256),
   given to the model with a prompt (level `suggest`) or written to `methods.md` (level `on`). Served methods are
   plain text you can read and quote. As a safeguard the plugin also strips any invisible characters (zero-width,

@@ -39,7 +39,7 @@ export const LEVER_WORDS: Record<string, string> = {
   compact: 'memory cleanups',
   index: 'looking up files instead of reading them whole',
 }
-export const ADMIN_LINE = 'Your company admin can see your savings figure.'
+export const ADMIN_LINE = 'Your company admin can see your email address, how many devices you use, and your savings figures.'
 export const OFF_LINE = `Turn on the savings record to see a weekly summary: ${COMMAND} sharing on`
 export const WAIT_LINE = 'Your weekly summary appears after your first full day of measured savings.'
 // PHRASES, LEVER_WORDS and the 0.005 USD threshold are the built-in values; the served board table (rules

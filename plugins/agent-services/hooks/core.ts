@@ -20,6 +20,7 @@ import { TOOLS as CONTRACT_TOOLS, CONTRACT } from './contract'
 import { Counters, sweep } from './counters'
 import type { CountersOptions } from './counters'
 import { Receipts } from './receipts'
+import { sha256Hex } from './e2e'
 import { Records } from './records'
 import { SessionSummary } from './summary'
 import type { Clock, GateState, KV, Random, ReadText, SvcResult, Transport } from './engine_types'
@@ -43,6 +44,9 @@ export const AUTH_FAIL_REASONS = ['login', 'locked', 'paused'] // paused: the co
 export const CHECKPOINT_MARK = 'Checkpoint reached:'
 export const CHECKPOINT_NOW = '[agent-services server note, not written by the user] The server suggests a checkpoint now: once this ' +
   'stretch is done, call the checkpoint tool and keep the items below in the summary.'
+export const CHECKPOINT_SHOWN = 'agent-services: the context is large; a checkpoint is suggested now. Claude compacts at the next ' +
+  'finished step and carries on from the summary.' // shown to the user once per stretch, with the advice
+const CKPT_KEY = 'checkpoint_counts' // per session: the counters survive a plugin reload (at most 50 sessions kept)
 export const SAVINGS_OFF_NEXT = 'The savings record is not on for this account: /agent-services sharing preview shows ' +
   'what it sends, and /agent-services sharing on turns it on.' // the savings tool's `next` when reason is service_off
 export const DENY_TEXT = 'This subagent dispatch did not pass the routing check. Rewrite it as the hint says, then dispatch again.'
@@ -297,6 +301,7 @@ class Session {
   base: number
   pendingContext: string[] | null = null
   advised = false // checkpoint advice delivered since the last reset: not sent again
+  restored = false // counters saved before a plugin reload were added back (or a reset made them moot)
   inflight = false
   mainModel: string | null = null
   models = new Map<string, string>() // agent id -> last step model
@@ -317,6 +322,7 @@ class Session {
     this.base = now
     this.pendingContext = null
     this.advised = false
+    this.restored = true
   }
 }
 
@@ -600,7 +606,7 @@ export class Core {
     s.pendingContext = null
     if (ctx && ctx.length) {
       s.advised = true
-      return answer('inject', { context: [...ctx] })
+      return answer('inject', { context: [...ctx], notice: CHECKPOINT_SHOWN })
     }
     return null
   }
@@ -773,16 +779,42 @@ export class Core {
     s.turns += 1
     if (s.inflight) return answer()
     s.inflight = true
-    const counts = {
-      context_pct: pct, turns: s.turns, tool_calls: s.toolCalls, todos_done: s.todosDone, commits: s.commits,
-      minutes: Math.max(0, Math.floor((this.now() - s.base) / 60)),
-    }
-    this.spawn(() => this.checkpoint(s, sid, counts))
+    const tokens = isInt(ct) && ct >= 0 ? ct : null
+    this.spawn(() => this.checkpoint(s, sid, pct, tokens))
     return answer()
   }
 
-  private async checkpoint(s: Session, session: string, counts: Record<string, number>): Promise<void> {
+  /** Counters saved before a plugin reload are added back once, then the current ones are saved. */
+  private async keepCounts(s: Session, session: string): Promise<void> {
     try {
+      const all = ((await this.store.get(CKPT_KEY)) ?? {}) as Record<string, Record<string, number>>
+      const id = sha256Hex(new TextEncoder().encode('checkpoint:' + session)).slice(0, 16) // never the session id itself
+      const old = all[id]
+      if (!s.restored && old && isInt(old.base) && old.base < s.base) {
+        s.turns += isInt(old.turns) ? old.turns : 0
+        s.toolCalls += isInt(old.tool_calls) ? old.tool_calls : 0
+        s.todosDone += isInt(old.todos_done) ? old.todos_done : 0
+        s.commits += isInt(old.commits) ? old.commits : 0
+        s.base = old.base
+      }
+      s.restored = true
+      const keep = Object.entries(all).filter(([k]) => k !== id)
+        .sort((a, b) => (b[1].saved ?? 0) - (a[1].saved ?? 0)).slice(0, 49)
+      const row = { base: s.base, turns: s.turns, tool_calls: s.toolCalls, todos_done: s.todosDone, commits: s.commits, saved: this.now() }
+      await this.store.set(CKPT_KEY, Object.fromEntries([[id, row], ...keep]))
+    } catch {
+      s.restored = true // the counters of this process only
+    }
+  }
+
+  private async checkpoint(s: Session, session: string, pct: number, tokens: number | null): Promise<void> {
+    try {
+      await this.keepCounts(s, session)
+      const counts: Record<string, number> = {
+        context_pct: pct, turns: s.turns, tool_calls: s.toolCalls, todos_done: s.todosDone, commits: s.commits,
+        minutes: Math.max(0, Math.floor((this.now() - s.base) / 60)),
+      }
+      if (tokens !== null) counts.context_tokens = tokens
       const r = await this.records.checkpoint(session, counts as never)
       if (r && r.now === true && !r.fallback) {
         const lines = (r.keep_lines ?? []).filter((x) => typeof x === 'string')

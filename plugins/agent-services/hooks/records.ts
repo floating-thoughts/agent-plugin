@@ -140,6 +140,7 @@ export type CheckpointCounts = {
   todos_done: unknown
   commits: unknown
   minutes: unknown
+  context_tokens?: unknown // 0.7.6: optional; an older server refuses it (422), then the call is repeated without it
 }
 
 export type RecordsOptions = { store: KV; random: Random; harness?: string }
@@ -288,8 +289,15 @@ export class Records {
     const body = {
       session_ref: this.ref(session), context_pct: pctOf(c.context_pct), turns: intOf(c.turns),
       tool_calls: intOf(c.tool_calls), todos_done: intOf(c.todos_done), commits: intOf(c.commits), minutes: intOf(c.minutes),
+    } as Record<string, unknown>
+    const tk = c.context_tokens
+    if (typeof tk === 'number' && Number.isInteger(tk) && tk >= 0) body.context_tokens = Math.min(tk, 10000000)
+    const statuses: (number | null)[] = []
+    let ans = await this.post('/checkpoint/timing', body, 'checkpoint', deadlineMs, undefined, statuses)
+    if (ans === null && 'context_tokens' in body && statuses.includes(422)) {
+      delete body.context_tokens // a server older than 0.7.6
+      ans = await this.post('/checkpoint/timing', body, 'checkpoint', deadlineMs)
     }
-    const ans = await this.post('/checkpoint/timing', body, 'checkpoint', deadlineMs)
     if (ans !== null && typeof ans.now === 'boolean' && Array.isArray(ans.keep_lines)) {
       return { now: ans.now, keep_lines: ans.keep_lines.filter((x): x is string => typeof x === 'string'), fallback: null }
     }
