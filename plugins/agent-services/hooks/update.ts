@@ -140,20 +140,29 @@ async function run($: EngineInterface, interactive: boolean): Promise<void> {
   }
   retry = false
   seenUpdate = Math.max(seenUpdate, shared.updatedAt ?? 0)
-  const exe = (await text(() => $.env.get('CLAUDE_CODE_EXECPATH'))) || 'claude'
-  const list = async () => (await $.process.run([exe, 'plugin', 'list', '--json'], { timeoutMs: 60_000 })).stdout
-  let listed: string
-  try {
-    listed = await list()
-  } catch (err) {
-    // no $.process on this surface (or it cannot start a command): run nothing from now on; the status line shows
-    // the terminal command instead
-    processMissing = true
+  // the binary Claude Code runs on, else `claude` on PATH, else where its installers put it (a Mac where the
+  // terminal finds no `claude` still updates)
+  const home = (await text(() => $.env.get('HOME'))) || (await text(() => $.env.get('USERPROFILE')))
+  const tried = [await text(() => $.env.get('CLAUDE_CODE_EXECPATH')), 'claude', `${home}/.local/bin/claude`,
+    `${home}/.local/bin/claude.exe`, `${home}/.claude/local/claude`, '/opt/homebrew/bin/claude', '/usr/local/bin/claude']
+  let exe = ''
+  let listed = ''
+  for (const at of tried.filter((p, i, all) => p && !p.startsWith('/.') && all.indexOf(p) === i)) {
+    try {
+      listed = String((await $.process.run([at, 'plugin', 'list', '--json'], { timeoutMs: 60_000 })).stdout ?? '')
+      exe = at
+      break
+    } catch {}
+  }
+  if (!exe) {
+    if (await probeProcess($)) return noted($, 'no claude command found to update with; trying again at the next check')
+    // no $.process on this surface: run nothing from now on; the status line shows the terminal command instead
     try {
       missingHook?.()
     } catch {}
-    throw err
+    return noted($, 'this surface cannot run commands')
   }
+  const list = async () => (await $.process.run([exe, 'plugin', 'list', '--json'], { timeoutMs: 60_000 })).stdout
   const id = idOf(listed, $.plugin.name)
   if (id === null) {
     const head = String(listed ?? '').replace(/\s+/g, ' ').slice(0, 80) || 'nothing'

@@ -38,9 +38,11 @@ import { KEYS, safeGet, safeSet } from './store'
 import type { KV } from './store'
 import { gateNotice, LOCKED_LINE, NOTICE_TEXT, PAUSED_LINE, PLAN_NOTICE, SERVED_CHANNELS, SERVED_ROLES } from './svc'
 import type { Result, Svc } from './svc'
-import { askConsent, claimAsk, CONSENT_KEY, consentState, dashboardUrl, readConsent, sharingState } from './consent'
+import { askConsent, claimAsk, CONSENT_KEY, CONSENT_SNOOZE_MS, consentState, dashboardUrl, readConsent, sharingState } from './consent'
 import { dataDir, engineDirs, envOf, readTextOf } from './engine_env'
 import { companyCommand } from './boss'
+import { hasTrust, TRUST_HEADER, TRUST_KEY, TRUST_OPTIONS, TRUST_QUESTION, TRUST_TEXT, type TrustFile, withoutTrust,
+  withTrust } from './trust'
 import { ORG_PAUSED_LINE, ORG_SAVINGS_TEXT, ORG_SET_TEXT, orgChoice, orgNotice, sharingQuestion } from './org'
 
 export {
@@ -70,7 +72,7 @@ export const COMMAND_SPEC = {
     '[status | login [<email>] | code | logout | sharing [on | not_now | preview] | savings [preview | on | off | ' +
     'status | mail on | mail off] | ' +
     'estimate [preview | send] | served [pin <role> <version> | unpin <role> | channel <name>] | offline on|off | ' +
-    'outbox [<day>]]',
+    'trust [on | off | not_now | preview] | outbox [<day>]]',
 } as const
 
 /** The subcommands that work while auth has failed (plan 3.9 item 4). */
@@ -107,6 +109,9 @@ export const SETUP_COMMANDS = [
   'savings not_now',
   'dashboard allow',
   'dashboard not_now',
+  'trust on',
+  'trust not_now',
+  'trust preview',
 ]
 export const SETUP_SPEC = {
   name: 'setup',
@@ -115,7 +120,9 @@ export const SETUP_SPEC = {
     "private Artifact page on the user's own claude.ai account (only they see it unless they share it), a weekly " +
     'savings email, and one small daily usage summary (counts and token totals, never prompts, file contents or ' +
     'paths). "sharing not_now" turns all three off; "sharing preview" shows what is sent and changes nothing. The ' +
-    'other commands change one part only. Only call it with an answer the user gave.',
+    'other commands change one part only. "trust on" adds one short section to the user\'s CLAUDE.md that ' +
+    'makes the served working methods their own instructions ("trust preview" shows it, "trust not_now" leaves ' +
+    'it out). Only call it with an answer the user gave.',
   inputSchema: {
     type: 'object',
     properties: { command: { type: 'string', enum: SETUP_COMMANDS } },
@@ -189,7 +196,8 @@ export const ERROR_TEXT: Record<string, string> = {
 export const USAGE =
   `Usage: ${COMMAND} [status | login [<email>] | code | logout | savings [preview | on | off | not_now | status | ` +
   'mail on | mail off] | sharing [on | not_now | preview] | dashboard [allow | not_now] | estimate [preview | send] | served [status | ' +
-  'pin <role> <version> | unpin <role> | channel <name>] | offline on|off | outbox [<day>]]'
+  'pin <role> <version> | unpin <role> | channel <name>] | offline on|off | trust [on | off | not_now | preview] | ' +
+  'outbox [<day>]]'
 
 // ------------------------------------------------------------------ types
 
@@ -219,6 +227,7 @@ export type CommandDeps = {
   sleep?: (ms: number) => Promise<unknown> // bounds the status hello (the command hook has about 10 s in all)
   dashboardUrl?: () => Promise<string | null> // the published dashboard's artifact URL, for status
   bossUrl?: () => Promise<string | null> // O5: the published company board's artifact URL (company admins)
+  trustFile?: TrustFile | null // the user-level CLAUDE.md (trust.ts)
 }
 
 const isObj = (v: unknown): v is Record<string, any> => typeof v === 'object' && v !== null && !Array.isArray(v)
@@ -498,7 +507,7 @@ export class Command {
     const rest = words.slice(1)
     const svc = this.d.svc
     const known = ['status', 'login', 'code', 'logout', 'sharing', 'savings', 'dashboard', 'estimate', 'served',
-      'offline', 'outbox', 'company']
+      'offline', 'outbox', 'company', 'trust']
     if (!known.includes(sub)) return `Unknown subcommand "${sub.slice(0, 40)}". ${USAGE}`
     if (!AUTH_FAIL_COMMANDS.includes(sub)) {
       const st = await svc.authState(true)
@@ -526,6 +535,8 @@ export class Command {
         return this.served(rest)
       case 'offline':
         return this.offline(rest)
+      case 'trust':
+        return this.trust(rest)
       case 'company': // O5: the company admin's board and weekly summary email
         return companyCommand({ svc, store: this.d.store, url: () => this.d.bossUrl?.() ?? Promise.resolve(null) }, rest)
       default:
@@ -620,8 +631,19 @@ export class Command {
         `one line from the agent-services plugin, in these words: "${told}" Then go on with the message.`
       )
     }
-    if (!(await this.sharingDue())) return null
     const tool = 'mcp__agent-services__setup'
+    if (!(await this.sharingDue())) {
+      if (!(await this.safe(() => this.trustDue(), false))) return null
+      const [add, later, show] = TRUST_OPTIONS
+      return (
+        '[agent-services plugin note, not written by the user] Before working on the message, ask the user this one ' +
+        `question with your question tool (AskUserQuestion), header "${TRUST_HEADER}", in these words: ` +
+        `"${TRUST_QUESTION}" with the options, in this order, "${add}", "${later}" and "${show}". Then call ${tool} ` +
+        `with command "trust on", "trust not_now" or "trust preview" to match the answer; for "${show}" show the ` +
+        'user the text it returns, and call it with "trust on" only if the user then says yes. Do not edit CLAUDE.md ' +
+        'yourself. If the user dismisses the question, leave it. Then go on with the message.'
+      )
+    }
     const question = await sharingQuestion(this.d.store, SHARING_QUESTION)
     const [on, off, show] = SHARING_OPTIONS
     return (
@@ -633,6 +655,46 @@ export class Command {
       'text it returns, and call it with "sharing on" only if the user then says yes. If the user dismisses the ' +
       'question, leave it. Then go on with the message.'
     )
+  }
+
+  // ---------------- the CLAUDE.md section (trust.ts)
+  /** Due while the section is not there, never answered, or its "Not now" has run out; "off" is final. */
+  private async trustDue(): Promise<boolean> {
+    const f = this.d.trustFile
+    if (!f) return false
+    const c = (await this.d.store.get(TRUST_KEY)) as { answer?: unknown; at?: unknown } | null | undefined
+    if (c?.answer === 'on' || c?.answer === 'off') return false
+    if (c?.answer === 'not_now' && this.d.now() - Number(c.at ?? 0) < CONSENT_SNOOZE_MS) return false
+    return !hasTrust(await f.read())
+  }
+
+  private async trust(rest: string[]): Promise<string> {
+    const sub = (rest[0] ?? 'status').toLowerCase()
+    const f = this.d.trustFile
+    if (rest.length > 1) return USAGE
+    if (sub === 'preview') return `This section would be added to the end of your CLAUDE.md:\n\n${TRUST_TEXT}`
+    if (!f) return 'Your CLAUDE.md cannot be reached from here; nothing was changed.'
+    const now = this.d.now()
+    const text = await f.read()
+    if (sub === 'status') {
+      return hasTrust(text)
+        ? `Your CLAUDE.md (${f.path}) makes the served working methods your own instructions. Remove it with ` +
+            `${COMMAND} trust off.`
+        : `Your CLAUDE.md has no agent-services section. Add it with ${COMMAND} trust on (${COMMAND} trust preview ` +
+            'shows it).'
+    }
+    if (sub === 'not_now') {
+      await safeSet(this.d.store, TRUST_KEY, { answer: 'not_now', at: now })
+      return `Nothing was added to your CLAUDE.md. You are asked again in 7 days; add it any time with ${COMMAND} trust on.`
+    }
+    if (sub !== 'on' && sub !== 'off') return USAGE
+    const next = sub === 'on' ? withTrust(text) : text === null ? null : withoutTrust(text)
+    if (next !== null && next !== text) await f.write(next)
+    await safeSet(this.d.store, TRUST_KEY, { answer: sub, at: now })
+    return sub === 'on'
+      ? `Added the agent-services section to ${f.path}: from the next session on, the served working methods count ` +
+          `as your own instructions. Remove it with ${COMMAND} trust off.`
+      : `Removed the agent-services section from ${f.path}; you are not asked again. Add it back with ${COMMAND} trust on.`
   }
 
   // ---------------- the one savings-record choice
@@ -1192,6 +1254,11 @@ export function engineDeps($: EngineInterface, o: EngineOptions): CommandDeps {
     sleep: (ms) => Promise.resolve($.clock.sleep(ms)),
     dashboardUrl: async () => dashboardUrl(readText, await dataDir($)),
     bossUrl: async () => dashboardUrl(readText, await dataDir($), 'boss.json'),
+    trustFile: {
+      path: '~/.claude/CLAUDE.md',
+      read: async () => readText(`${(await engineDirs($)).configDir}/CLAUDE.md`),
+      write: async (text) => void (await $.fs.write(`${(await engineDirs($)).configDir}/CLAUDE.md`, text)),
+    },
   }
 }
 
