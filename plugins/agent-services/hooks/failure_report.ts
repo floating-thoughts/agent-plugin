@@ -3,7 +3,7 @@ import { exitOf, stagesOf } from './evidence'
 
 type Obj = Record<string, any>
 type Texts = Record<string, string>
-type FR = { failed?: string[]; neutral?: string[]; cause?: string[]; fix?: string[]; side_effect?: string; deny?: string; texts?: Texts }
+type FR = { failed?: string[]; neutral?: string[]; cause?: string[]; fix?: string[]; past?: string[]; earlier?: string[]; report_head?: string; side_effect?: string; deny?: string; texts?: Texts }
 export type Entry = {
   key: string; agent: string; tool: string; step: string; sig: string; seq: number; match: string; prompt: number
   denied: boolean; sideEffect: boolean; expensive: boolean
@@ -133,23 +133,35 @@ export function reportBlocks(message: string): ReportBlock[] {
   })
 }
 
-export function failureGap(text: string): string | null {
+export function failureGap(text: string, closed: readonly string[] = []): string | null {
   const f = fr()
   const failed = rxOf(f?.failed)
   if (!f || !failed) return null
   let body = String(text ?? '').slice(-8192)
   for (const b of reportBlocks(body)) body = body.replace(b.text, ' ')
+  const head = typeof f.report_head === 'string' && f.report_head.length <= 512 ? rxOf(f.report_head, 'im') : null
+  const at = head ? body.search(head) : -1
+  if (at >= 0) body = body.slice(0, at)
   const neutral = rxOf(f.neutral, 'gi')
   if (neutral) body = body.replace(neutral, ' ')
-  const m = failed.exec(body)
-  if (!m) return null
-  const cause = rxOf(f.cause, 'im')?.test(body) ?? false
-  const fix = rxOf(f.fix, 'im')?.test(body) ?? false
+  const causeRx = rxOf(f.cause, 'im')
+  const fixRx = rxOf(f.fix, 'im')
+  const cause = causeRx?.test(body) ?? false
+  const fix = fixRx?.test(body) ?? false
   if (cause && fix) return null
-  const startAt = Math.max(body.lastIndexOf('\n', m.index), body.lastIndexOf('. ', m.index), body.lastIndexOf('\u3002', m.index)) + 1
-  const ends = [body.indexOf('\n', m.index), body.indexOf('. ', m.index), body.indexOf('\u3002', m.index)].filter((i) => i >= 0)
-  const quote = body.slice(startAt, ends.length ? Math.min(...ends) + 1 : body.length).trim()
-  return quote.length > 120 ? `${quote.slice(0, 120)}...` : quote
+  const past = rxOf(f.past)
+  const earlier = rxOf(f.earlier)
+  const shut = closed.map((c) => words(c))
+  for (const s of body.split(/\r?\n|(?<=[.!?])\s+|(?<=[\u3002\uff01\uff1f])/)) {
+    const quote = s.trim()
+    if (!quote || !failed.test(quote)) continue
+    const w = words(quote)
+    if (shut.some((c) => [...w].some((x) => c.has(x)))) continue
+    if (fixRx?.test(quote)) continue
+    if (causeRx?.test(quote) && past?.test(quote) && (earlier?.test(quote) || fix)) continue
+    return quote.length > 120 ? `${quote.slice(0, 120)}...` : quote
+  }
+  return null
 }
 
 export function matchEntry(open: Entry[], b: ReportBlock): Entry | null {
@@ -377,7 +389,8 @@ export function reportStop(agent: string, message: string, earlier: readonly str
       return fill(t.need_report, { list: left.map(label).join('; '), steps: per.join(' ') })
     }
     for (const x of open()) if (x.asked >= 2) x.state = 'exhausted'
-    const quote = agent || !entries.some((x) => x.prompt === promptNo) ? null : failureGap(message)
+    const closed = entries.filter((x) => x.agent === agent && x.prompt === promptNo && x.state !== 'open').map((x) => `${x.step} ${x.sig}`)
+    const quote = agent || !entries.some((x) => x.prompt === promptNo) ? null : failureGap(message, closed)
     if (quote && !gapSaid.includes(quote) && t.need_report) {
       gapSaid = [...gapSaid, quote].slice(-20)
       return fill(t.need_report, { list: `"${quote}"`, steps: t.need_rerun ? fill(t.need_rerun, { step: quote }) : '' })
