@@ -308,7 +308,7 @@ export class Wiring {
     return (await uploadOn(this.d.store)) && (await this.settings()).services.metrics === true
   }
 
-  coreOptions(): Pick<CoreOptions, 'status' | 'dashboard' | 'metrics' | 'counters'> {
+  coreOptions(): Pick<CoreOptions, 'status' | 'dashboard' | 'metrics' | 'counters' | 'kitFiles'> {
     return {
       status: { update: () => this.track(this.refreshStatus()) },
       dashboard: {
@@ -318,6 +318,7 @@ export class Wiring {
       },
       metrics: { savings: () => this.savings() },
       counters: { isLong: (model: string, prompt: number) => this.isLong(model, prompt) },
+      kitFiles: { fs: this.d.fs, dir: `${this.d.dataDir.replace(/[\\/]+$/, '')}/kits` },
     }
   }
 

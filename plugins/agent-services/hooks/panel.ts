@@ -293,7 +293,6 @@ export function panelOf(days: unknown, p: Plan | null, savings: unknown, today: 
     rows: [
       ['Cheaper jobs', count('route')],
       ['Cleanups', count('compact_start')],
-      ['Index reads', count('index')],
     ],
   }
   return { columns: [token, quota, time, stats], method: `${savedNote()} ${methodLine()}` }

@@ -3,9 +3,8 @@ import { countDenied, delegateAfter, delegateTurn } from './delegate'
 import { commandRule, installCmdguard, mailAfter, mailDeny, spawnBackground, stopSendBack } from './cmdguard'
 import { loadRules, RULES_OFF_LINE, RULES_PENDING_LINE, rulesLive, rulesSettled, rulesState, rulesTable, rulesVersion } from './rules'
 import { agentResult, notificationEvent } from './subagents'
-import { lineFor, trimAppend, trimOn } from './trim'
 import { vaultAppend, vaultPendingLine, vaultPrompt, vaultSecrets, vaultToolOut } from './vault'
-import { installWatch, runCommandTool, watchEnsureTick } from './watch'
+import { installWatch, watchEnsureTick } from './watch'
 import { runEnd, runLimitsStart } from './run_limits'
 import { jitPrompt, jitStart, jitToolEnd, jitToolStart } from './just_in_time'
 import { carryNow } from './carry'
@@ -13,39 +12,37 @@ import { failureHint } from './failure_hint'
 import { callEnd, callStart, permissionChecked, registerTaskState, taskPromptIn, taskStateTool, turnStarted } from './task_wire'
 import { budgetAfter, budgetPrompt, budgetTurn, gateRefusal } from './budget'
 import { routeNoteFor } from './flow_state'
-import { replayContext, resumeNotification, resumeStart } from './resume'
-import { continueVia, routeEscalation } from './stall'
-import { installRecover, routeCircuit } from './recover'
-export { recoverStep, recoverStepStart, recoverTurnEnd } from './recover'
+import { resumeNotification, resumeStart } from './resume'
+import { continueVia } from './stall'
+import { installCacheBreak } from './cache_break'
+export { cacheStep, cacheStepStart, cacheTurnEnd } from './cache_break'
 import { jobPermission, jobsToolEnd } from './jobs'
-import { jobsPrompt } from './jobs_view'
+import { jobsNoticeSeen, jobsPrompt } from './jobs_view'
+import { bindSession, textHash } from './quiet'
 import { inboxPrompt } from './inbox'
 import { engineStore } from './store'
-import { NOTE_PREFIX } from './review'
 import { evidenceRun } from './evidence'
 import { registerUndo, undoTool } from './snapshot'
-import { briefPackTool, registerBriefPack } from './brief_pack'
 import { ownershipContext, ownershipPrompt } from './ownership'
 import { registerTools } from './tools'
-import { memoryPrompt, memoryStart, memoryToolEnd } from './memory_wire'
 
 type Obj = Record<string, any>
 type Next = (e: Obj) => Promise<any>
 type Ready = Promise<unknown>
 type RulesSvc = Parameters<typeof loadRules>[0]
 
+let gateSession = ''
+let gateGiven = new Map<string, true>()
+let gateHeld: string[] = []
+
 export function installEngines(on: any): void {
   installCmdguard(on)
   installWatch(on)
-  installRecover(on)
-  on('tool.call', { tool: 'mcp__agent-services__run_command' }, async ($: EngineInterface, e: Obj) => failureHint($, e, await runCommandTool($, e)))
-    .catch(() => ({ result: `${NOTE_PREFIX}: run_command failed inside the agent-services plugin (an unexpected error in its hooks, not in your command); the cause is in watch.ts (runCommandTool) in the installed plugin folder's hooks/. Read it to find the cause, and meanwhile continue with what does not need run_command.` }))
+  installCacheBreak(on)
   on('tool.call', { tool: 'mcp__agent-services__task_state' }, async ($: EngineInterface, e: Obj) => failureHint($, e, await taskStateTool($, e)))
     .catch(() => ({ result: 'task_state failed inside the agent-services plugin (an unexpected error in its hooks, not in your request); the cause is in task_wire.ts (taskStateTool) and task_state_io.ts in the installed plugin folder\'s hooks/. Read them to find the cause, and meanwhile continue with what does not need the task state.' }))
   on('tool.call', { tool: 'mcp__agent-services__undo' }, async ($: EngineInterface, e: Obj) => failureHint($, e, await undoTool($, e)))
     .catch(($: EngineInterface, e: Obj) => failureHint($, e, { result: 'Undo: it failed; nothing more was changed.' }))
-  on('tool.call', { tool: 'mcp__agent-services__brief_pack' }, async ($: EngineInterface, e: Obj) => failureHint($, e, await briefPackTool(e)))
-    .catch(($: EngineInterface, e: Obj) => failureHint($, e, { result: 'Not packed: the brief packer failed; no brief was made.' }))
   on('tool.describe', { tool: 'mcp__agent-services__undo' }, async ($: EngineInterface, e: Obj, next: any) => ({ ...(await next(e)), isDeferred: true }))
     .catch(($: EngineInterface, e: Obj, next: any) => next(e))
   on('turn.start', async ($: EngineInterface, e: Obj, next: any) => {
@@ -62,34 +59,9 @@ export function installEngines(on: any): void {
   }).catch(($: EngineInterface, e: Obj, next: any) => next(e))
 }
 
-export async function registerRunCommand($: EngineInterface): Promise<void> {
-  try {
-    await $.tool.register({
-      name: 'run_command',
-      isDeferred: false,
-      description: 'Run one slash command for Claude (name without the slash) and get its text output, as if the user ' +
-        'typed /command. Only reload-plugins and context are allowed. The command runs once the session is idle, so ' +
-        "this call only answers that it is queued; its output comes with your next tool call or the user's next " +
-        'message, so carry on with other work meanwhile. Any other command is refused and not run. Only the main ' +
-        'conversation can use it. Answered on this machine: nothing is sent to the service.',
-      inputSchema: {
-        type: 'object',
-        properties: {
-          command: { type: 'string', minLength: 1, maxLength: 64, description: 'The command name without the slash, e.g. context' },
-          args: { type: 'string', maxLength: 200, description: 'Arguments for the command; may be left out' },
-        },
-        required: ['command'],
-        additionalProperties: false,
-      },
-    } as any)
-  } catch {}
-}
-
 export async function registerSignedIn($: EngineInterface): Promise<void> {
   await registerTools($)
-  await registerRunCommand($)
   await registerTaskState($)
-  await registerBriefPack($)
 }
 
 export async function toolsStart($: EngineInterface, svc: { authState(): Promise<string> }): Promise<void> {
@@ -103,7 +75,6 @@ export async function rulesStart($: EngineInterface, svc: RulesSvc, rt?: Ready):
   void resumeStart($, rt)
   await registerUndo($)
   if ((await loadRules(svc, engineStore($))) !== 'off') {
-    void memoryStart($, rt)
     return carryNow($, false)
   }
   const signedOut = await Promise.resolve(svc.authState()).then((s) => s !== 'ok', () => true)
@@ -119,10 +90,10 @@ export async function toolRun($: EngineInterface, e: Obj, next: Next, rt: Ready)
   callStart(e)
   watchEnsureTick($)
   const ran: Obj = await evidenceRun($, e, () => next(e), rt as any).finally(() => callEnd(e, null as any))
-  const done = replayContext(e, routeContext(await agentResult($, e, vaultToolOut($, ran) ?? ran, rt as any), await routeCircuit($, e, await routeEscalation($, e, routeNoteFor(e.tool_use_id), rt), rt)))
+  const done = routeContext(await agentResult($, e, vaultToolOut($, ran) ?? ran, rt as any), routeNoteFor(e.tool_use_id))
   mailAfter(e, done)
   await jobsToolEnd($, e, done, rt)
-  return callEnd(e, await memoryToolEnd($, e, await failureHint($, e, ownershipContext(e, await budgetAfter($, e, await jitToolEnd(e, await runEnd(delegateAfter(e, done), limits), jit, rt as any), rt as any)), rt), rt))
+  return callEnd(e, await failureHint($, e, ownershipContext(e, await budgetAfter($, e, await jitToolEnd(e, await runEnd(delegateAfter(e, done), limits), jit, rt as any), rt as any)), rt))
 }
 
 function routeContext(done: Obj, text: string | null): Obj {
@@ -139,11 +110,65 @@ export async function spawnDenied($: EngineInterface, e: Obj, reason: string, ru
   return { deny: await gateRefusal($, e, rule, reason, { rt: rt as any, spawn: true }) }
 }
 
+export function noiseGate(blocks: readonly unknown[], subagent: boolean): unknown[] {
+  if (subagent) return [...blocks]
+  const others: unknown[] = []
+  const texts: string[] = []
+  for (const b of [...gateHeld.splice(0), ...blocks]) {
+    if (typeof b !== 'string') others.push(b)
+    else if (b.trim() && !texts.includes(b) && !gateGiven.has(textHash(b))) texts.push(b)
+  }
+  const rank = (t: string): number =>
+    /waiting on (?:your|the user'?s?) (?:decision|answer)|\bneeds? you\b|your decision/i.test(t) ? 0 : /\b(?:refus|denied|den(?:y|ies)\b|blocked)/i.test(t) ? 1 : 2
+  const ordered = texts.map((t, i) => ({ t, i, k: rank(t) })).sort((a, b) => a.k - b.k || a.i - b.i)
+  const kept: string[] = []
+  for (const { t } of ordered) {
+    if (kept.length < 3) {
+      kept.push(t)
+      gateGiven.delete(textHash(t))
+      gateGiven.set(textHash(t), true)
+      while (gateGiven.size > 500) gateGiven.delete(gateGiven.keys().next().value as string)
+    } else if (gateHeld.length < 10 || rank(t) < 2) gateHeld.push(t)
+  }
+  gateHeld.sort((a, b) => texts.indexOf(a) - texts.indexOf(b))
+  return [...others, ...kept]
+}
+
+export function noiseGateResetForTest(): void {
+  gateSession = ''
+  gateGiven = new Map<string, true>()
+  gateHeld = []
+}
+
+async function bindPrompt($: EngineInterface): Promise<void> {
+  try {
+    const id = String((await $.session.id()) ?? '')
+    if (!id) return
+    bindSession(id)
+    if (id !== gateSession) {
+      if (gateSession) noiseGateResetForTest()
+      gateSession = id
+    }
+  } catch {}
+}
+
+function gatePrompt(e: Obj, base: readonly unknown[], subagent: boolean): Obj {
+  if (!e || typeof e !== 'object') return e
+  const ctx: unknown[] = Array.isArray(e.context) ? e.context : []
+  if (ctx.length < base.length || base.some((b, i) => ctx[i] !== b)) return e
+  const added = ctx.slice(base.length)
+  if (!added.length && (subagent || !gateHeld.length)) return e
+  const kept = noiseGate(added, subagent)
+  if (kept.length === added.length && kept.every((b, i) => b === added[i])) return e
+  return { ...e, context: [...base, ...kept] }
+}
+
 export async function promptIn($: EngineInterface, e: Obj, rt: Ready): Promise<Obj> {
   const r = (await rt) as { svc?: RulesSvc } | null
   if (r?.svc) void loadRules(r.svc)
   await rulesSettled(1500)
   await rulesLive()
+  await bindPrompt($)
   if (!e.agentId) await carryNow($, true)
   delegateTurn(e)
   const masked = vaultPrompt($, e) ?? e
@@ -155,14 +180,18 @@ export async function promptIn($: EngineInterface, e: Obj, rt: Ready): Promise<O
       $.ui.log(line)
     } catch {}
   }
-  return inboxPrompt($, budgetPrompt(await ownershipPrompt($, await jobsPrompt($, await memoryPrompt($, await taskPromptIn($, await jitPrompt(shortened, rt as any, async () => $.session.cwd()), rt), rt), rt), rt as any)), rt)
+  const base: unknown[] = Array.isArray(shortened?.context) ? [...shortened.context] : []
+  const out = inboxPrompt($, budgetPrompt(await ownershipPrompt($, await jobsPrompt($, await taskPromptIn($, await jitPrompt(shortened, rt as any, async () => $.session.cwd()), rt), rt), rt as any)), rt)
+  return gatePrompt(await out, base, !!e.agentId)
 }
 
-export async function appendRow($: EngineInterface, e: Obj): Promise<Obj> {
+export async function appendRow($: EngineInterface, e: Obj, rt?: Ready): Promise<Obj> {
   try {
     await rulesLive()
-    const t = (await trimAppend($, e)) ?? e
-    return vaultAppend($, t) ?? t
+    const c = e?.message?.content
+    const text = typeof c === 'string' ? c : Array.isArray(c) ? c.map((b: Obj) => (b?.type === 'text' && typeof b.text === 'string' ? b.text : '')).join('\n') : ''
+    if (!e?.agentId && e?.door !== 'prompt' && text.includes('<task-notification>')) await jobsNoticeSeen($, text, rt)
+    return vaultAppend($, e) ?? e
   } catch {
     return e
   }
@@ -197,7 +226,6 @@ export async function checkLines($: EngineInterface): Promise<string> {
     `Command guard: ${on(commandRule('git add -A') !== null)} (a git command that takes every changed file is refused while other agents run).`,
     `Webmail check: ${on(mailDeny({ tool: 'WebFetch', url: 'https://mail.google.com/' }) !== null)}.`,
     `Secret masking: ${on(Array.isArray(vault?.patterns) && vault!.patterns!.length > 0)}${vault?.patterns ? ` (${vault.patterns.length} patterns)` : ''}.`,
-    `Row trimming after a compaction: ${on(lineFor('invoked_skills', 'x') !== null && (await trimOn($)))}.`,
     `Subagent gates and long reports: ${on(subs !== null)}${subs?.redline ? '; the weekly usage line stops new subagents on this account' : ''}${subs?.demand || subs?.coauthor ? '; the requirements-file lock and the commit co-author check are on' : ''}.`,
     `Shell watch: ${on(rulesTable('watch') !== null)}.`,
   ].join('\n')

@@ -6,6 +6,7 @@ import { EDIT_TOOLS } from './flow'
 import { listJobs, type Job } from './jobs'
 import { briefBody } from './ownership'
 import { oneLine } from './placeholders'
+import { bindSession, onceKey, resetForTests as quietReset } from './quiet'
 import { redact } from './redact'
 import { relNum, relText } from './reliability'
 import { briefHash } from './resume'
@@ -227,6 +228,7 @@ export function budgetResetForTest(): void {
   pending = new Map<string, Placed>()
   forMain = []
   changes = 0
+  quietReset()
 }
 
 export function budgetChanges(): number {
@@ -327,8 +329,14 @@ export async function budgetAfter($: EngineInterface, e: Obj, done: Obj, rt?: Re
         }
       }
       c.state++
-      const sn = c.state === k.stateAt ? stateNote(c.state) : null
-      if (sn !== null) notes.push(sn)
+      if (agent === '' && c.state === k.stateAt) {
+        try {
+          const id = await $.session.id()
+          if (typeof id === 'string' && id) bindSession(id)
+        } catch {}
+        const sn = onceKey('budget:state_note') ? stateNote(c.state) : null
+        if (sn !== null) notes.push(sn)
+      }
     }
     if (agent === '' && forMain.length) {
       notes.push(...forMain)
@@ -449,8 +457,9 @@ export async function gateRefusal($: EngineInterface, e: Obj, rule: string, reas
     if (agent === null || words === undefined || waitMs === undefined || !defers(r, reason)) return reason
     const job = (await capped(listJobs($), waitMs, [] as Job[])).find((j) => j.id === agent && (j.kind === 'subagent' || j.kind === 'workflow'))
     if (!job) return reason
+    if (session) bindSession(session)
     const note = deferredNote({ job, rule: r, tool })
-    if (note !== null) tellMain(note)
+    if (note !== null && onceKey(`budget:deferred:${job.id}:${r}`)) tellMain(note)
     return reason.includes(words) ? reason : `${reason}\n\n${words}`
   } catch {
     return reason

@@ -5,7 +5,6 @@ import { commandsOf, programBase, programWords, shellLine, splitOutsideQuotes } 
 import { sha256Hex, utf8 } from './e2e'
 import { getJob, listJobs, setJobStatus, type Job } from './jobs'
 import { relNum, relText } from './reliability'
-import { stallProgress } from './stall'
 import { signedIn } from './subagents'
 import { jobsDir } from './task_state_io'
 import { toolInput } from './tools'
@@ -457,7 +456,6 @@ async function record($: EngineInterface, e: Obj, done: Obj, at: number): Promis
   const rows: Receipt[] = hits.map((h) => ({ at, end, session, agent, kind: h.kind, program: h.program.slice(0, 40), ok: outcomeOf(h, exit, text), hash: h.hash }))
   seenStore = { ...seenStore, receipts: [...seenStore.receipts, ...rows].slice(-c.receipts) }
   await mutate($, (s) => ({ ...s, receipts: [...s.receipts, ...rows] }))
-  if (rows.some((r) => r.ok === true)) stallProgress()
   const ran = new Set(rows.filter((r) => r.ok !== null).map((r) => r.hash))
   const ids = [...declared].filter(([, hs]) => hs.some((h) => ran.has(h))).map(([id]) => id)
   if (!ids.length) return

@@ -14,7 +14,7 @@ import { engineSleep, installTools, SESSION_FALLBACK, svcAuthLine, toolInput } f
 import { probeProcess, processRunner, updateCheck, type Gate } from './update'
 import { bandSetter, createWiring, engineChunks, installBand, notePlan, svcTransport, type Wiring } from './wiring'
 import { canAskNow } from './choice'
-import { appendRow, denied, installEngines, mailGate, toolsStart, promptIn, recoverStep, recoverStepStart, recoverTurnEnd, rulesStart, spawnDenied, spawnGated, stopCheck, toolRun } from './engines'; import { budgetCheck, budgetSpawnCheck, budgetTurn } from './budget'; import { snapPromptStart, snapSessionEnd, snapSpawnStart, snapTurnEnd } from './snapshot'; import { spawnGate } from './subagents'; import { watchPrompt } from './watch'; import { spawnCap, spawnCutLine, spawnRun } from './spawn_run'; import { jobsClaim, jobsClaimScope } from './jobs_view'; import { handoverReceipts } from './evidence'; import { dispatchFacts } from './delegate'; import { resumeCompact, resumeSessionEnd, resumeSpawnCheck } from './resume'
+import { appendRow, denied, installEngines, mailGate, toolsStart, promptIn, cacheStep, cacheStepStart, cacheTurnEnd, rulesStart, spawnDenied, spawnGated, stopCheck, toolRun } from './engines'; import { budgetCheck, budgetSpawnCheck, budgetTurn } from './budget'; import { snapPromptStart, snapSessionEnd, snapSpawnStart, snapTurnEnd } from './snapshot'; import { spawnGate } from './subagents'; import { watchPrompt } from './watch'; import { spawnCap, spawnCutLine, spawnRun } from './spawn_run'; import { jobsClaim, jobsClaimScope } from './jobs_view'; import { handoverReceipts } from './evidence'; import { dispatchFacts } from './delegate'; import { resumeCompact, resumeSessionEnd } from './resume'
 import { noToolsDeny } from './ownership'
 
 type Ev = Record<string, any>
@@ -155,7 +155,6 @@ async function build($: EngineInterface): Promise<Rt | null> {
       transport,
       store,
       guard: new Guard({ transport }),
-      readText,
       harness: HARNESS,
       ...wiring.coreOptions(),
     })
@@ -178,7 +177,7 @@ function ready($: EngineInterface): Promise<Rt | null> {
 async function send($: EngineInterface, kind: string, agent: string | null, fields: Ev = {}): Promise<Answer | null> {
   const r = await ready($)
   if (!r) return null
-  if (kind === 'clear' || (kind === 'compaction' && fields.done === true && fields.trigger !== 'precompute')) pushAgain(r, agent)
+  if (kind === 'clear' || (kind === 'compaction' && fields.done === true && fields.trigger !== 'precompute')) pushAgain(r, agent, kind)
   const event = { v: 1, harness: HARNESS, kind, session: r.session, agent, ...fields }
   return capped(r.core.handle(event), r.sleep, EVENT_WAIT_MS, null)
 }
@@ -237,7 +236,7 @@ export const register: Register = (on) => {
 
   on('agent.spawn', async ($, e: Ev, next) => jobsClaimScope(e, async () => { const c = spawnCap(); try {
     const off = await c.stage('routing switch', routingOff($), true); const gate = off ? null : await c.stage('steps gate', spawnGate($, e, ready($)), null) ?? await c.stage('job claim', jobsClaim($, e, ready($)), null) ?? await c.stage('change budget', budgetSpawnCheck($, e, ready($)), null); if (gate) return c.stage('refusal record', spawnDenied($, e, gate, 'steps_gate', ready($)), { deny: gate }); await c.stage('snapshot', snapSpawnStart($, e, ready($)), undefined)
-    const call = e.tool_use_id ?? null; await c.stage('replay check', resumeSpawnCheck($, e, ready($)), undefined)
+    const call = e.tool_use_id ?? null
     if (off) return spawnRun($, e, e, next, ready($), false, c); const agent = e.parentAgentId ?? null
     const a = await c.stage('routing request', send($, 'dispatch', agent, {
       subagent_type: e.subagentType,
@@ -265,7 +264,7 @@ export const register: Register = (on) => {
     const model = e.model ?? null
     const a = await send($, 'step', agent, { model })
     show($, a?.notice)
-    const se: Ev = a?.action === 'rewrite' && a.set ? { ...e, ...a.set } : e; recoverStepStart(se); const step: Ev = yield* next(se); recoverStep(se, step)
+    const se: Ev = a?.action === 'rewrite' && a.set ? { ...e, ...a.set } : e; cacheStepStart(se); const step: Ev = yield* next(se); cacheStep(se, step)
     show($, (await send($, 'step_end', agent, { model, usage: usage(step?.usage) }))?.notice)
     return step
   }).catch(async function* ($, e, next) {
@@ -289,7 +288,7 @@ export const register: Register = (on) => {
   }).catch(($, e, next) => next(e))
 
   on('turn.complete', async ($, e: Ev, next) => {
-    const done = await next(e); budgetTurn(e); void snapTurnEnd($, e, ready($)); await flowTurnEnd($, e, ready($)); await recoverTurnEnd($, e, ready($))
+    const done = await next(e); budgetTurn(e); void snapTurnEnd($, e, ready($)); await flowTurnEnd($, e, ready($)); await cacheTurnEnd($, e, ready($))
     const u: Ev | null = await maybe(() => $.session.usage()); notePlan(u)
     const a = await send($, 'turn_end', e.agentId ?? null, {
       reason: e.reason ?? null,
@@ -329,7 +328,7 @@ export const register: Register = (on) => {
   }).catch(($, e, next) => next(e))
 
   on('classic.Stop', async ($, e: Ev, next) => stopCheck($, e, next)).catch(($, e, next) => next(e))
-  on('session.append', async ($, e: Ev, next) => next(await appendRow($, e))).catch(($, e, next) => next(e))
+  on('session.append', async ($, e: Ev, next) => next(await appendRow($, e, ready($)))).catch(($, e, next) => next(e))
 
   on('session.compact', async ($, e: Ev, next) => {
     const b: Ev | null = await maybe(() => $.session.usage()); await resumeCompact($, e, ready($), await handoverReceipts($, ready($)))

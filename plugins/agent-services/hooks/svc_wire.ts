@@ -277,6 +277,24 @@ export function toolboxSummary(text: string): string | null {
   })
 }
 
+export const TOOLBOX_FILES_ROUTE = '/toolbox/files'
+
+export function toolboxFilesSummary(text: string): string | null {
+  let b: unknown
+  try {
+    b = JSON.parse(text)
+  } catch {
+    return null
+  }
+  if (!isObj(b)) return null
+  const files = Array.isArray(b.files) ? b.files : []
+  return JSON.stringify({
+    pack: b.pack ?? null,
+    version: b.version ?? null,
+    files: files.filter(isObj).map((f: any) => ({ path: f.path ?? null, sha256: f.sha256 ?? null, size: f.size ?? null })),
+  })
+}
+
 export function rulesSummary(text: string): string | null {
   let b: unknown
   try {

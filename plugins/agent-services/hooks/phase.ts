@@ -3,7 +3,7 @@ import { isAbsPath, normPath, normpath } from './paths'
 import { canAsk } from './choice'
 import { levelNow, methodsActive, queueNotice, seenVersion } from './methods'
 import type { Level } from './methods'
-import { autonomyNote, readAutonomy } from './autonomy'
+import { forgetSlot, sameAsLast } from './quiet'
 import { askVerdict, knownVerdict, PLAN_STEPS_SENT_MAX } from './gate_verdict'
 import type { AskGate, GateLevel, GateState } from './gate_verdict'
 import { ToolboxPush } from './toolbox'
@@ -61,8 +61,6 @@ export function isRunning(s: PhaseState, level: GateLevel = 'suggest'): boolean 
   const v = knownVerdict(gateState(s, level))
   return v ? !v.hold : s.phase === 'running'
 }
-
-export const workOpen = (s: PhaseState, level: GateLevel = 'on'): boolean => !knownVerdict(gateState(s, level))?.hold
 
 const trimDir = (p: string): string => normPath(p).replace(/\/+$/, '')
 
@@ -512,15 +510,29 @@ export async function pushStart(r: PushRuntime): Promise<void> {
   }
 }
 
-let onNoteSent = false
+let roundSeq = 0
+const roundIds = new WeakMap<object, number>()
+const lessonsSlot = (r: object): string => {
+  let n = roundIds.get(r)
+  if (n === undefined) { n = ++roundSeq; roundIds.set(r, n) }
+  return `round.lessons.${n}`
+}
+
+export function roundCleared(r?: object | null): void {
+  if (r) forgetSlot(lessonsSlot(r))
+  for (const s of ['round.memory', 'round.handover', 'round.task']) forgetSlot(s)
+}
 
 async function pushLevel(r: NonNullable<PushRuntime>): Promise<Level> {
   return levelNow(r.store)
 }
 
-export function pushAgain(r: PushRuntime, agent: unknown): void {
+export function pushAgain(r: PushRuntime, agent: unknown, kind?: string): void {
   try {
-    if (r && !agent) { lessonPush(r).again(); toolboxPush(r)?.again(); onNoteSent = false; runLimitsAgain(); watchAgain() }
+    if (r && !agent) {
+      if (kind !== 'compaction') roundCleared(r)
+      lessonPush(r).again(); toolboxPush(r)?.again(); runLimitsAgain(); watchAgain()
+    }
   } catch {
   }
 }
@@ -538,14 +550,10 @@ export async function pushLessons(rt: Promise<PushRuntime>, agent: unknown, cwd:
     let text = level === 'suggest' && !methodsActive() ? await push.prompt(async () => cwd()) : null
     const version = push.takeVersion()
     if (text && r.store) {
-      const note = autonomyNote(await readAutonomy(r.store))
-      if (note) text = `${text}\n${note}`
       const told = version ? await seenVersion(r.store, version) : null
       if (told) (notify ?? queueNotice)(told)
-    } else if (!text && (level === 'on' || methodsActive()) && !onNoteSent && r.store && (await r.svc.authState()) === 'ok') {
-      const note = autonomyNote(await readAutonomy(r.store))
-      if (note) { text = note; onNoteSent = true }
     }
+    if (text && sameAsLast(lessonsSlot(r), text)) text = null
     const remind = takeReminder(r)
     return [text, await toolbox, remind].filter((t): t is string => !!t)
   } catch {

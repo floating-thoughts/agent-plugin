@@ -3,7 +3,6 @@ import { budgetSpawned } from './budget'
 import { evidenceSpawn } from './evidence'
 import { jobSpawned } from './jobs'
 import { briefBody, ownershipSpawn } from './ownership'
-import { resumeSpawned } from './resume'
 import { NOTE_PREFIX } from './review'
 import { snapSpawned } from './snapshot'
 
@@ -58,7 +57,6 @@ export async function spawnRun($: EngineInterface, e: Ev, ev: Ev, next: (x: Ev) 
     await cap.stage('job row', jobSpawned($, x, s, rt), undefined, true)
     if (routed) budgetSpawned(x, s)
     await cap.stage('snapshot', snapSpawned($, x, s), undefined, true)
-    await cap.stage('brief fingerprint', resumeSpawned($, e, s), undefined, true)
     return s
   }, rt)
   const early = await within(work, cap.left())

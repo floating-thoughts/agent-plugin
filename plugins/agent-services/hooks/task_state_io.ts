@@ -3,6 +3,7 @@ import { ensureAgentIgnore } from './agent_files'
 import { dataDir } from './engine_env'
 import { appendLines, applyOp, capState, decisionLine, emptyState, isFileOp, isWriteOp, lessonParagraph, mergeStates, parseTaskState, planEdit, recoverPlaceholders, renderMarkdown, resumeNote, type FileEdit, type OpCtx, type TaskState } from './task_state'
 import { NOTE_PREFIX } from './review'
+import { silence as quietSilence } from './quiet'
 
 type Mask = (text: string) => string
 type Raw = { kind: 'absent' } | { kind: 'error' } | { kind: 'big' } | { kind: 'text'; text: string }
@@ -205,6 +206,26 @@ export async function updateTaskState(
   }
 }
 
+export async function silenceHere($: EngineInterface, input: unknown, mask: Mask, start?: string): Promise<string | null> {
+  try {
+    const i = (input && typeof input === 'object' ? input : {}) as Record<string, any>
+    if (i.op !== 'silence') return null
+    const subject = typeof i.subject === 'string' ? i.subject.trim().slice(0, 200) : ''
+    if (!subject) return null
+    let reason = typeof i.reason === 'string' ? i.reason : ''
+    try {
+      reason = mask(reason)
+    } catch {
+      reason = ''
+    }
+    quietSilence(subject, reason)
+    if (await projectWriteDir($, start)) return null
+    return `"${subject}" will not be stopped again in this session (held in this session's memory). ${await noProjectNote($, start)}`
+  } catch {
+    return null
+  }
+}
+
 export async function taskStateOp(
   $: EngineInterface,
   input: unknown,
@@ -223,6 +244,8 @@ export async function taskStateOp(
       return resumeNote(got.state, { mdPath: taskStatePaths(got.dir!).md }) || 'No open items in the task state.'
     }
     if (opts.subagent) return applyOp(emptyState(ctx.now), i, ctx).answer
+    const held = await silenceHere($, i, opts.mask, opts.start)
+    if (held !== null) return held
     if (isFileOp(i.op)) return (await projectFileOp($, i, { mask: opts.mask, now: nowMs, start: opts.start })).answer
     if (i.op === 'deliver' || i.op === 'placeholder_filled') {
       const got = await loadTaskState($, { start: opts.start })

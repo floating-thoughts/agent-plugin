@@ -61,7 +61,7 @@ export const sha256Hex = (b: Uint8Array): string => hex(sha256(b))
 
 const B64 = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/'
 const B64_INDEX = new Map(Array.from(B64, (c, i) => [c, i] as [string, number]))
-const B64_RX = /^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$/
+const B64_RX = /^[A-Za-z0-9+/]*={0,2}$/
 
 export function b64Encode(b: Uint8Array): string {
   let out = ''
@@ -75,7 +75,7 @@ export function b64Encode(b: Uint8Array): string {
 }
 
 export function b64Decode(s: string): Uint8Array {
-  if (typeof s !== 'string' || !B64_RX.test(s)) throw new EnvelopeError('b64')
+  if (typeof s !== 'string' || s.length % 4 !== 0 || !B64_RX.test(s)) throw new EnvelopeError('b64')
   const pad = s.endsWith('==') ? 2 : s.endsWith('=') ? 1 : 0
   const out = new Uint8Array((s.length / 4) * 3 - pad)
   let o = 0

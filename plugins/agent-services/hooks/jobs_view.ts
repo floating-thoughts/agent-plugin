@@ -1,8 +1,9 @@
 import type { EngineInterface } from 'claude-code'
 import { readyTogether, STEPS_FILE } from './flow'
-import { ago, fitLines, jobOpen, jobsLive, jobsMarkRead, jobsNotification, jobStepOf, jobText, listJobs, noticesOf, statusWord, JOBS_FILE, type Job } from './jobs'
+import { ago, fitLines, jobOpen, jobsLive, jobsMarkRead, jobsNotification, jobStepOf, jobText, listJobs, noticesOf, readJobs, statusWord, JOBS_FILE, type Job } from './jobs'
 import { ownershipNote } from './ownership'
 import { readPlan } from './plan_file'
+import { isFinished } from './quiet'
 import { NOTE_PREFIX } from './review'
 import { relNum, relText } from './reliability'
 import { loadTaskState, projectDir } from './task_state_io'
@@ -32,6 +33,9 @@ type Pending = { call: string; at: number; ev: object }
 type Held = { agent: string; call: string; at: number; title: string }
 
 let lastSeen: Record<string, string> | null = null
+let lastPath: string | null = null
+let lastAt: number | null = null
+let noticed = new Set<string>()
 let pendingClaims = new Map<string, Pending>()
 let heldClaims = new Map<string, Held>()
 let claimOf = new WeakMap<object, string>()
@@ -79,21 +83,42 @@ export function jobsTable(jobs: readonly Job[], now: number, opts: { all?: boole
   return { text: out.join('\n'), shown: unread.map((j) => j.id) }
 }
 
-export function jobsChangeNote(prev: Readonly<Record<string, string>> | null, jobs: readonly Job[], session: string): { note: string | null; snapshot: Record<string, string> } {
+const changedAt = (j: Job): number => Math.max(...[j.updated_at, j.ended_at, j.last_activity_at].map((v) => (typeof v === 'number' && Number.isFinite(v) ? v : 0)))
+
+export function jobsChangeNote(prev: Readonly<Record<string, string>> | null, jobs: readonly Job[], session: string, since: number | null = null): { note: string | null; snapshot: Record<string, string> } {
   const mine = jobs.filter((j) => !session || j.session === session)
   const snapshot: Record<string, string> = Object.create(null)
   for (const j of mine) snapshot[j.id] = j.status
   if (prev === null) return { note: null, snapshot }
   const before = (id: string): string | undefined => (Object.hasOwn(prev, id) ? prev[id] : undefined)
-  const changed = mine.filter((j) => (before(j.id) !== undefined ? before(j.id) !== j.status : j.status !== 'running'))
-  const max = relNum('jobs_view.JOBS_NOTE_LINES')
+  const recent = (j: Job): boolean => typeof since !== 'number' || !Number.isFinite(since) || changedAt(j) >= since
+  const changed = mine
+    .filter((j) => (before(j.id) !== undefined ? before(j.id) !== j.status : j.status !== 'running' && recent(j)))
+    .sort((a, b) => changedAt(b) - changedAt(a))
+  const served = relNum('jobs_view.JOBS_NOTE_LINES')
   const head = relText('jobs_view.text.change_head', { file: JOBS_FILE })
-  if (!changed.length || max === undefined || head === undefined) return { note: null, snapshot }
+  if (!changed.length || served === undefined || head === undefined) return { note: null, snapshot }
+  const max = Math.min(served, 5)
   const lines = changed.slice(0, max).map((j) => {
     const was = before(j.id)
     return `- ${cut(j.title || '(no title)', 80)} (${j.kind} ${j.id}): ${was ? `${statusWord(was)} -> ` : ''}${statusWord(j.status)}${j.note ? `: ${cut(j.note, 120)}` : ''}`
   })
   return { note: fitLines(`${NOTE_PREFIX}: ${head}`, lines, 1500, changed.length - lines.length), snapshot }
+}
+
+export type NoteState = { path: string; seen: Record<string, string>; at: number }
+
+export function jobsNoteStep(state: NoteState | null, read: { path: string | null; ok: boolean; jobs: readonly Job[] }, session: string, now: number, seen: readonly string[] = []): { note: string | null; state: NoteState | null } {
+  if (!read || !read.ok || read.path === null || !Array.isArray(read.jobs) || !read.jobs.length) return { note: null, state }
+  if (state === null || state.path !== read.path) {
+    return { note: null, state: { path: read.path, seen: jobsChangeNote(null, read.jobs, session).snapshot, at: now } }
+  }
+  const prev: Record<string, string> = Object.assign(Object.create(null), state.seen)
+  if (seen.length) {
+    for (const j of read.jobs) if (!jobOpen(j) && (seen.includes(j.id) || (typeof j.call === 'string' && seen.includes(j.call)))) prev[j.id] = j.status
+  }
+  const r = jobsChangeNote(prev, read.jobs, session, state.at)
+  return { note: r.note, state: { path: read.path, seen: r.snapshot, at: now } }
 }
 
 function depsOf(text: string | null): Map<string, string[]> {
@@ -209,7 +234,8 @@ export async function jobsClaim($: EngineInterface, e: Obj, rt?: Ready): Promise
     const holder = heldClaims.get(step)
     const rows = await listJobs($)
     let facts: Job[] = []
-    if (holder) {
+    if (holder && isFinished(holder.agent)) heldClaims.delete(step)
+    else if (holder) {
       const status = await agentStatus($, holder.agent)
       if (status === null || (typeof status === 'string' && !['pending', 'running', 'waiting'].includes(status))) heldClaims.delete(step)
       else if (typeof status === 'string') {
@@ -263,22 +289,36 @@ export async function jobsPrompt($: EngineInterface, e: Obj, rt?: Ready): Promis
     const notices = e.origin?.kind === 'task-notification' || text.includes('<task-notification>') ? noticesOf(text) : []
     if (notices.length) await jobsNotification($, text)
     if (e.agentId) return e
-    const jobs = await listJobs($)
+    const read = await readJobs($)
     if (notices.length) {
-      if (lastSeen !== null) {
+      if (lastSeen !== null && read.path === lastPath) {
         for (const n of notices) {
-          const j = jobs.find((x) => (n.id !== null && x.id === n.id) || (n.call !== null && x.call === n.call))
+          const j = read.jobs.find((x) => (n.id !== null && x.id === n.id) || (n.call !== null && x.call === n.call))
           if (j) lastSeen[j.id] = j.status
         }
       }
       return e
     }
-    const r = jobsChangeNote(lastSeen, jobs, await sessionOf($))
-    lastSeen = r.snapshot
+    const now = Number(await Promise.resolve($.clock.now()).catch(() => Date.now()))
+    const state = lastSeen !== null && lastPath !== null && lastAt !== null ? { path: lastPath, seen: lastSeen, at: lastAt } : null
+    const r = jobsNoteStep(state, read, await sessionOf($), now, [...noticed])
+    if (r.state !== state) noticed = new Set<string>()
+    lastSeen = r.state?.seen ?? null
+    lastPath = r.state?.path ?? null
+    lastAt = r.state?.at ?? null
     return r.note ? { ...e, context: [...(Array.isArray(e.context) ? e.context : []), r.note] } : e
   } catch {
     return e
   }
+}
+
+export async function jobsNoticeSeen($: EngineInterface, text: unknown, rt?: Ready): Promise<void> {
+  try {
+    const notices = noticesOf(text)
+    if (!notices.length) return
+    for (const n of notices) for (const id of [n.id, n.call]) if (id !== null && noticed.size < 500) noticed.add(id)
+    await jobsNotification($, text, rt)
+  } catch {}
 }
 
 async function readSteps($: EngineInterface): Promise<string | null> {

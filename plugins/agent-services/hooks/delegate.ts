@@ -1,7 +1,6 @@
 import { CONTRACT } from './contract'
 import { sha256 } from './noble.js'
 import { SUGGESTION_PREFIX } from './review'
-import { stallFailure } from './stall'
 import type { EngineInterface } from 'claude-code'
 import { readPlan } from './plan_file'
 
@@ -97,7 +96,6 @@ export function delegateAfter(e: Obj, done: Obj): Obj {
     if (done.isError === true) {
       const key = failureKey(tool, done.result)
       if (key) {
-        stallFailure(key, tool)
         if (failures.size >= 500) failures.clear()
         const seen = failures.get(key)
         const live = seen && turnNo - seen.turn < FAILURE_TURNS ? seen : { n: 0, turn: turnNo }

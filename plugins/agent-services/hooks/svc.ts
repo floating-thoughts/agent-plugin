@@ -54,7 +54,9 @@ import {
   rulesSummary,
   servedProps,
   servedSummary,
+  toolboxFilesSummary,
   toolboxSummary,
+  TOOLBOX_FILES_ROUTE,
   TOOLBOX_ROUTE,
   throttled,
   ungated,
@@ -102,6 +104,7 @@ export const NOTICE_EVERY_MS = 3600000
 export const UNSIGNED_RETRY_MAX = 60
 export const EDGE_COOL_SECONDS = 30
 export const MAX_RESPONSE_CHARS = Math.ceil((4 * 1048576) / 3) * 4
+export const TOOLBOX_FILES_MAX_RESPONSE_CHARS = Math.ceil((12 * 1048576) / 3) * 4
 export const TOKEN_PREV_GRACE_MS = 5 * 60000
 export const LEASE_MS = 30000
 export const LEASE_SETTLE_MS = 200
@@ -681,7 +684,7 @@ export class Svc {
       const status = Number(got.v?.status)
       const rh = lower(got.v?.headers ?? {})
       const text = typeof got.v?.text === 'string' ? got.v.text : ''
-      if (text.length > MAX_RESPONSE_CHARS) {
+      if (text.length > (wire.split('?', 1)[0] === PREFIX + TOOLBOX_FILES_ROUTE ? TOOLBOX_FILES_MAX_RESPONSE_CHARS : MAX_RESPONSE_CHARS)) {
         this.logged(line, null, null, 'response_too_large')
         last = R(false, { error: 'response_too_large', attempts })
         break
@@ -751,6 +754,7 @@ export class Svc {
       }
       if (ok && wire.split('?', 1)[0] === PREFIX + SERVED_ROUTE) shown = servedSummary(data)
       if (ok && wire.split('?', 1)[0] === PREFIX + TOOLBOX_ROUTE) shown = toolboxSummary(data)
+      if (wire.split('?', 1)[0] === PREFIX + TOOLBOX_FILES_ROUTE) shown = ok ? toolboxFilesSummary(data) : shown
       if (ok && wire.split('?', 1)[0] === PREFIX + '/served/rules') shown = rulesSummary(data)
       if (ok && wire.split('?', 1)[0] === PREFIX + '/org/summary') shown = orgSummaryLog(data)
       shown = membersLogText(wire, shown)

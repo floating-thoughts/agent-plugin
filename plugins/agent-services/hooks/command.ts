@@ -77,7 +77,7 @@ export const MOVED: Readonly<Record<string, string>> = {
   offline: `Offline mode was removed. To stop everything agent-services sends, run ${COMMAND} logout.`,
   estimate: 'The estimate command was removed. Your real savings are on the status line; ask Claude for the total.',
   secrets: 'The secrets command was removed. Masked secrets stay in memory for this session only and are gone when it ends.',
-  trim: 'The trim command was removed. Row trimming after a compaction stays as you last set it (on by default).',
+  trim: 'The trim command was removed, and row trimming after a compaction with it.',
 }
 export const METHODS_MOVED = `Only ${COMMAND} methods approve, methods revert and methods auto on|off are typed now. ` +
   'For anything else ask Claude: it can show ' +
@@ -106,7 +106,6 @@ export const PAGE_QUESTION = 'Your company turned the savings record on. Show yo
   'your claude.ai account too (only you can see it)?'
 export const METHODS_QUESTION = 'agent-services serves working methods (planning, delegating to subagents, testing, ' +
   'review, delivery, checkpoints). How should Claude use them?'
-export const METHODS_OPTIONS = ['As suggestions (Recommended)', 'As my own instructions', 'Off']
 export const METHODS_HEADER = 'Methods'
 export const ROUTING_QUESTION = 'How should agent-services route your subagents? "Suggest (the default, recommended)": ' +
   'a subagent whose description does not start with a task type word runs unchanged and gets no routing savings. ' +

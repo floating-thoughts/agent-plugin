@@ -11,7 +11,6 @@ export const MAX_INDEX_ROWS = 500
 export const MAX_COMPACT_ROWS = 50
 export const MAX_STEPS = 4000
 export const MAX_STEP_MODELS = 10
-export const MAX_TRIM_ROWS = 20
 
 const DAY_MS = 86400000
 const enc = new TextEncoder()
@@ -33,13 +32,11 @@ export type DayRecord = {
   route: Record<string, RouteRow>
   index: Record<string, number>
   compact: Record<string, CompactRow>
-  trim?: Record<string, [number, number]>
 }
 export type DayCounters = {
   route: { model: string; long: boolean; main_model?: string; turns: number; input_tokens: number; output_tokens: number; cache_read_tokens: number; cache_write_tokens: number }[]
   index: { model: string; file_tokens: number; reads: number }[]
   compact: { ref: string; start: CompactStart | null; models: string[]; steps: [number, number][] }[]
-  trim?: { model: string; tokens: number; runs: number; net?: boolean }[]
 }
 
 export function estimateTokens(text: string): number {
@@ -75,52 +72,9 @@ function asRecord(v: unknown, day: string): DayRecord {
   const obj = (x: unknown): boolean => !!x && typeof x === 'object' && !Array.isArray(x)
   if (r.v !== 1 || !obj(r.route) || !obj(r.index) || !obj(r.compact)) return emptyRecord(day)
   const out: DayRecord = { v: 1, day, route: r.route as DayRecord['route'], index: r.index as DayRecord['index'], compact: r.compact as DayRecord['compact'] }
-  if (obj(r.trim)) out.trim = r.trim as DayRecord['trim']
   return out
 }
 
-
-export function trimRecord(prev: unknown, day: string, model: string, tokens: number): DayRecord {
-  const r = asRecord(prev, day)
-  const trim = { ...(r.trim ?? {}) }
-  const have = trim[model]
-  const row: [number, number] = Array.isArray(have) && have.length === 2 && have.every(isCount) ? [have[0], have[1]] : [0, 0]
-  if (!Array.isArray(have) && Object.keys(trim).length >= MAX_TRIM_ROWS) return { ...r, trim }
-  trim[model] = [row[0] + tokens, row[1] + 1]
-  return { ...r, trim }
-}
-
-let trimWrites: Promise<void> = Promise.resolve()
-
-export function addTrim(store: KV, session: string, model: string, tokens: number, nowMs: number, dayOf: (ms: number) => string = localDay): Promise<void> {
-  needStr(session, 'session')
-  needStr(model, 'model')
-  needCount(tokens, 'tokens')
-  const day = dayOf(nowMs)
-  const key = COUNTER_PREFIX + day + ':' + sessionKey(session) + ':trim'
-  const next = trimWrites.then(async () => {
-    const prev = await store.get(key).catch(() => undefined)
-    await store.set(key, trimRecord(prev, day, model, tokens))
-  })
-  trimWrites = next.catch(() => undefined)
-  return next
-}
-
-export async function openMeasured(store: KV, session: string, days: string[]): Promise<boolean> {
-  try {
-    const k = sessionKey(session)
-    const open = await store.get(OPEN_PREFIX + k)
-    const ref = open && typeof open === 'object' ? (open as { ref?: unknown }).ref : undefined
-    if (typeof ref !== 'string') return false
-    for (const day of days) {
-      const r = asRecord(await store.get(COUNTER_PREFIX + day + ':' + k), day)
-      const start = r.compact[ref]?.start
-      if (start) return start.after_tokens === null
-    }
-  } catch {
-  }
-  return false
-}
 
 function addStep(row: CompactRow, context: number, model: string): void {
   if (row.steps.length >= MAX_STEPS) return
@@ -233,26 +187,6 @@ export class Counters {
     })
   }
 
-  async index(session: string, model: string, a: { fileTokens?: number; text?: string }): Promise<void> {
-    needStr(session, 'session')
-    needStr(model, 'model')
-    if ((a.fileTokens === undefined) === (a.text === undefined)) throw new Error('file_tokens or text')
-    let tokens = a.fileTokens
-    if (a.text !== undefined) {
-      if (typeof a.text !== 'string') throw new Error('text')
-      tokens = estimateTokens(a.text)
-    }
-    needCount(tokens, 'file_tokens')
-    await this.change(session, (r) => {
-      const k = model + '\t' + tokens
-      if (r.index[k] === undefined) {
-        if (Object.keys(r.index).length >= MAX_INDEX_ROWS) return
-        r.index[k] = 0
-      }
-      r.index[k] += 1
-    })
-  }
-
   async compaction(session: string, c: { model: string; before: number | null; after: number | null; window: number;
     threshold?: number | null; compact_usd?: number | null }): Promise<string | null> {
     needStr(session, 'session')
@@ -313,7 +247,6 @@ export async function readDay(store: KV, day: string): Promise<DayCounters> {
   const route = new Map<string, RouteRow>()
   const index = new Map<string, number>()
   const compact = new Map<string, CompactRow>()
-  const trim = new Map<string, [number, number]>()
   let keys: string[] = []
   try {
     keys = await store.keys()
@@ -344,11 +277,6 @@ export async function readDay(store: KV, day: string): Promise<DayCounters> {
       }
       compact.set(ref, have)
     }
-    for (const [model, row] of Object.entries(r.trim ?? {})) {
-      if (!Array.isArray(row) || row.length !== 2 || !row.every(isCount)) continue
-      const have = trim.get(model) ?? [0, 0]
-      trim.set(model, [have[0] + row[0], have[1] + row[1]])
-    }
   }
   const cmp = (a: string, b: string): number => (a < b ? -1 : a > b ? 1 : 0)
   const routeRows = [...route.entries()]
@@ -371,9 +299,6 @@ export async function readDay(store: KV, day: string): Promise<DayCounters> {
     .slice(0, MAX_INDEX_ROWS)
   const compactRows = [...compact.keys()].sort(cmp).slice(0, MAX_COMPACT_ROWS).map((ref) => ({ ref, ...compact.get(ref)! }))
   const out: DayCounters = { route: routeRows, index: indexRows, compact: compactRows }
-  if (trim.size) {
-    out.trim = [...trim.keys()].sort(cmp).slice(0, MAX_TRIM_ROWS).map((model) => ({ model, tokens: trim.get(model)![0], runs: trim.get(model)![1] }))
-  }
   return out
 }
 

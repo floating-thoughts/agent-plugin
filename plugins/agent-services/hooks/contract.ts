@@ -5,7 +5,7 @@ export type ToolSpec = {
   input_schema: Record<string, unknown>
 }
 
-export const CONTRACT_SHA256 = "23aca72ada3ca89c727dc8e99dc0354638573793f4ff43ab93b8dc29e621b5ea"
+export const CONTRACT_SHA256 = "c399e3d921ac91ac58fd7fffa16e206e2451eeef11cbb1270d8fc39ca0f1b2c5"
 
 export const API = "svc/1" as const
 export const PREFIX = "/svc/v1" as const
@@ -44,7 +44,7 @@ export const TOOLS: readonly ToolSpec[] = [
   },
   {
     "name": "toolbox",
-    "description": "Fetch one agent-services toolbox pack by its key from the toolbox index (an agent-services suggestion: know-how for one tool or tool family, fetched only when the work needs it). Key \"index\" lists the index again (each key with one line saying when to fetch it). For branched-problems, pass topic (a pack key) to get only that topic's problem and fix pairs. Only the random session ref, the key and the topic are sent. Returns the pack's items wrapped in <agent-pack>, or no_toolbox when the service has no toolbox for this account.",
+    "description": "Fetch one agent-services toolbox pack by its key from the toolbox index (an agent-services suggestion: know-how for one tool or tool family, fetched only when the work needs it). Key \"index\" lists the index again (each key with one line saying when to fetch it). For branched-problems, pass topic (a pack key) to get only that topic's problem and fix pairs. Pass files true for a pack that has files (its answer says how many) to save them into a local folder under ~/.agent-services/kits/<key>/<version>/; the answer names the folder and the files, and nothing is run. Only the random session ref, the key and the topic are sent (with files, also the pack version). Returns the pack's items wrapped in <agent-pack>, or no_toolbox when the service has no toolbox for this account.",
     "input_schema": {
       "type": "object",
       "properties": {
@@ -57,6 +57,9 @@ export const TOOLS: readonly ToolSpec[] = [
           "type": "string",
           "pattern": "^[a-z][a-z0-9-]{1,39}$",
           "maxLength": 40
+        },
+        "files": {
+          "type": "boolean"
         }
       },
       "required": [
@@ -101,7 +104,7 @@ export const CONTRACT = {
   },
   {
    "name": "toolbox",
-   "description": "Fetch one agent-services toolbox pack by its key from the toolbox index (an agent-services suggestion: know-how for one tool or tool family, fetched only when the work needs it). Key \"index\" lists the index again (each key with one line saying when to fetch it). For branched-problems, pass topic (a pack key) to get only that topic's problem and fix pairs. Only the random session ref, the key and the topic are sent. Returns the pack's items wrapped in <agent-pack>, or no_toolbox when the service has no toolbox for this account.",
+   "description": "Fetch one agent-services toolbox pack by its key from the toolbox index (an agent-services suggestion: know-how for one tool or tool family, fetched only when the work needs it). Key \"index\" lists the index again (each key with one line saying when to fetch it). For branched-problems, pass topic (a pack key) to get only that topic's problem and fix pairs. Pass files true for a pack that has files (its answer says how many) to save them into a local folder under ~/.agent-services/kits/<key>/<version>/; the answer names the folder and the files, and nothing is run. Only the random session ref, the key and the topic are sent (with files, also the pack version). Returns the pack's items wrapped in <agent-pack>, or no_toolbox when the service has no toolbox for this account.",
    "input_schema": {
     "type": "object",
     "properties": {
@@ -114,6 +117,9 @@ export const CONTRACT = {
       "type": "string",
       "pattern": "^[a-z][a-z0-9-]{1,39}$",
       "maxLength": 40
+     },
+     "files": {
+      "type": "boolean"
      }
     },
     "required": [
@@ -1918,6 +1924,26 @@ export const CONTRACT = {
          "type": "integer",
          "minimum": 0,
          "maximum": 100000
+        },
+        "files": {
+         "type": "object",
+         "properties": {
+          "count": {
+           "type": "integer",
+           "minimum": 1,
+           "maximum": 500
+          },
+          "bytes": {
+           "type": "integer",
+           "minimum": 0,
+           "maximum": 8388608
+          }
+         },
+         "required": [
+          "count",
+          "bytes"
+         ],
+         "additionalProperties": false
         }
        },
        "required": [
@@ -1948,6 +1974,108 @@ export const CONTRACT = {
    "x-inventory": {
     "service": "updates",
     "default": "on (the index once per session and after a compaction; a pack only when the model asks for it)",
+    "sent_to": [
+     "our_service"
+    ]
+   }
+  },
+  {
+   "method": "POST",
+   "path": "/toolbox/files",
+   "request": {
+    "type": "object",
+    "properties": {
+     "session_ref": {
+      "$ref": "#/definitions/SessionRef"
+     },
+     "pack": {
+      "type": "string",
+      "pattern": "^[a-z][a-z0-9-]{1,39}$",
+      "maxLength": 40
+     },
+     "version": {
+      "$ref": "#/definitions/Version"
+     }
+    },
+    "required": [
+     "session_ref",
+     "pack",
+     "version"
+    ],
+    "additionalProperties": false
+   },
+   "responses": {
+    "200": {
+     "type": "object",
+     "properties": {
+      "pack": {
+       "type": "string",
+       "pattern": "^[a-z][a-z0-9-]{1,39}$",
+       "maxLength": 40
+      },
+      "version": {
+       "$ref": "#/definitions/Version"
+      },
+      "files": {
+       "type": "array",
+       "minItems": 1,
+       "maxItems": 500,
+       "items": {
+        "type": "object",
+        "properties": {
+         "path": {
+          "type": "string",
+          "pattern": "^(?!/)(?!.*\\.\\.)[A-Za-z0-9._/-]{1,160}$",
+          "maxLength": 160
+         },
+         "sha256": {
+          "$ref": "#/definitions/Sha256"
+         },
+         "size": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 2097152
+         },
+         "data_b64": {
+          "type": "string",
+          "maxLength": 2796204
+         }
+        },
+        "required": [
+         "path",
+         "sha256",
+         "size",
+         "data_b64"
+        ],
+        "additionalProperties": false
+       }
+      }
+     },
+     "required": [
+      "pack",
+      "version",
+      "files"
+     ],
+     "additionalProperties": false
+    }
+   },
+   "errors": {
+    "404": [
+     "no_such_pack",
+     "no_such_version",
+     "no_files"
+    ],
+    "409": [
+     "session_required"
+    ],
+    "403": [
+     "no_license",
+     "not_in_plan"
+    ]
+   },
+   "x-inventory": {
+    "service": "updates",
+    "default": "on (only when the model asks the toolbox tool for a pack's files)",
     "sent_to": [
      "our_service"
     ]

@@ -4,7 +4,6 @@ import { keepGoingStop, taskNoteAgain, taskTick } from './task_wire'
 import { resumeSubagentStop } from './resume'
 import { evidenceJobEnd } from './evidence'
 import { jobSubagentStop } from './jobs'
-import { recoverStop } from './recover'
 import { vaultMask } from './vault'
 import { NOTE_PREFIX } from './review'
 import { continueVia } from './stall'
@@ -20,7 +19,6 @@ type Table = {
   self_check?: Texts
   shells?: Texts
   wall?: Texts
-  run_command?: Texts & { whitelist?: string[]; panels?: string[]; output_cap?: number }
   alerts?: { lines?: Record<string, number>; by_reset?: Record<string, number>; labels?: Record<string, string>; note?: string; toast?: string; unknown_reset?: string }
 }
 type Timer = { first: number; every: number; wallRetry: number; wallTries: number; tickMs: number; autoMs: number | null; rules: Rule[] }
@@ -34,7 +32,6 @@ let shellAsked: Record<string, number> = {}
 let shellOwner: Record<string, string> = {}
 let autoTasks: AutoTask[] = []
 let walled: Record<string, Wall> = {}
-let ranOutputs: string[] = []
 let alertsGiven: string[] = []
 let ticking = false
 let loadedAt = Date.now()
@@ -152,10 +149,6 @@ function callText(e: Obj): string {
   return ['command', 'description', 'prompt', 'url'].map((k) => (typeof e[k] === 'string' ? e[k] : '')).join('\n')
 }
 
-function takeRunOutputs(): string[] {
-  return ranOutputs.splice(0)
-}
-
 export async function watchBash($: EngineInterface, e: Obj, next: (e: Obj) => Promise<Obj>): Promise<Obj> {
   await rulesLive()
   const t = table()
@@ -184,10 +177,8 @@ export async function watchBash($: EngineInterface, e: Obj, next: (e: Obj) => Pr
       autoTasks = [...autoTasks.filter((x) => x.id !== task.id), task]
       if (e.agentId) shellOwner[task.id] = e.agentId
       ensureTick($, t)
-      const a = t.auto_background ?? {}
-      const after = typeof ran.result?.timedOutAfterMs === 'number' ? ran.result.timedOutAfterMs : auto!
-      const note = fill(a.note, { tool: task.tool, seconds: Math.round(after / 1000), task: task.id, output: task.output || a.no_output || '', caller: task.endsWithCaller ? a.caller ?? '' : '' })
-      done = { ...done, context: [...(done.context ?? []), note] }
+      const caller = task.endsWithCaller && typeof t.auto_background?.caller === 'string' ? t.auto_background.caller.trim() : ''
+      if (caller) done = { ...done, context: [...(done.context ?? []), `${NOTE_PREFIX}: ${caller}`] }
     }
     const started = e.run_in_background === true && (e.tool === 'Bash' || e.tool === 'PowerShell') ? startedOf(ran.result, ran.text) : null
     if (started !== null) {
@@ -201,8 +192,7 @@ export async function watchBash($: EngineInterface, e: Obj, next: (e: Obj) => Pr
     if (e.agentId && (e.tool === 'Monitor' || e.run_in_background === true)) {
       for (const id of shellIdsIn(done.result)) shellOwner[id] = e.agentId
     }
-    const notes = e.agentId ? [] : takeRunOutputs()
-    return notes.length ? { ...done, context: [...(done.context ?? []), ...notes] } : done
+    return done
   } catch {
     return ran
   }
@@ -253,8 +243,6 @@ export async function watchStop($: EngineInterface, e: Obj, next: (e: Obj) => Pr
     if (!done || done.block !== undefined) return done
     const check = selfCheck(t, null, e.background_tasks, at)
     if (check !== null) return (await continueVia($, 'self_check', 'stop', { at })).ok ? { ...done, block: check } : done
-    const empty = await recoverStop($, e)
-    if (empty !== null) return { ...done, block: empty }
     return await keepGoingStop($, e, done, (l) => alertsOf(l).length > 0)
   } catch {
     return done
@@ -375,51 +363,6 @@ export async function watchTick($: EngineInterface): Promise<void> {
 }
 
 
-export function checkRun(command: unknown, args: unknown): { ok: true; command: string; args: string } | { ok: false; text: string } {
-  const rc = table()?.run_command ?? {}
-  const name = typeof command === 'string' ? command.trim() : ''
-  const rest = typeof args === 'string' ? args.trim() : ''
-  const list = Array.isArray(rc.whitelist) ? rc.whitelist : []
-  if (name !== '' && list.includes(name)) return { ok: true, command: name, args: rest }
-  const shown = name === '' ? rc.no_name ?? '' : `/${name}${rest ? ` ${rest}` : ''}`
-  const panels = Array.isArray(rc.panels) ? rc.panels : []
-  return { ok: false, text: fill(panels.includes(name) ? rc.panel : rc.refused, { shown, list: list.join(', ') }) }
-}
-
-export function outputOf(text: unknown): string {
-  const rc = table()?.run_command ?? {}
-  const trimmed = (typeof text === 'string' ? text : '').trim()
-  if (trimmed === '') return rc.empty ?? ''
-  const cap = typeof rc.output_cap === 'number' && rc.output_cap > 0 ? rc.output_cap : 4000
-  const chars = [...trimmed]
-  return chars.length > cap ? chars.slice(0, cap).join('') + fill(rc.cut, { total: chars.length, cap }) : trimmed
-}
-
-const labelOf = (command: string, args: string): string => (args ? `${command} ${args}` : command)
-
-export async function runQueued($: EngineInterface, command: string, args: string): Promise<void> {
-  const rc = table()?.run_command ?? {}
-  let text: string
-  try {
-    text = outputOf((await $.command.run({ command, args } as any))?.text)
-  } catch (err) {
-    text = fill(rc.failed, { error: err instanceof Error ? err.message : String(err) })
-  }
-  ranOutputs.push(fill(rc.output, { label: labelOf(command, args), text }))
-}
-
-export async function runCommandTool($: EngineInterface, e: Obj): Promise<{ result: string }> {
-  await rulesLive()
-  const rc = table()?.run_command
-  if (!rc) return { result: `${NOTE_PREFIX}: run_command is off until the rule tables have arrived; carry on without it.` }
-  if (e?.agentId) return { result: rc.subagent ?? '' }
-  const c = checkRun(e?.command, e?.args)
-  if (!c.ok) return { result: c.text }
-  $.clock.after(0, () => void runQueued($, c.command, c.args).catch(() => undefined))
-  return { result: fill(rc.queued, { label: labelOf(c.command, c.args) }) }
-}
-
-
 export function alertsOf(limits: unknown): { key: string; toast: string; note: string }[] {
   const a = table()?.alerts
   if (!a || !Array.isArray(limits)) return []
@@ -440,7 +383,7 @@ export async function watchPrompt($: EngineInterface, e: Obj): Promise<string[]>
   await rulesLive()
   try {
     if (e?.agentId || !table()) return []
-    const notes = takeRunOutputs()
+    const notes: string[] = []
     const usage = await $.session.usage()
     for (const a of alertsOf(usage?.rateLimits)) {
       if (alertsGiven.includes(a.key)) continue
@@ -511,7 +454,6 @@ export function watchResetForTest(since = 0): void {
   shellOwner = {}
   autoTasks = []
   walled = {}
-  ranOutputs = []
   alertsGiven = []
   ticking = false
   loadedAt = since

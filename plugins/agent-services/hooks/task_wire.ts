@@ -1,5 +1,4 @@
 import type { EngineInterface } from 'claude-code'
-import { recoverPrompt } from './recover'
 import { readAutonomy } from './autonomy'
 import { sha256Hex, utf8 } from './e2e'
 import { deliverGate, fillNote, gateFiles, idParts, releaseCommandDenied, releaseCommandHit, validatePlaceholder } from './placeholders'
@@ -7,16 +6,16 @@ import { redact } from './redact'
 import { rulesLive, rulesTable } from './rules'
 import { engineStore } from './store'
 import { appendLines, applyOp, deliveryDraft, emptyState, isFileOp, isWriteOp, nextTaskId, parseTaskState, pendingLineOf, setSteps, taskStateToolSpec, upsertAgent, upsertQuestion, upsertTask, type DeliveryFacts, type OpCtx, type TaskState } from './task_state'
-import { decisionsSince, errorBrief, loadTaskState, noProjectNote, projectDir, projectFileOp, projectWriteDir, taskStateNote, taskStateOp, taskStatePaths, updateTaskState, writeChecked } from './task_state_io'
+import { decisionsSince, errorBrief, loadTaskState, noProjectNote, projectDir, projectFileOp, projectWriteDir, silenceHere, taskStateNote, taskStateOp, taskStatePaths, updateTaskState, writeChecked } from './task_state_io'
 import { vaultMask } from './vault'
-import { keepGoingDue, stallDue, type KeepGoingLedger, type StallAbort, type StallCall, type StallLedger } from './watchdog'
-import { continueVia, jobStallTick, stallOwnAbort, stallPersonPrompt, stallToolEnd } from './stall'
+import { keepGoingDue, redirectTargetOf, stallDue, type KeepGoingLedger, type StallAbort, type StallCall, type StallLedger } from './watchdog'
+import { bindSession, finishedFromList, isFinished, onceKey, resetForTests as quietReset, sameAsLast } from './quiet'
+import { continueVia, stallOwnAbort, stallPersonPrompt, stallToolEnd } from './stall'
 import { jobsFromList, listJobs } from './jobs'
 import { NOTE_PREFIX } from './review'
 import { needsYouTick, REACH_ALWAYS, reachNotify } from './reach'
 import { handoverNote, resumeToolDone, resumeTurnEnd } from './resume'
 import { deliveryCheck, readEvidence, sessionVerdict } from './evidence'
-import { factsIfHeadMoved } from './memory_facts'
 
 type Obj = Record<string, any>
 type AutoTaskLike = { id: string; tool: string; command: string; output: string; startedAt: number; description?: string; agentId?: string | null; user?: boolean }
@@ -30,7 +29,6 @@ let personAt: number | null = null
 let stallLedger: StallLedger = {}
 let kgLedger: KeepGoingLedger | null = null
 let noteGiven = false
-let noteRounds = 0
 let queued: Record<string, string[]> = {}
 
 function maskText(text: string): string {
@@ -170,6 +168,8 @@ export async function taskStateTool($: EngineInterface, e: Obj): Promise<{ resul
       if (f.ran && input.op === 'plan_run' && f.dir) await notePlanBase($, f.dir)
       return { result: f.answer }
     }
+    const held = await silenceHere($, input, maskText)
+    if (held !== null) return { result: held }
     if (input.op !== 'keep_going' && !(await projectWriteDir($))) return { result: await noProjectNote($) }
     if (input.op === 'placeholder_add') await capturePending($)
     const got = await loadTaskState($)
@@ -315,7 +315,6 @@ export async function captureTurnEnd($: EngineInterface, steps: { total: number;
   mainTurn = null
   lastTurnEndAt = Date.now()
   await resumeTurnEnd($)
-  void factsIfHeadMoved($)
   for (const [id, c] of Object.entries(calls)) if (!c.agentId) delete calls[id]
   try {
     const got = await loadTaskState($)
@@ -415,11 +414,6 @@ export function turnStarted(e: Obj): void {
 
 export function taskNoteAgain(): void {
   noteGiven = false
-  noteRounds++
-}
-
-export function noteRound(): number {
-  return noteRounds
 }
 
 async function resumeNoteOf($: EngineInterface): Promise<string | null> {
@@ -447,7 +441,6 @@ async function resumeNoteOf($: EngineInterface): Promise<string | null> {
 export async function taskPromptIn($: EngineInterface, e: Obj, rt: Promise<unknown> | undefined): Promise<Obj> {
   if (!e || e.agentId) return e
   try {
-    recoverPrompt(e)
     if (['composer', 'sdk', 'bridge'].includes(e.origin?.kind)) {
       personAt = Date.now()
       stallPersonPrompt()
@@ -457,7 +450,8 @@ export async function taskPromptIn($: EngineInterface, e: Obj, rt: Promise<unkno
     const first = !noteGiven
     if (!noteGiven) {
       noteGiven = true
-      const note = await resumeNoteOf($)
+      let note = await resumeNoteOf($)
+      if (note && sameAsLast('round.task', note)) note = null
       if (note) blocks.push(note)
     }
     const hand = await handoverNote($, first)
@@ -514,17 +508,34 @@ export async function taskTick(
   try {
     session = String(await $.session.id())
   } catch {}
-  const live = listed.filter((a) => /pending|running|waiting/i.test(String(a?.status ?? '')))
+  if (session) bindSession(session)
+  finishedFromList(listed)
+  const live = listed.filter((a) => /pending|running|waiting/i.test(String(a?.status ?? '')) && !isFinished(String(a?.id ?? '')))
+  try {
+    if (listed.length && onceKey('task_wire.list_statuses')) {
+      const counts: Record<string, number> = {}
+      for (const a of listed) counts[String(a?.status ?? 'none').slice(0, 40)] = (counts[String(a?.status ?? 'none').slice(0, 40)] ?? 0) + 1
+      $.ui.log(`Subagent statuses the engine lists (logged once per session, for the stall check): ${Object.entries(counts).map(([k, n]) => `${k} x${n}`).join(', ')}.`)
+    }
+  } catch {}
   try {
     for (const a of live) seen[a.id] ??= { startedAt: at, lastToolAt: null }
-    const ladder = await jobStallTick($, at, Object.fromEntries(Object.entries(seen).map(([k, v]) => [k, v.lastToolAt])), live.map((a) => String(a.id)))
     const tasks = []
     for (const t of autoTasks) {
       let changed: number | null = null
       try {
         changed = t.output ? Number((await $.fs.stat(t.output)).mtimeMs) : null
       } catch {}
-      tasks.push({ id: t.id, command: t.command, agentId: t.agentId ?? null, output: t.output, user: t.user === true, outputChangedAt: changed })
+      let redirected: number | null = null
+      const target = redirectTargetOf(t.command)
+      if (target !== null) {
+        try {
+          const file = /^(?:[A-Za-z]:[\\/]|[\\/]|~)/.test(target) ? target : `${String(await $.session.cwd()).replace(/[\\/]+$/, '')}/${target}`
+          redirected = Number((await $.fs.stat(file)).mtimeMs)
+          if (!Number.isFinite(redirected)) redirected = null
+        } catch {}
+      }
+      tasks.push({ id: t.id, command: t.command, agentId: t.agentId ?? null, output: t.output, user: t.user === true, outputChangedAt: changed, redirectChangedAt: redirected })
     }
     const silenced = trusted && state ? state.silenced.filter((x) => !x.untrusted && x.session === session && session !== '') : []
     const plan = stallDue({
@@ -532,7 +543,7 @@ export async function taskTick(
       surfaces: 1,
       main: { running: mainTurn !== null, turnId: mainTurn?.id ?? null, turnStartedAt: mainTurn?.at ?? null },
       calls: [...Object.values(calls), ...autoTasks.filter((t) => !t.user).map((t) => ({ id: `task:${t.id}`, tool: t.tool, text: t.command, description: t.description ?? '', taskId: t.id, agentId: null, startedAt: t.startedAt }))],
-      agents: live.filter((a) => !ladder.covered.includes(String(a.id))).map((a) => ({ id: String(a.id), description: String(a.description ?? ''), startedAt: seen[a.id]?.startedAt ?? at, lastToolAt: seen[a.id]?.lastToolAt ?? null })),
+      agents: live.map((a) => ({ id: String(a.id), description: String(a.description ?? ''), startedAt: seen[a.id]?.startedAt ?? at, lastToolAt: seen[a.id]?.lastToolAt ?? null })),
       autoTasks: tasks,
       state: state ? { ...state, silenced } : null,
       ledger: stallLedger,
@@ -547,8 +558,7 @@ export async function taskTick(
     }
     if (!paired && !failed.length) for (const n of plan.notifies) await reachNotify($, `stop:${n.slice(0, 80)}`, n, REACH_ALWAYS)
     const kept = (text: string) => !failed.some((s) => text.includes(s))
-    for (const n of ladder.notifies) await reachNotify($, `ladder:${n.slice(0, 80)}`, n)
-    const prompts = [...plan.prompts.filter(kept), ...ladder.toMain]
+    const prompts = plan.prompts.filter(kept)
     if (prompts.length) await toMain($, prompts, at)
     for (const s of plan.sends) await $.session.send({ to: { agentId: s.agentId }, text: s.text } as any).catch(() => undefined)
     for (const c of plan.contexts.filter((x) => kept(x.text))) queue(c.agentId, c.text)
@@ -748,6 +758,6 @@ export function taskWireResetForTest(): void {
   stallLedger = {}
   kgLedger = null
   noteGiven = false
-  noteRounds = 0
+  quietReset()
   queued = {}
 }
