@@ -10,6 +10,9 @@
 //   or off, applies it as the person's own savings-record choice (the record, the upload switch and the board
 //   consent). While it is on or off the savings question is not asked, the parts cannot be changed here, and the
 //   person is told the choice once (orgNotice). An answer without "org" (no org, or an older server) drops KEYS.org.
+//   The company's choice is stored with by: 'org' (and the time it was first made). When the company hands the choice
+//   back ("each", or no org any more), a choice the company made is dropped: the upload stops and the person is
+//   asked, so the company's old yes never stands as the person's own answer (consent.ts uploadAnswered).
 // - O5 company admin: the org field also carries "admin": true for the org's admin (shell 0.4.0 or later); it is kept
 //   as `admin: true` in the org state (orgAdmin), and boss.ts then renders and publishes the company board.
 import { CONTRACT } from './contract'
@@ -19,9 +22,11 @@ import type { KV } from './store'
 
 export const ORG_PAUSED_LINE = 'Your company has paused agent-services. Ask your admin to turn it back on.'
 export const ORG_SAVINGS: readonly string[] = (CONTRACT as any).definitions.OrgSavings.enum
-export const ORG_ADMIN_SEES = "Your company's admin sees each person's savings figure."
+export const ORG_ADMIN_SEES = "Your company's admin sees each member's email address, how many devices each member " +
+  "is signed in on, and each member's weekly savings figure (\"no data yet\" while that member uploads nothing)."
 export const ORG_SAVINGS_TEXT: Readonly<Record<string, string>> = {
-  on: `Your company turned the savings record on for everyone, so you are not asked about it. ${ORG_ADMIN_SEES}`,
+  on: `Your company turned the savings record on for everyone, so you are not asked about it: the daily upload and ` +
+    `your private savings page are on, and only your company's admin can turn them off. ${ORG_ADMIN_SEES}`,
   off: 'Your company turned the savings record off for everyone, so you are not asked about it and nothing is uploaded.',
 }
 export const ORG_SET_TEXT = 'Your company set the savings record for everyone, so it cannot be changed here. Ask your admin.'
@@ -61,21 +66,39 @@ export async function orgChoice(kv: KV): Promise<'on' | 'off' | null> {
 export async function keepOrg(kv: KV, org: unknown, now: number, setMetrics: (on: boolean) => Promise<boolean>): Promise<void> {
   try {
     const prev = await readOrg(kv)
-    if (!validOrg(org)) {
-      if (prev) await safeDelete(kv, KEYS.org)
-      return
+    const sharing = await safeGet(kv, KEYS.sharing)
+    const byOrg = isObj(sharing) && sharing.by === 'org'
+    if (!validOrg(org) || (org as { savings: unknown }).savings === 'each') {
+      if (!validOrg(org) && prev) await safeDelete(kv, KEYS.org)
+      await handBack(kv, byOrg, byOrg && sharing.on === true, setMetrics)
+      if (!validOrg(org)) return
     }
     const { savings, admin } = org as { savings: OrgSavings; admin?: true }
     const told = prev && prev.savings === savings ? prev.told : null
     await safeSet(kv, KEYS.org, admin === true ? { savings, at: now, told, admin } : { savings, at: now, told })
     if (savings === 'each') return
     const on = savings === 'on'
-    await safeSet(kv, KEYS.sharing, { on, at: now })
+    // the person's own same answer stays theirs; else the company's, from the time it was first seen
+    if (!(isObj(sharing) && sharing.on === on && (sharing.by !== 'org' || typeof sharing.at === 'number'))) {
+      await safeSet(kv, KEYS.sharing, { on, at: now, by: 'org' })
+    }
     await setMetrics(on)
-    await safeSet(kv, CONSENT_KEY, { answer: on ? 'allow' : 'not_now', at: now })
+    const consent = await safeGet(kv, CONSENT_KEY)
+    if (!(isObj(consent) && consent.answer === (on ? 'allow' : 'not_now'))) {
+      await safeSet(kv, CONSENT_KEY, { answer: on ? 'allow' : 'not_now', at: now, by: 'org' })
+    }
   } catch {
     // the org state is best effort; the next hello tries again
   }
+}
+
+// The company handed the choice back: drop what it chose (the savings answer and the board consent it set); a yes it
+// gave also turns the upload switch off, so nothing is uploaded until the person answers.
+async function handBack(kv: KV, byOrg: boolean, wasOn: boolean, setMetrics: (on: boolean) => Promise<boolean>): Promise<void> {
+  if (byOrg) await safeDelete(kv, KEYS.sharing)
+  const consent = await safeGet(kv, CONSENT_KEY)
+  if (isObj(consent) && consent.by === 'org') await safeDelete(kv, CONSENT_KEY)
+  if (wasOn) await setMetrics(false)
 }
 
 /** The one-time line about the org's choice: the text the first time a choice is seen, then null. */

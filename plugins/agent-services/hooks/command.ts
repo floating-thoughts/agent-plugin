@@ -33,18 +33,25 @@ import type { Facts, Prices, TranscriptFile } from './transcripts'
 import type { Outbox } from './outbox'
 import { redact } from './redact'
 import { updateCommand } from './status'
-import { probeProcess, selfUpdateLine } from './update'
+import { applyUpdate, probeProcess, takeUpdateNote, updatesLine } from './update'
 import { KEYS, safeGet, safeSet } from './store'
 import type { KV } from './store'
 import { gateNotice, LOCKED_LINE, NOTICE_TEXT, PAUSED_LINE, PLAN_NOTICE, SERVED_CHANNELS, SERVED_ROLES } from './svc'
 import type { Result, Svc } from './svc'
-import { askConsent, claimAsk, CONSENT_KEY, CONSENT_SNOOZE_MS, consentState, dashboardUrl, readConsent, sharingState } from './consent'
+import { askConsent, claimAsk, CONSENT_KEY, CONSENT_SNOOZE_MS, consentState, dashboardUrl, readConsent, sharingState,
+  uploadAnswered } from './consent'
 import { dataDir, engineDirs, envOf, readTextOf } from './engine_env'
 import { companyCommand } from './boss'
-import { hasTrust, TRUST_HEADER, TRUST_KEY, TRUST_OPTIONS, TRUST_QUESTION, type TrustFile, trustDue, unbalancedTrust,
-  withoutTrust, withTrust } from './trust'
-import { importLine, queueSetup, syncMethodsNow } from './methods'
+import { hasTrust, TRUST_KEY, type TrustFile, trustDue, unbalancedTrust, withoutTrust, withTrust } from './trust'
+import { approveMethods, checkTrust, importLine, methodsDiff, methodsNoted, methodsNotes, previewMethods, settlePending,
+  syncMethodsNow } from './methods'
+import { framing, lineDiff, pendingNoteText, trustNoteText, updateNoteText } from './review'
 import { ORG_PAUSED_LINE, ORG_SAVINGS_TEXT, ORG_SET_TEXT, orgChoice, orgNotice, sharingQuestion } from './org'
+import { hooksText } from './hooks_list'
+import { removeAll, removedMarker, resetRemoved, type RemoveDeps } from './remove'
+
+export { denyReason, spawnLine } from './hooks_list'
+export { isRemoved } from './remove'
 
 export {
   askConsent,
@@ -73,7 +80,8 @@ export const COMMAND_SPEC = {
     '[status | login [<email>] | code | logout | sharing [on | not_now | preview] | savings [preview | on | off | ' +
     'status | mail on | mail off] | ' +
     'estimate [preview | send] | served [pin <role> <version> | unpin <role> | channel <name>] | offline on|off | ' +
-    'setup | trust [on | off | not_now | preview] | outbox [<day>]]',
+    'setup | trust [on | off | not_now | preview | status | diff | accept | keep] | update | data | hooks | remove | ' +
+    'outbox [<day>]]',
 } as const
 
 /** The subcommands that work while auth has failed (plan 3.9 item 4). */
@@ -95,8 +103,9 @@ export const SAVINGS_PROMPT_KEY = 'savings_prompt' // { answer: 'not_now', at }:
 // is asked again after CONSENT_SNOOZE_MS.
 export const SHARING_QUESTION =
   'Keep a record of what agent-services saves you? It shows your savings on a private page in your claude.ai ' +
-  'account (only you can see it), emails you a weekly total, and uploads a small daily summary of numbers only ' +
-  '(never your prompts, files or code).'
+  'account (only you can see it), emails you a weekly total, and uploads a small daily usage summary (token ' +
+  'counts and costs per model, counts per task type and hashed project, savings; never your prompts, file ' +
+  'contents, paths or code). Nothing of it is uploaded before you answer.'
 export const SHARING_OPTIONS = ['Turn on (Recommended)', 'Not now', 'Show me what is sent']
 export const SHARING_HEADER = 'Savings'
 // The tool the model calls with the user's answer to the first-prompt setup question (onboarding below); it runs the
@@ -112,18 +121,31 @@ export const SETUP_COMMANDS = [
   'dashboard not_now',
   'trust on',
   'trust not_now',
+  'trust off',
   'trust preview',
+  'trust diff',
+  'trust accept',
+  'trust keep',
+  'update',
+  'data',
+  'hooks',
 ]
 export const SETUP_SPEC = {
   name: 'setup',
   description:
     "Apply the user's answer to the agent-services setup question. \"sharing on\" turns the savings record on: a " +
     "private Artifact page on the user's own claude.ai account (only they see it unless they share it), a weekly " +
-    'savings email, and one small daily usage summary (counts and token totals, never prompts, file contents or ' +
-    'paths). "sharing not_now" turns all three off; "sharing preview" shows what is sent and changes nothing. The ' +
-    'other commands change one part only. "trust on" adds one short section to the user\'s CLAUDE.md that ' +
-    'makes the served working methods their own instructions ("trust preview" shows it, "trust not_now" leaves ' +
-    'it out). Only call it with an answer the user gave.',
+    'savings email, and one small daily usage summary (token counts and costs per model, counts per task type and ' +
+    'hashed project, savings; no prompt text, file contents or paths). "sharing not_now" turns all three off; ' +
+    '"sharing preview" shows what one upload sends and changes nothing. "data" returns the plugin\'s data note: ' +
+    'every request it sends and when, what the service keeps and for how long, what a company admin sees, the ' +
+    'local files, and what can be turned off. "hooks" lists every hook the plugin registers and what it does. The ' +
+    'other commands change one part only. "trust preview" returns the full text of the working methods; "trust ' +
+    'on" adds one marked section to the user\'s CLAUDE.md that loads that text, "trust not_now" leaves it out for 7 ' +
+    'days, "trust off" leaves it out for good. "trust diff" shows how the served methods differ from the approved ' +
+    'ones; "trust accept" takes the new text, "trust keep" keeps the approved one. "update" updates the plugin to ' +
+    'the newest listed version. "data" and "hooks" change nothing. Only call it with an answer the user gave, ' +
+    'except "data", "hooks", "sharing preview" and "trust preview", which only read.',
   inputSchema: {
     type: 'object',
     properties: { command: { type: 'string', enum: SETUP_COMMANDS } },
@@ -198,7 +220,7 @@ export const USAGE =
   `Usage: ${COMMAND} [status | login [<email>] | code | logout | savings [preview | on | off | not_now | status | ` +
   'mail on | mail off] | sharing [on | not_now | preview] | dashboard [allow | not_now] | estimate [preview | send] | served [status | ' +
   'pin <role> <version> | unpin <role> | channel <name>] | offline on|off | setup | trust [on | off | not_now | ' +
-  'preview] | outbox [<day>]]'
+  'preview | status | diff | accept | keep] | update | data | hooks | remove | outbox [<day>]]'
 
 // ------------------------------------------------------------------ types
 
@@ -218,7 +240,8 @@ export type CommandDeps = {
   now: () => number // ms since the epoch
   ask?: Ask | null
   autoUpdate?: () => Promise<AutoUpdate | null>
-  updateLine?: () => Promise<string | null> // the terminal update line, or null where self-update runs
+  updateLine?: () => Promise<string | null> // the terminal update line, or null where commands can run
+  updateNow?: () => Promise<string> // update.ts applyUpdate: runs only on the user's answer
   facts?: () => Promise<Facts | ScanProgress | null> // the estimate's scan of this machine's history (EstimateScan);
   // null when there is none
   dailyBody?: (day: string) => Promise<Record<string, unknown>> // one day's POST /metrics/daily body (may throw)
@@ -229,6 +252,8 @@ export type CommandDeps = {
   dashboardUrl?: () => Promise<string | null> // the published dashboard's artifact URL, for status
   bossUrl?: () => Promise<string | null> // O5: the published company board's artifact URL (company admins)
   trustFile?: TrustFile | null // the user-level CLAUDE.md (trust.ts)
+  dataText?: () => Promise<string> // the plugin's DATA.md (may throw)
+  removeDeps?: Pick<RemoveDeps, 'fs' | 'dirs' | 'stopLog'> | null // /agent-services remove (remove.ts)
 }
 
 const isObj = (v: unknown): v is Record<string, any> => typeof v === 'object' && v !== null && !Array.isArray(v)
@@ -301,6 +326,8 @@ export const PASTED_CODE_RX = /^[0-9]{6,8}$/
 // prompt.submit has a time budget and forwards the message when a hook runs past it: the pasted path answers by then
 export const PASTED_WAIT_MS = 6_000
 export const PASTED_SLOW = `The sign-in is still being checked. Run ${COMMAND} status in a moment to see whether it finished.`
+// said whenever prompt.submit drops a pasted code: as a toast, and as the first line of the drop reason
+export const PASTED_TAKEN = 'agent-services took the sign-in code; it was not sent to the model.'
 export const PASTED_FAILED = `The sign-in did not finish. Enter the code with ${COMMAND} code.`
 export const PASTE_CODE_LINE =
   'Paste the 8-digit code from that email here as your next message. It goes to agent-services only, not to ' +
@@ -357,23 +384,26 @@ export async function autoUpdateState(src: AutoUpdateSources): Promise<AutoUpdat
 }
 
 /** The auto-update line. Where an environment variable turns Claude Code's own plugin updates off (the desktop app
- * sets one), the menu step cannot help: `updateLine` null means this plugin updates itself, else it is the manual
+ * sets one), the menu step cannot help: `updateLine` null means `/agent-services update` can run it, else it is the manual
  * update command, given instead of the steps. */
 export function autoUpdateText(a: AutoUpdate | null, updateLine: string | null = null): string | null {
   if (!a) return null
-  if (a.on) return 'Auto-update: on.'
+  if (a.on) {
+    return "Auto-update: on. Claude Code's own auto-update is on for agent-plugin, so Claude Code updates this plugin " +
+      'by itself, without asking you; the plugin itself never updates. To be asked first, turn it off: /plugin, ' +
+      'Marketplaces, agent-plugin, Disable auto-update.'
+  }
   if (a.source === 'env') {
     return updateLine === null
-      ? "Auto-update: Claude Code's own plugin updates are off here (an environment variable); this plugin updates " +
-          'itself instead.'
+      ? "Auto-update: Claude Code's own plugin updates are off here (an environment variable). This plugin checks " +
+          `for new versions and never updates itself: ${COMMAND} update updates it when you choose.`
       : "Auto-update: Claude Code's own plugin updates are off here (an environment variable). To update the " +
           `plugin, run this in a terminal: ${updateLine}`
   }
   return (
-    `Auto-update: off. One setup step is left: auto-update is how this plugin receives fixes and new services ` +
-    'without a reinstall, from the next session on. 1. Run /plugin, open Marketplaces and select agent-plugin. ' +
-    '2. Choose Enable auto-update. (Or set "autoUpdate": true on the agent-plugin entry under ' +
-    'extraKnownMarketplaces in your settings.) This plugin never changes your settings itself.'
+    'Auto-update: off. The plugin never updates itself: it checks for a newer version, Claude tells you about it, ' +
+    `and ${COMMAND} update updates it when you choose. (Claude Code's own auto-update would update it without ` +
+    'asking you; this plugin never changes your settings.)'
   )
 }
 
@@ -508,9 +538,9 @@ export class Command {
     const rest = words.slice(1)
     const svc = this.d.svc
     const known = ['status', 'login', 'code', 'logout', 'sharing', 'savings', 'dashboard', 'estimate', 'served',
-      'offline', 'outbox', 'company', 'trust', 'setup']
+      'offline', 'outbox', 'company', 'trust', 'setup', 'update', 'data', 'hooks', 'remove']
     if (!known.includes(sub)) return `Unknown subcommand "${sub.slice(0, 40)}". ${USAGE}`
-    if (!AUTH_FAIL_COMMANDS.includes(sub)) {
+    if (!AUTH_FAIL_COMMANDS.includes(sub) && !['update', 'data', 'hooks', 'remove'].includes(sub)) {
       const st = await svc.authState(true)
       // 3.9: nothing else works, nothing is sent
       if (st !== 'ok') return st === 'locked' ? LOCKED_LINE : st === 'paused' ? ORG_PAUSED_LINE : PAUSED_LINE
@@ -540,6 +570,14 @@ export class Command {
         return this.trust(rest)
       case 'setup':
         return rest.length ? USAGE : this.setup()
+      case 'update':
+        return rest.length ? USAGE : this.update()
+      case 'data':
+        return rest.length ? USAGE : this.data()
+      case 'hooks':
+        return rest.length ? USAGE : hooksText()
+      case 'remove':
+        return rest.length ? USAGE : this.remove()
       case 'company': // O5: the company admin's board and weekly summary email
         return companyCommand({ svc, store: this.d.store, url: () => this.d.bossUrl?.() ?? Promise.resolve(null) }, rest)
       default:
@@ -596,8 +634,8 @@ export class Command {
     const au = autoUpdateText(a, up)
     if (au) lines.push(au)
     if (up && !(a && !a.on && a.source === 'env')) lines.push(`To update the plugin, run this in a terminal: ${up}`)
-    const su = selfUpdateLine()
-    if (su) lines.push(su)
+    const ul = updatesLine()
+    if (ul) lines.push(ul)
     if (auth === 'ok') lines.push(await this.dashboardLine())
     return lines.join('\n')
   }
@@ -656,21 +694,83 @@ export class Command {
     return !!f && trustDue(await this.d.store.get(TRUST_KEY), this.d.now(), await f.read())
   }
 
-  /** The plugin's own question (queued by methods.ts after a sign-in and at a session start while due). */
+  /** No dialog: the model reads the text and asks the user (methods.ts trust note); this only says how. */
   private async setup(): Promise<string> {
     if (!(await this.safe(() => this.trustDue(), false))) return 'Nothing to set up right now.'
-    if (!this.d.ask) return `Run ${COMMAND} trust on to make the working methods your own instructions.`
-    let a: string
-    try {
-      a = String(await this.d.ask(TRUST_QUESTION, { options: TRUST_OPTIONS, header: TRUST_HEADER })).trim()
-    } catch {
-      a = ''
-    }
-    if (a === TRUST_OPTIONS[0]) return this.trust(['on'])
-    if (a === TRUST_OPTIONS[1]) return this.trust(['not_now'])
-    // dismissed or typed: taken as "Not now", so it is not asked at every session start
-    await safeSet(this.d.store, TRUST_KEY, { answer: 'not_now', at: this.d.now() })
-    return `Not answered; asked again in 7 days. Run ${COMMAND} setup to answer it now.`
+    return `Run ${COMMAND} trust preview to read the working methods, then ${COMMAND} trust on to add them to your ` +
+      `CLAUDE.md (or ${COMMAND} trust not_now).`
+  }
+
+  /** The plugin's data note (DATA.md, shipped with the plugin), whole. */
+  private async data(): Promise<string> {
+    const text = await this.safe(async () => (this.d.dataText ? String(await this.d.dataText()) : ''), '')
+    return text.trim()
+      ? text.trim()
+      : 'The data note (DATA.md in the plugin folder) could not be read here; it is also in the plugin\'s public ' +
+          'repository. Nothing was changed.'
+  }
+
+  /** /agent-services remove (remove.ts): sign out, take the CLAUDE.md section out, empty the local files, delete the
+   * stored values, then the uninstall command. Only the slash command runs it. */
+  private async remove(): Promise<string> {
+    const rd = this.d.removeDeps
+    return removeAll({
+      logout: async () => 'Sign-out: ' + (await this.logout()),
+      trustOff: async () => {
+        const f = this.d.trustFile
+        if (!f) return 'CLAUDE.md: it cannot be reached from here; nothing was changed.'
+        const text = await f.read() // throws when it exists but cannot be read: said by removeAll
+        if (!hasTrust(text) && !unbalancedTrust(text)) return 'CLAUDE.md: it has no agent-services section; nothing was changed.'
+        return 'CLAUDE.md: ' + (await this.trust(['off'])) // the same checks as trust off
+      },
+      store: this.d.store,
+      fs: rd?.fs ?? null,
+      dirs: rd?.dirs ?? (async () => []),
+      stopLog: rd?.stopLog,
+    })
+  }
+
+  /** Updates the plugin now (update.ts applyUpdate), waiting UPDATE_WAIT_MS at most: a hook has about 10 s. */
+  private async update(): Promise<string> {
+    if (!this.d.updateNow) return `This plugin cannot run commands here. To update it, run this in a terminal: ` +
+      `${updateCommand(MARKETPLACE)}`
+    const run = this.d.updateNow()
+    const slow = 'The update is running (it can take a minute or two). ' +
+      `${COMMAND} status shows the result in its Updates: line.`
+    return this.d.sleep ? Promise.race([run, Promise.resolve(this.d.sleep(8000)).then(() => slow)]) : run
+  }
+
+  /** Empties the marker /agent-services remove left (remove.ts removedMarker), so the plugin works again. */
+  private async clearRemoved(): Promise<void> {
+    const rd = this.d.removeDeps
+    const dir = rd?.fs ? (await rd.dirs())[0] : undefined
+    if (!rd?.fs || !dir) return
+    const there = (await rd.fs.list(dir).catch(() => [])).some((e) => e.name === 'REMOVED')
+    if (there) await rd.fs.write(removedMarker(dir), '')
+    resetRemoved()
+  }
+
+  /** Signed in (auth state ok): only then does the model get any note. Never throws. */
+  async signedIn(): Promise<boolean> {
+    return (await this.safe(() => this.d.svc.authState(), 'unknown')) === 'ok'
+  }
+
+  /** Claude Code's own plugin auto-update is on for this marketplace. Never throws. */
+  async autoUpdateOn(): Promise<boolean> {
+    const a = await this.safe(() => this.d.autoUpdate?.() ?? Promise.resolve(null), null)
+    return a?.on === true
+  }
+
+  /** The review notes for the model's next prompt (review.ts), one at a time: a newer version, a changed methods
+   * text, or the methods question. Each is given at most once (per version, per session). */
+  async reviewNotes(due: { trust: boolean; pending: boolean }, update: { installed: string; latest: string } | null):
+    Promise<{ text: string; which: 'update' | 'trust' | 'pending' } | null> {
+    if (!update && !due.trust && !due.pending) return null
+    const st = await this.safe(() => this.d.svc.status(), {} as any)
+    const facts = framing(st?.account_id, st?.plan)
+    if (update) return { text: updateNoteText(update.installed, update.latest, facts), which: 'update' }
+    if (due.pending) return { text: pendingNoteText(facts), which: 'pending' }
+    return { text: trustNoteText(facts), which: 'trust' }
   }
 
   private async trust(rest: string[]): Promise<string> {
@@ -679,8 +779,27 @@ export class Command {
     if (rest.length > 1) return USAGE
     if (!f) return 'Your CLAUDE.md cannot be reached from here; nothing was changed.'
     if (sub === 'preview') {
+      const full = await previewMethods()
       return `This line would be added to the end of your CLAUDE.md (${f.path}):\n\n${await f.importLine()}\n\n` +
-        'It loads a file this plugin keeps current with the served working methods while you are signed in.'
+        'It loads a file this plugin keeps renewed while you are signed in; a later change to the text is shown ' +
+        `to you first (${COMMAND} trust diff). ` +
+        (full === null
+          ? 'The full text cannot be fetched right now (signed out or the service unreachable); try again later.'
+          : `The full text it would hold now:\n\n----- begin -----\n${full.trim()}\n----- end -----`)
+    }
+    if (sub === 'diff') {
+      const d = await methodsDiff(lineDiff)
+      return d === null
+        ? 'The served working methods are the ones you approved; there is nothing to review.'
+        : `The served working methods differ from the ones you approved ("- " approved, "+ " new):\n\n${d}\n\n` +
+            `${COMMAND} trust accept takes the new text; ${COMMAND} trust keep keeps the approved one.`
+    }
+    if (sub === 'accept' || sub === 'keep') {
+      const done = await settlePending(sub === 'accept')
+      if (!done) return 'There is no changed text to review; nothing was changed.'
+      return sub === 'accept'
+        ? 'The new working methods replace the approved ones; your CLAUDE.md loads them from the next session on.'
+        : 'The approved working methods stay; this change is not asked about again.'
     }
     const now = this.d.now()
     let text: string | null
@@ -691,10 +810,9 @@ export class Command {
     }
     if (sub === 'status') {
       return hasTrust(text)
-        ? `Your CLAUDE.md (${f.path}) makes the served working methods your own instructions. Remove it with ` +
-            `${COMMAND} trust off.`
+        ? `Your CLAUDE.md (${f.path}) loads the working methods you approved. Remove it with ${COMMAND} trust off.`
         : `Your CLAUDE.md has no agent-services section. Add it with ${COMMAND} trust on (${COMMAND} trust preview ` +
-            'shows it).'
+            'shows the full text first).'
     }
     if (sub === 'not_now') {
       await safeSet(this.d.store, TRUST_KEY, { answer: 'not_now', at: now })
@@ -704,6 +822,12 @@ export class Command {
     if (unbalancedTrust(text)) {
       return `Your CLAUDE.md (${f.path}) has an agent-services marker line without its pair; nothing was changed. ` +
         'Remove the leftover marker line, then run this again.'
+    }
+    if (sub === 'on' && hasTrust(text)) {
+      // already there: the approved text stays; a changed text is reviewed with diff and accept, never approved here
+      return `Your CLAUDE.md (${f.path}) already has the agent-services section; the approved working methods stay and ` +
+        `nothing was changed. If the text changed since you approved it, ${COMMAND} trust diff shows the change and ` +
+        `${COMMAND} trust accept takes it.`
     }
     const line = await f.importLine()
     if (sub === 'on' && /\s/.test(line.slice(1))) {
@@ -717,10 +841,14 @@ export class Command {
       await f.write(next)
     }
     await safeSet(this.d.store, TRUST_KEY, { answer: sub, at: now })
-    if (sub === 'on') await syncMethodsNow() // the file the line loads, before the next session
-    return sub === 'on'
-      ? `Added the agent-services section to ${f.path}: from the next session on, the served working methods count ` +
-          `as your own instructions. Remove it with ${COMMAND} trust off.`
+    const ok = sub === 'on' ? await approveMethods() : null // the text previewed, then the file the line loads
+    return ok
+      ? `Added the agent-services section to ${f.path}: from the next session on, the working methods you approved ` +
+          `count as your own instructions; a change to them is shown to you first. Remove it with ${COMMAND} trust off.` +
+          (ok.text !== null && !ok.shown
+            ? ` No preview was shown in this session, so this is the text approved:\n\n----- begin -----\n` +
+                `${ok.text.trim()}\n----- end -----`
+            : '')
       : `Removed the agent-services section from ${f.path}; you are not asked again. Add it back with ${COMMAND} trust on.`
   }
 
@@ -758,7 +886,8 @@ export class Command {
       : ''
     return on
       ? 'Savings record is on: your private savings page is published to your claude.ai account when Claude ' +
-          'finishes this reply, a weekly email sums up the savings, and a small daily summary of numbers is uploaded. ' +
+          'finishes this reply, a weekly email sums up the savings, and a small daily usage summary is uploaded ' +
+          '(the first upload also sends up to 30 earlier days). ' +
           `To turn one part off: ${COMMAND} dashboard not_now (the page), ${COMMAND} savings mail off (the email), ` +
           `${COMMAND} savings off (the upload).` +
           mailLine
@@ -789,6 +918,9 @@ export class Command {
       'plan and service state, numbers only.\n' +
       '- A weekly email to your account address with the week\'s savings.\n' +
       `- ${upload}\n` +
+      `Nothing of it is uploaded before you turn it on; the first upload then also sends up to 30 earlier days. ` +
+      `Every other request the plugin sends (routing advice on subagents, for one) is listed by ${COMMAND} data.
+` +
       `Turn it on with ${COMMAND} sharing on, or leave it off with ${COMMAND} sharing not_now.`
     )
   }
@@ -916,6 +1048,7 @@ export class Command {
   private async complete(email: string, code: string, head: string, ask = true): Promise<string> {
     const r = await this.d.svc.loginFinish(email, code)
     if (!r.ok) return head + `Sign-in failed: ${errorText(r.error)}`
+    await this.safe(() => this.clearRemoved(), undefined) // signed in again after /agent-services remove: work again
     const st = await this.d.svc.status()
     const lines = [head + `Signed in (account ${st.account_id ?? '?'}, plan ${st.plan ?? 'unknown'}). agent-services is on.`]
     const au = await this.safe(() => this.d.autoUpdate?.() ?? Promise.resolve(null), null)
@@ -992,8 +1125,10 @@ export class Command {
     }
     if (sub === 'status' && rest.length === 1) {
       const s = await this.metricsState()
+      const waits = on && !(await uploadAnswered(this.d.store))
       return (
         `Daily usage upload: ${on ? 'on' : 'off'}.` +
+        (waits ? ` Nothing is uploaded until you turn it on yourself (${COMMAND} sharing on).` : '') +
         (s.enabled_day ? ` Turned on ${s.enabled_day}.` : '') +
         (s.last_uploaded_day ? ` Uploaded through ${s.last_uploaded_day}.` : '') +
         (s.previewed_day ? ` Last preview: ${s.previewed_day}.` : ' No preview yet.')
@@ -1008,9 +1143,9 @@ export class Command {
       } catch (e) {
         return e instanceof BodyTooLarge
           ? `The summary for ${day} is too large to upload.`
-          : 'The daily usage summary could not be built in time on this machine. It holds numbers only: token ' +
-              'counts and costs per model, task types per hashed project, session counts and savings; never ' +
-              'prompts, file contents or paths.'
+          : 'The daily usage summary could not be built in time on this machine. It holds token counts and ' +
+              'costs per model, task types per hashed project, session counts and savings; never prompts, file ' +
+              `contents or paths. Other requests are listed by ${COMMAND} data.`
       }
       const text = svc.preview('POST', DAILY_ROUTE, body)
       if (text === null) return 'The daily usage summary could not be built.'
@@ -1268,6 +1403,7 @@ export function engineDeps($: EngineInterface, o: EngineOptions): CommandDeps {
     },
     updateLine: async () =>
       ((o.selfUpdates ? o.selfUpdates() : await probeProcess($)) ? null : updateCommand(o.marketplace ?? MARKETPLACE)),
+    updateNow: () => applyUpdate($, o.marketplace ?? MARKETPLACE),
     facts: async () => {
       if (!o.prices) return null
       const d = await engineDirs($)
@@ -1296,6 +1432,18 @@ export function engineDeps($: EngineInterface, o: EngineOptions): CommandDeps {
       },
       write: async (text) => void (await $.fs.write(`${(await engineDirs($)).configDir}/CLAUDE.md`, text)),
       importLine: async () => importLine(await dataDir($), (await engineDirs($)).home),
+    },
+    dataText: async () => String(await $.fs.read(`${$.plugin.root}/DATA.md`)),
+    removeDeps: {
+      fs: {
+        list: async (p) => (await $.fs.list(p)).map((e: any) => ({ name: String(e.name), kind: e.kind })),
+        write: async (p, text) => void (await $.fs.write(p, text)),
+      },
+      dirs: async () => {
+        const own = String((await Promise.resolve($.env.get('CLAUDE_PLUGIN_DATA')).catch(() => '')) ?? '').trim()
+        return [await dataDir($), ...(own ? [own.replace(/[\\/]+$/, '')] : [])]
+      },
+      stopLog: () => o.outbox?.stop(),
     },
   }
 }
@@ -1339,8 +1487,8 @@ export function serveCommand(
     } catch {
       // the answer stands
     }
-    // a sign-in or a sign-out: the methods file follows it, and a sign-in queues the plugin's own question if due
-    if (/^(login|code|logout)\b/i.test(args.trim())) void syncMethodsNow().then(() => queueSetup($, /Signed in/.test(text)))
+    // a sign-in or a sign-out: the methods file follows it, and a sign-in re-checks whether the trust note is due
+    if (/^(login|code|logout)\b/i.test(args.trim())) void syncMethodsNow().then(() => checkTrust($, /Signed in/.test(text)))
     // the engine already shows a hook's answer under the plugin's name: drop the answer's own leading label
     return { text: text.replace(/^agent-services: /, '') }
   }).catch(() => ({ text: `the command failed; try ${COMMAND} status.` }))
@@ -1359,6 +1507,15 @@ async function servedCommand($: EngineInterface): Promise<Command> {
   return servedCmd
 }
 
+/** The toast that says a pasted code was taken (best effort; the drop reason says it too). */
+function tookCode($: EngineInterface): void {
+  try {
+    $.ui.toast(PASTED_TAKEN)
+  } catch {
+    // the drop reason stands
+  }
+}
+
 /** prompt.submit: the answer when the message is a pasted sign-in code (Command.pasted), else null. */
 export async function pastedCode(
   $: EngineInterface,
@@ -1374,22 +1531,36 @@ export async function pastedCode(
     if (answer === null) return null // no sign-in waits: an ordinary message
     if (answer.startsWith('Signed in')) {
       void Promise.resolve(servedAfter?.('login')).catch(() => undefined)
-      void syncMethodsNow().then(() => queueSetup($, true)) // the plugin's own question, once this turn is done
+      void syncMethodsNow().then(() => checkTrust($, true)) // the trust note, at a later prompt
     }
-    return answer.replace(/^agent-services: /, '')
+    tookCode($)
+    return `${PASTED_TAKEN}
+${answer.replace(/^agent-services: /, '')}`
   } catch {
-    return PASTED_FAILED // a code-shaped message is never forwarded once the sign-in path started
+    tookCode($)
+    return `${PASTED_TAKEN}
+${PASTED_FAILED}` // a code-shaped message is never forwarded once the sign-in path started
   }
 }
 
-/** The first prompt's onboarding note (Command.onboarding), once per session; null when there is none. */
+/** The first prompt's onboarding note (Command.onboarding), once per session; at a later prompt one review note
+ * (Command.reviewNotes: a newer version, changed methods, the methods question); null when there is none. */
 export async function onboardingNote($: EngineInterface): Promise<string | null> {
   try {
     if (!servedOptions) return null
+    const cmd = await servedCommand($)
     const session = String(await $.session.id())
-    if (onboarded === session) return null
-    onboarded = session
-    return await (await servedCommand($)).onboarding()
+    if (onboarded !== session) {
+      onboarded = session
+      const first = await cmd.onboarding()
+      if (first) return first // one question per prompt: the review notes wait for the next one
+    }
+    if (!(await cmd.signedIn())) return null // signed out: no notes at all (DATA.md)
+    // Claude Code's own auto-update on: it updates the plugin without asking, so no note asks the user about a version
+    const update = (await cmd.autoUpdateOn()) ? null : await takeUpdateNote($)
+    const note = await cmd.reviewNotes(update ? { trust: false, pending: false } : await methodsNotes($), update)
+    if (note && note.which !== 'update') methodsNoted(note.which)
+    return note?.text ?? null
   } catch {
     return null
   }

@@ -1,7 +1,7 @@
 // The status line under the prompt, harness-neutral: its text, today's counts and the refresh rules.
 //
 // A port of host/status_line.py (render, today_text, the counts and the fetch interval) plus the plan 3.8 and 3.9
-// rules: while signed out or auth-failed only the sign-in line is shown; when the plugin cannot update itself
+// rules: while signed out or auth-failed only the sign-in line is shown; when the plugin cannot run commands
 // (no $.process) the update command is shown once per 7 days. Nothing here touches the engine; the wiring
 // (phase 2) calls $.ui.status with statusText(...) after session.start and turn.complete.
 //

@@ -1,7 +1,7 @@
 // agent-services Claude Code adapter (plan 3.1, module P8): the engine's hooks wired to the in-process core.
 // Nothing here talks to a local process: the core (core.ts), the svc channel (svc.ts), the tools (tools.ts), the slash
 // command (command.ts), the status line, dashboard, metrics and estimate (wiring.ts), the dashboard publish
-// (dashboard.ts) and the self-update (update.ts) all run in this module, one instance per Claude Code session.
+// (dashboard.ts) and the update check (update.ts) all run in this module, one instance per Claude Code session.
 //
 // Rules kept here:
 // - session.start registers the tools and the slash command first, before anything is awaited (plan 3.2 item 1);
@@ -14,7 +14,7 @@
 //   background; it never starts or kills a process.
 // - Nothing here writes the user's settings or permission rules ($.settings is read only).
 import type { EngineInterface, Register } from 'claude-code'
-import { dataDir, declareCommand, engineClaudeHash, engineDirs, MARKETPLACE, onboardingNote, pastedCode, serveCommand } from './command'
+import { dataDir, declareCommand, denyReason, engineClaudeHash, engineDirs, isRemoved, MARKETPLACE, onboardingNote, pastedCode, serveCommand, spawnLine } from './command'
 import { Core, type Answer } from './core'
 import { dashboardGrant, GRANT_REASON, PUBLISH_START_WAIT_MS } from './dashboard'
 import { publishBoards } from './boss' // O5: the person's board, then the company admin's
@@ -26,7 +26,7 @@ import { PRICES } from './prices'
 import { engineStore, safeDelete, safeGet, type KV } from './store'
 import { Svc, type HttpAnswer } from './svc'
 import { engineSleep, installTools, registerTools, SESSION_FALLBACK, svcAuthLine, toolInput } from './tools'
-import { probeProcess, selfUpdate, type Gate } from './update'
+import { probeProcess, updateCheck, type Gate } from './update'
 import { bandSetter, createWiring, installBand, svcTransport, type Wiring } from './wiring'
 
 type Ev = Record<string, any>
@@ -205,7 +205,7 @@ async function build($: EngineInterface): Promise<Rt | null> {
 }
 
 function ready($: EngineInterface): Promise<Rt | null> {
-  declare($)
+  declare($); if (isRemoved()) return Promise.resolve(null) // after /agent-services remove: every event passes
   if (!runtime) {
     runtime = build($)
     void runtime.then(resolveFirst)
@@ -222,7 +222,7 @@ async function send($: EngineInterface, kind: string, agent: string | null, fiel
   return capped(r.core.handle(event), r.sleep, EVENT_WAIT_MS, null)
 }
 
-// Session-start background: metrics upload, savings lines (startNotices), outbox sweep, migration, self-update.
+// Session-start background: metrics upload, savings lines (startNotices), outbox sweep, migration, update check.
 function background($: EngineInterface, r: Rt, interactive: boolean): void {
   void r.wiring.metricsTick().catch(() => undefined)
   void r.wiring.startNotices().then((lines) => lines.forEach((line) => show($, line, true))).catch(() => undefined)
@@ -243,14 +243,14 @@ function background($: EngineInterface, r: Rt, interactive: boolean): void {
     return r.svc.gateState().reason === 'upgrade' ? 'upgrade' : 'open'
   }
   // update.ts, later; without $.process it runs nothing and the status line and status show the terminal command
-  selfUpdate($, interactive, gate, () => void (updates.selfUpdates = false))
+  updateCheck($, interactive, gate, () => void (updates.selfUpdates = false))
 }
 
 export const register: Register = (on) => {
   installTools(on as any, {
     deps: async () => {
       const r = await (runtime ?? first)
-      if (!r) throw new Error('agent-services did not start')
+      if (!r || isRemoved()) throw new Error('agent-services did not start') // removed: the tools answer nothing
       return { core: r.core as any, authLine: svcAuthLine(r.svc), sleep: r.sleep, outbox: r.outbox, lessonHold: lessonHold(r.readText) }
     },
   })
@@ -299,9 +299,9 @@ export const register: Register = (on) => {
       teammate: e.isTeammate === true,
       call,
     })
-    show($, a?.notice)
+    show($, spawnLine(a)) // a changed model is said every time (hooks_list.ts)
     if (a?.action === 'deny') {
-      return { deny: a.reason }
+      return { deny: denyReason(a.reason) }
     }
     const spawned: Ev = await next(a?.action === 'rewrite' && a.set ? { ...e, model: a.set.model } : e)
     if (spawned && typeof spawned.agentId === 'string') {
@@ -330,9 +330,9 @@ export const register: Register = (on) => {
     const a = await send($, 'pre_tool', agent, fields)
     show($, a?.notice)
     if (a?.action === 'deny') {
-      return { deny: a.reason }
+      return { deny: denyReason(a.reason, 'tool check') }
     }
-    const done: Ev = await next(a?.action === 'rewrite' && a.set ? { ...e, ...a.set } : e)
+    const done: Ev = await next(e) // a tool's input is never changed
     await surveyTool(ready($), e.tool, toolInput(e), done, () => $.session.cwd()) // phase.ts: R11 survey counts
     show($, (await send($, 'post_tool', agent, { ...fields, ok: done?.deny === undefined && done?.isError !== true }))?.notice)
     return done

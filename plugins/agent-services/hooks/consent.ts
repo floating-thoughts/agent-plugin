@@ -1,6 +1,8 @@
 // The dashboard publish consent and the savings-record choice state (cleanup route R6, moved from command.ts
 // unchanged): the stored answers, the once-per-session dialog question and the published dashboard's URL.
 // Harness-neutral: the store and the dialog are passed in.
+import { localDay } from './counters'
+import { plusDays } from './pyfmt'
 import { KEYS, safeGet, safeSet } from './store'
 import type { KV } from './store'
 import type { Ask } from './command'
@@ -62,6 +64,35 @@ export async function sharingState(kv: KV, now: number): Promise<'on' | 'not_now
   if (!isObj(v) || typeof v.on !== 'boolean' || num(v.at) === null) return 'ask'
   if (v.on) return 'on'
   return now - v.at < CONSENT_SNOOZE_MS ? 'not_now' : 'ask'
+}
+
+/** Whether the user (or their company, for everyone) answered yes to the daily upload: "sharing on", or "savings on"
+ * after its preview (an explicit choice of the switch). Until then nothing is uploaded and nothing is back-filled,
+ * even though the switch reads on by default (owner 2026-11-01, consent first). A yes the company gave (by: 'org',
+ * org.ts keepOrg) counts only while the company's choice is still "on". Never throws. */
+export async function uploadAnswered(kv: KV): Promise<boolean> {
+  const v = await safeGet(kv, KEYS.sharing)
+  if (isObj(v) && v.by === 'org') {
+    const o = await safeGet(kv, KEYS.org)
+    return v.on === true && isObj(o) && o.savings === 'on'
+  }
+  if (isObj(v) && v.on === true) return true
+  const s = await safeGet(kv, KEYS.settings)
+  return isObj(s) && s.metrics_set === true && isObj(s.services) && s.services.metrics === true
+}
+
+/** The first day the daily upload may send: 30 days (`days`) before the yes was given ("sharing on" or the company's
+ * choice: its time; "savings on": the day it was turned on), so a back-fill never reaches further back than that, however
+ * long ago the last upload was; with no day known, `today` minus `days`. Never throws. */
+export async function uploadFloor(kv: KV, today: string, days = 30): Promise<string> {
+  const v = await safeGet(kv, KEYS.sharing)
+  let answered: string | null = null
+  if (isObj(v) && v.on === true && num(v.at) !== null) answered = localDay(v.at)
+  else {
+    const st = await safeGet(kv, KEYS.metricsState)
+    if (isObj(st) && typeof st.enabled_day === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(st.enabled_day)) answered = st.enabled_day
+  }
+  return plusDays(answered && answered < today ? answered : today, -days)
 }
 
 /** Claim this session's one dialog question (shared by askConsent and the sharing question): false when it was

@@ -42,6 +42,7 @@ import { counterDays, countsOf, dayCountsFromStore, dayEmpty, normalizeDay } fro
 import { boardData, readOutboxDay, timelineOf, weeklyOf } from './board_facts'
 import { bandFacts, paused, type BandFacts, type BandKind, type BandState } from './band'
 import { readOrg } from './org'
+import { uploadAnswered, uploadFloor } from './consent'
 import { BossBoard } from './boss'
 import { MAIN_BOARD, type Board } from './dashboard'
 
@@ -480,7 +481,7 @@ export class Wiring {
 
   /** The lines to show at session start: DEFAULT_ON_NOTICE once, then the weekly summary. Nothing while auth fails. */
   async startNotices(): Promise<string[]> {
-    if (!(await this.authOk()) || !(await this.metricsOnNow())) return []
+    if (!(await this.authOk()) || !(await this.metricsOnNow()) || !(await uploadAnswered(this.d.store))) return []
     const out: string[] = []
     if (num(await get(this.d.store, SAVINGS_NOTICE_KEY)) === null && (await put(this.d.store, SAVINGS_NOTICE_KEY, this.now()))) {
       out.push(DEFAULT_ON_NOTICE)
@@ -781,12 +782,17 @@ export class Wiring {
     const settings = await this.settings()
     if (settings.services.metrics !== true) return { sent: [], error: 'service_off' }
     if (settings.offline) return { sent: [], error: 'offline' }
+    if (!(await uploadAnswered(this.d.store))) return { sent: [], error: 'not_answered' } // consent first: no upload, no back-fill
     if (!(await this.lease())) return { skipped: 'busy' }
     try {
-      const st = await this.metricsState()
+      const saved = await this.metricsState()
       const today = this.today()
       const yesterday = plusDays(today, -1)
-      const first = st.last_uploaded_day ? plusDays(st.last_uploaded_day, 1) : plusDays(st.enabled_day || today, -30)
+      const start = saved.last_uploaded_day ? plusDays(saved.last_uploaded_day, 1) : plusDays(saved.enabled_day || today, -30)
+      // never further back than 30 days before the yes (a long gap, or an old enabled_day, would send more)
+      const floor = await uploadFloor(this.d.store, today)
+      const first = start < floor ? floor : start
+      const st = start < floor ? { ...saved, last_uploaded_day: plusDays(floor, -1) } : saved
       if (first > yesterday) return { sent: [], error: null }
       // only the transcripts changed since the first day to send began: the same figures, far less to parse
       const facts = await this.facts({ since: new Date(`${first}T00:00:00`).getTime() })

@@ -10,7 +10,7 @@
 //   facts        the saved figure (the 7-day one, else the total the status line shows), today's counts, the latest
 //   wait / off   signed in with no figure yet / the savings record turned off
 //   signed_out, locked, paused, offline, unreachable, upgrade: one BAND_TEXT line each
-//   starting     nothing written yet by this copy of the module (just loaded, or reloaded after a self-update)
+//   starting     nothing written yet by this copy of the module (just loaded, or reloaded after an update)
 // Only a survey holding the band passes the event on.
 //
 // Nothing here computes a figure of its own: wiring.ts bandFacts() builds board_facts.ts timelineOf and weeklyOf

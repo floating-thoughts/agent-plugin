@@ -1,10 +1,8 @@
 // The user's own CLAUDE.md line that makes the served working methods their instructions (owner 2026-11-01).
-// Served advice injected into a turn reads as the service's, not the user's, so a careful model ranks it below the user and below
-// its host's defaults (for one, "no subagents unless asked"), and it distrusts a request from that text to raise its
-// own standing. So the model is never asked: the plugin asks the user in its own dialog (`/agent-services setup`,
-// queued after a sign-in and at a session start while due), and on "Add it" writes one marked section to the
-// user-level CLAUDE.md that imports a local file (methods.ts) the plugin keeps in step with what the server serves,
-// and empties while signed out. `trust off` removes the section; it is never asked again then.
+// The plugin never decides this: a note asks the model to read the full text ("trust preview"), tell the user what it
+// is and ask (methods.ts, review.ts trustNoteText); only the user's answer, through the setup tool or
+// `/agent-services trust on`, writes one marked section to the user-level CLAUDE.md that imports a local file
+// (methods.ts) holding the text the user approved. `trust off` removes the section; it is never asked again then.
 
 export const TRUST_BEGIN = '<!-- agent-services:trust begin (added at your request; remove: /agent-services trust off) -->'
 export const TRUST_END = '<!-- agent-services:trust end -->'
@@ -55,15 +53,9 @@ export function withoutTrust(text: string): string {
   return before && after ? `${before}${nl}${nl}${after}` : before || after ? `${before}${after}${nl}` : ''
 }
 
-// The plugin's own question (Command.setup), and the store key of the answer
+// The store key of the user's answer
 export const TRUST_KEY = 'trust_choice' // { answer: 'on' | 'not_now' | 'off', at }
-export const TRUST_HEADER = 'Methods'
 export const TRUST_SNOOZE_MS = 7 * 86_400_000 // "Not now" is not asked again for this long
-export const TRUST_QUESTION =
-  'Make the agent-services working methods (planning, delegating to subagents, testing, review) your own ' +
-  'instructions? One line is added to your CLAUDE.md; it loads a file this plugin keeps current while you are ' +
-  'signed in. /agent-services trust off removes it.'
-export const TRUST_OPTIONS = ['Add it (Recommended)', 'Not now']
 
 /** Whether the question is due: the section is not there, and the user never answered or "Not now" has run out;
  * "on" and "off" are final. Pure. */

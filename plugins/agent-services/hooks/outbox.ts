@@ -16,6 +16,7 @@
 import { OUTBOX_KEEP_DAYS } from './contract'
 import { sha256Hex, utf8 } from './e2e'
 import { redact } from './redact'
+import { markRemoved, removedMarker } from './remove'
 
 export const FLUSH_EVERY_MS = 5000
 export const FILE_CAP_BYTES = 2 * 1048576
@@ -93,12 +94,17 @@ export class Outbox {
   private lastFlush = 0
   private chain: Promise<void> = Promise.resolve()
   private dirty = false
+  private stopped = false // /agent-services remove ran: nothing more is written
+  // /agent-services remove's marker file (another session may run it): <data dir>/REMOVED for <data dir>/services/outbox
+  private readonly marker: string | null
 
-  constructor(opts: { fs: OutboxFs; dir: string; session: string; now: () => number }) {
+  constructor(opts: { fs: OutboxFs; dir: string; session: string; now: () => number; marker?: string | null }) {
     this.fs = opts.fs
     this.dir = opts.dir.replace(/[\\/]+$/, '')
     this.session = session8(opts.session)
     this.now = opts.now
+    const data = this.dir.endsWith('/services/outbox') ? this.dir.slice(0, -'/services/outbox'.length) : null
+    this.marker = opts.marker !== undefined ? opts.marker : data === null ? null : removedMarker(data)
   }
 
   /** The file a line written now goes to. */
@@ -195,12 +201,26 @@ export class Outbox {
   }
 
   /** Rewrite every held file whole (serialized: one write at a time). */
+  /** Write nothing more and forget the lines held (/agent-services remove). */
+  stop(): void {
+    this.stopped = true
+    this.dirty = false
+    this.files.clear()
+  }
+
   flush(): Promise<void> {
     this.chain = this.chain.then(() => this.write()).catch(() => undefined)
     return this.chain
   }
 
   private async write(): Promise<void> {
+    if (this.stopped) return
+    if (this.marker && (await this.removedHere())) {
+      // another session ran /agent-services remove: write nothing more here, and the hooks stop too
+      markRemoved()
+      this.stop()
+      return
+    }
     if (!this.dirty) return
     this.dirty = false
     this.lastFlush = this.now()
@@ -238,6 +258,14 @@ export class Outbox {
     // files of earlier days are complete: drop them from memory once written
     const cur = this.path()
     for (const p of [...this.files.keys()]) if (p !== cur) this.files.delete(p)
+  }
+
+  private async removedHere(): Promise<boolean> {
+    try {
+      return String((await this.fs.read(this.marker!)) ?? '').trim() !== ''
+    } catch {
+      return false // not there
+    }
   }
 
   /** Clear the files older than OUTBOX_KEEP_DAYS (any session). Returns how many were cleared. */
