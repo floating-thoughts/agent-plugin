@@ -1,6 +1,6 @@
 // The usage panel: the same three columns the band, the status command and the board show.
 //
-//   Token (excl. cache reads)   This week / This month / All time: tokens and dollars at API prices, from this
+//   Token (incl. cache reads)   This week / This month / All time: tokens and dollars at API prices, from this
 //                               computer's transcripts (usageDaysOf over the scan, kept per day under USAGE_DAYS_KEY)
 //   Quota . context N% (Nk)     Week % and 5-hour % of the plan with the time to their reset, and the context, from
 //                               the engine's session usage (planOf); then "Saved $X", the service's savings figure
@@ -25,6 +25,7 @@ import { servedNumber, servedValue } from './rules'
 import { IDLE_GAP_MS, idleGapMs } from './transcripts'
 import type { Facts } from './transcripts'
 
+export const PANEL_EVERY_MS = 60_000 // the band and panel redraw (register.ts): reset countdowns move each minute
 export const USAGE_DAYS_KEY = 'usage_days' // { through, at, lock?, days: { day: UsageDay } }: this computer's figures
 export const TYPING_BYTES_PER_MINUTE = 200 // built-in; the served time model (timemodel.json) sets it
 export const METHOD_LINE = methodText(methodTemplate(), IDLE_GAP_MS / 60_000, TYPING_BYTES_PER_MINUTE)
@@ -186,6 +187,22 @@ export function notePlan(usage: unknown): void {
 
 export const heldPlan = (): Plan => plan
 
+/** True once a window's reset time has passed: its reading belongs to the window before and is not shown or used. */
+export function expired(l: Limit, nowMs: number): boolean {
+  const t = l.resets_at ? Date.parse(l.resets_at) : NaN
+  return Number.isFinite(t) && t <= nowMs
+}
+
+export type TimeFigures = { agent_seconds: number; typing_seconds: number; concurrent_seconds: number }
+
+/** The time figures over the stored days (USAGE_DAYS_KEY): the one computation the panel and the status command read. */
+export function timeOf(days: unknown): TimeFigures {
+  const all: Record<string, UsageDay> = isObj(days) ? (days as Record<string, UsageDay>) : {}
+  const sum = (k: keyof UsageDay) => Object.values(all).reduce((n, d) => n + (isObj(d) ? num(d[k]) ?? 0 : 0), 0)
+  const you = sum('agent_seconds')
+  return { agent_seconds: you, typing_seconds: (sum('typed_bytes') * 60) / typingBytesPerMinute(), concurrent_seconds: Math.max(0, sum('agent_sum_seconds') - you) }
+}
+
 /** At most three significant digits with a k, M or B suffix: 9.41k, 94.1k, 132M, 1.20B. Below 1000: whole numbers,
  *  or with `cents` two decimals below 10 and one below 100 (5.40, 40.7, 940). */
 export function compactText(n: number, cents = false): string {
@@ -256,7 +273,7 @@ export function panelOf(days: unknown, p: Plan | null, savings: unknown, today: 
   const pl = p ?? { week: null, five_hour: null, context: null }
   // [percent, "(time to reset)"]: two cells, so the band centres the percent and right-aligns the reset
   const limit = (l: Limit | null, withDays: boolean): string[] => {
-    if (!l) return ['--', '']
+    if (!l || expired(l, nowMs)) return ['--', '']
     const left = resetText(l.resets_at, nowMs, withDays)
     return [`${Math.round(l.pct)}%`, left ? `(${left})` : '']
   }
@@ -274,10 +291,7 @@ export function panelOf(days: unknown, p: Plan | null, savings: unknown, today: 
   }
   // the same stored days as the Token column (refreshed every 10 minutes), never the service's figures: those come
   // from the daily upload, so today never showed and the two columns disagreed (one source for every number)
-  const sum = (k: keyof UsageDay) => Object.values(all).reduce((n, d) => n + (num(d[k]) ?? 0), 0)
-  const you = sum('agent_seconds')
-  const typing = (sum('typed_bytes') * 60) / typingBytesPerMinute()
-  const concurrent = Math.max(0, sum('agent_sum_seconds') - you)
+  const { agent_seconds: you, typing_seconds: typing, concurrent_seconds: concurrent } = timeOf(all)
   const time: Column = {
     title: 'Time',
     rows: [

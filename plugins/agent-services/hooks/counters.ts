@@ -315,7 +315,13 @@ export async function readDay(store: KV, day: string): Promise<DayCounters> {
   const index = new Map<string, number>()
   const compact = new Map<string, CompactRow>()
   const trim = new Map<string, [number, number]>()
-  for (const key of await store.keys()) {
+  let keys: string[] = []
+  try {
+    keys = await store.keys()
+  } catch {
+    // an unreadable store reads as an empty day
+  }
+  for (const key of keys) {
     if (!key.startsWith(prefix)) continue
     let v: unknown
     try {

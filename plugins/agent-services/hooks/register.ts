@@ -21,7 +21,7 @@ import { publishBoards } from './boss' // the person's board, then the company a
 import { briefed, flowAfter, flowLock, flowPrompt, flowStart, flowTurnEnd, installFlow, withPending } from './flow' // checkpoint tool, test lock, brief, notes
 import { Guard } from './guard'
 import { migrate, OLD_SIGNIN_KEY, OLD_SIGNIN_LINE } from './migrate'
-import { FLUSH_EVERY_MS, Outbox } from './outbox'
+import { FLUSH_EVERY_MS, Outbox } from './outbox'; import { PANEL_EVERY_MS } from './panel'
 import { holdWrite, lessonHold, methodsStart, noteAutonomy, pushAgain, pushLessons, pushStart } from './phase'
 import { PRICES } from './prices'
 import { engineStore, safeDelete, safeGet, type KV } from './store'
@@ -190,9 +190,8 @@ async function build($: EngineInterface): Promise<Rt | null> {
       ...wiring.coreOptions(),
       status: { update: () => refreshStatus(setStatus, wiring, store) },
     })
-    try {
-      $.clock.every(FLUSH_EVERY_MS, () => void outbox.flush().catch(() => undefined))
-    } catch {}
+    // each timer on its own: the band and panel redraw (PANEL_EVERY_MS) moves during a long turn too
+    for (const [ms, run] of [[FLUSH_EVERY_MS, () => void outbox.flush().catch(() => undefined)], [PANEL_EVERY_MS, () => void wiring.tick()]] as const) try { $.clock.every(ms, run) } catch {}
     return { setStatus, session, svc, core, wiring, outbox, store, dir, sleep, readText }
   } catch {
     return null
@@ -283,8 +282,8 @@ export const register: Register = (on) => {
   }).catch(($, e, next) => next(e))
 
   on('agent.spawn', async ($, e: Ev, next) => {
-    if (await routingOff($)) return next(e); const agent = e.parentAgentId ?? null // routing off: nothing at all (command.ts)
-    const gate = await spawnGate($, e, ready($)); if (gate) return { deny: gate } // subagents.ts: steps gate, usage line
+    const off = await routingOff($); const gate = await spawnGate($, e, ready($), off); if (gate) return { deny: gate } // subagents.ts: usage line always, steps gate unless routing is off
+    if (off) return next(e); const agent = e.parentAgentId ?? null // routing off: nothing else (command.ts)
     const call = e.tool_use_id ?? null
     const a = await send($, 'dispatch', agent, {
       subagent_type: e.subagentType,
