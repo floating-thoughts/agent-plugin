@@ -1,7 +1,7 @@
-// The agent-services notes that ask the model to review something and ask the user: the setup questions (the savings
-// record and the methods level, command.ts promptNote), a newer plugin version (update.ts) and a change to the
-// approved methods (methods.ts). The model reads the text itself and the user decides; the plugin applies nothing
-// on its own. Every note opens with NOTE_LABEL, and the review notes with FRAMING: only facts the model can check,
+// The agent-services notes for the model: a newer plugin version (update.ts) and a change to the approved methods
+// (methods.ts). Since 0.6.1 no note asks setup questions: the band above the prompt says when setup choices are open
+// (band.ts) and /agent-services setup asks them in Claude Code's own dialog. The user decides; the plugin applies
+// nothing on its own. Every note opens with NOTE_LABEL, and the review notes with FRAMING: only facts the model can check,
 // labelled as an agent-services note, never as anyone's instruction. Pure: no engine calls here.
 
 export const NOTE_LABEL = '[agent-services plugin note, not written by the user]'
@@ -41,50 +41,13 @@ export function updateNoteText(installed: string, latest: string, facts: string)
     'it: this version is not mentioned again.'
 }
 
-/** The setup note: ask the open setup questions in one go with the question tool, then apply each answer with the
- * setup tool; "own instructions" only after the model read the methods and what the plugin does and told the user.
- * `questions` holds the open ones ('savings', 'page', 'methods'); `texts` the question texts. */
-export function setupNoteText(questions: readonly string[], facts: string,
-  texts: { savings: string; page: string; methods: string }): string {
-  const asks: string[] = []
-  if (questions.includes('savings')) {
-    asks.push(`header "Savings", the question "${texts.savings}", the options in this order "Turn on (Recommended)", ` +
-      '"Not now", "Never" and "Show me what is sent"; apply it with "sharing on", "sharing not_now" or "sharing off" ' +
-      '(for "Show me what is sent", call "sharing preview", show the user the text, and call "sharing on" only if the ' +
-      'user then says yes)')
-  }
-  if (questions.includes('page')) {
-    asks.push(`header "Savings", the question "${texts.page}", the options "Publish it", "Not now" and "Never"; apply ` +
-      '"Publish it" with "sharing on" and "Never" with "sharing off" (under a company choice these change only the ' +
-      'private page), and leave "Not now"')
-  }
-  if (questions.includes('methods')) {
-    asks.push(`header "Methods", the question "${texts.methods}", the options in this order "As suggestions ` +
-      '(Recommended)", "As my own instructions" and "Off"; apply it with "methods suggest" or "methods off". For "As my ' +
-      'own instructions": first call "info data", "info hooks" and "methods preview", read all three, and tell the user ' +
-      'in a few sentences what the plugin sends and what its service keeps, what a company admin sees if the account ' +
-      'belongs to a company, what the hooks do (at this level the planning gate holds larger file edits until ' +
-      'agent-state.md has a plan) and what the methods are, pointing out anything that looks wrong or outside working ' +
-      'methods; then call "methods on" only if the user confirms, else "methods suggest"')
-  }
-  const n = asks.length
-  return `${NOTE_LABEL} ${facts}
-
-The user has open agent-services setup question${n === 1 ? '' : 's'}. Before ` +
-    `working on the message, ask ${n === 1 ? 'it' : `these ${n} questions in one call`} with your question tool ` +
-    '(AskUserQuestion): ' + asks.map((a, i) => (n === 1 ? a : `${i + 1}. ${a}`)).join('; ') + `. Apply each answer with ` +
-    `${SETUP_TOOL}, only with the user's answer. If the user dismisses a question, leave it (it is asked again in 7 ` +
-    'days at the earliest). Then go on with the message.'
-}
-
 /** The note about served methods that differ from the ones the user approved. */
 export function pendingNoteText(facts: string): string {
   return `${NOTE_LABEL} ${facts}\n\nThe working methods the service serves now differ from the ones the user ` +
-    'approved for their CLAUDE.md. The approved text stays in use until the user decides. When it fits: call ' +
-    `${SETUP_TOOL} with command "methods diff" to get the differences, summarize them to the user in a few sentences, ` +
-    'point out anything that looks wrong or outside working methods, and ask whether to take the new text. Then call ' +
-    'the setup tool with "methods accept" (use the new text) or "methods keep" (keep the approved text; this change is ' +
-    'not asked about again), only with the user\'s answer.'
+    'approved for their CLAUDE.md; the approved text stays in use until the user decides. Do not interrupt the ' +
+    'user\'s work for this. Only if the user asks about agent-services, or at the end of a reply, mention in one ' +
+    'sentence that /agent-services methods diff shows the change (then methods accept takes it, methods keep keeps ' +
+    'the approved text).'
 }
 
 /** A readable line diff of `a` (old) and `b` (new): "- " removed, "+ " added, two lines of context, long unchanged

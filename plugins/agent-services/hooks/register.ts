@@ -14,7 +14,7 @@
 //   background; it never starts or kills a process.
 // - Nothing here writes the user's settings or permission rules ($.settings is read only).
 import type { EngineInterface, Register } from 'claude-code'
-import { dataDir, declareCommand, denyReason, engineClaudeHash, engineDirs, isRemoved, MARKETPLACE, onboardingNote, pastedCode, serveCommand, spawnLine } from './command'
+import { dataDir, declareCommand, denyReason, engineClaudeHash, engineDirs, isRemoved, MARKETPLACE, onboardingNote, pastedCode, routingOff, serveCommand, spawnLine } from './command'
 import { Core, type Answer } from './core'
 import { dashboardGrant, GRANT_REASON, PUBLISH_START_WAIT_MS } from './dashboard'
 import { publishBoards } from './boss' // the person's board, then the company admin's
@@ -288,7 +288,7 @@ export const register: Register = (on) => {
   }).catch(($, e, next) => next(e))
 
   on('agent.spawn', async ($, e: Ev, next) => {
-    const agent = e.parentAgentId ?? null
+    if (await routingOff($)) return next(e); const agent = e.parentAgentId ?? null // routing off: nothing at all (command.ts)
     const call = e.tool_use_id ?? null
     const a = await send($, 'dispatch', agent, {
       subagent_type: e.subagentType,

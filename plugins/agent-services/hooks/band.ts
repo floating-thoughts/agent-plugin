@@ -11,6 +11,9 @@
 //   wait / off   signed in with no figure yet / the savings record turned off
 //   signed_out, locked, paused, offline, unreachable, upgrade: one BAND_TEXT line each
 //   starting     nothing written yet by this copy of the module (just loaded, or reloaded after an update)
+//   setup        while signed in with setup questions open (command.ts setupDue: at most once per 7 days), one line
+//                naming /agent-services setup takes the place of facts / wait / off (setupLine); the questions are
+//                asked only when the user runs that command, never by the model
 // Only a survey holding the band passes the event on.
 //
 // Nothing here computes a figure of its own: wiring.ts bandFacts() builds board_facts.ts timelineOf and weeklyOf
@@ -25,6 +28,8 @@
 //   bandFacts(timeline, weekly)   -> BandFacts | null   (the parts the line uses; null: nothing to show)
 //   bandLine(facts, columns, tz?) -> string | null      (the longest form that fits the band's width)
 //   bandText(state, columns, tz?) -> string             (the line for any state: never null)
+//   setupLine(n)                  -> string             (the line while n setup choices are open)
+//   bandSetup(n)                  -> void               (command.ts: how many are open now; redraws when changed)
 //   paused(gate)                  -> boolean            (a closed gate with a known reason)
 //   bandSetter($)                 -> (state) => void    (wiring.ts setBand: keeps it, redraws when changed)
 //   installBand(on)               -> the ui.render hook on { component: 'AbovePrompt' }
@@ -42,7 +47,7 @@ export type BandFacts = {
   total?: { usd: number; since: string | null } | null // the status line's figure, used when there is no 7-day one
 }
 export type BandKind = 'facts' | 'wait' | 'off' | 'signed_out' | 'locked' | 'paused' | 'offline' | 'unreachable' | 'upgrade' | 'starting'
-export type BandState = { state: BandKind; facts?: BandFacts | null }
+export type BandState = { state: BandKind; facts?: BandFacts | null; setup?: number }
 
 // The band's line for every state but 'facts'. The status line says the same in short (status.ts SIGN_IN_LINE,
 // LOCKED_LINE, ORG_PAUSED_STATUS, GATE_STATUS, HINT_WAIT, HINT_OFF).
@@ -61,6 +66,8 @@ export const BAND_TEXT: Readonly<Record<string, string>> = {
 // The state the band draws, as bandSetter last wrote it (null: nothing written yet, the 'starting' line). Not $.state: a value there must be declared in a types
 // contract named by plugin.json; a hot reload empties this, and the next status-line refresh writes it again.
 let shown: BandState | null = null
+let setupOpen = 0 // the open setup choices command.ts last counted (bandSetup)
+let redraw: (() => void) | null = null // the redraw of the latest bandSetter
 
 const isObj = (v: unknown): v is Obj => typeof v === 'object' && v !== null && !Array.isArray(v)
 const num = (v: unknown): number | null => (typeof v === 'number' && Number.isFinite(v) ? v : null)
@@ -134,10 +141,17 @@ export function paused(gate: unknown): boolean {
   return typeof gate.reason === 'string' && gate.reason !== '' && gate.reason !== 'unknown'
 }
 
+/** The band's line while `n` setup choices are open, e.g. "agent-services: 2 setup choices open - /agent-services setup". */
+export function setupLine(n: number): string {
+  return `${NAME}: ${n} setup choice${n === 1 ? '' : 's'} open - ${COMMAND} setup`
+}
+
 /** The band's line for a state (a BandState, or bare BandFacts as before); never null: the band always shows. */
 export function bandText(state: unknown, columns?: unknown, timeZone?: string): string {
   const st: Obj | null = isObj(state) ? (typeof state.state === 'string' ? state : { state: 'facts', facts: state }) : null
   if (st === null) return BAND_TEXT.starting
+  const n = num(st.setup)
+  if (n !== null && n >= 1 && ['facts', 'wait', 'off'].includes(st.state)) return setupLine(Math.floor(n))
   if (st.state === 'facts') return bandLine(st.facts, columns, timeZone) ?? BAND_TEXT.wait
   return BAND_TEXT[st.state] ?? BAND_TEXT.starting
 }
@@ -145,6 +159,7 @@ export function bandText(state: unknown, columns?: unknown, timeZone?: string): 
 
 /** wiring.ts setBand: the band's state (bare facts are the 'facts' state), and a redraw when it changed. Never throws. */
 export function bandSetter($: EngineInterface): (state: BandState | BandFacts | null) => void {
+  redraw = () => $.ui.invalidate('ui.render') // bandSetup redraws through the latest setter
   return (state) => {
     const next: BandState | null = isObj(state)
       ? typeof state.state === 'string'
@@ -161,12 +176,24 @@ export function bandSetter($: EngineInterface): (state: BandState | BandFacts | 
   }
 }
 
+/** command.ts: how many setup choices the band names now (0: none); a redraw when it changed. Never throws. */
+export function bandSetup(n: unknown): void {
+  const v = typeof n === 'number' && Number.isFinite(n) && n >= 1 ? Math.floor(n) : 0
+  if (v === setupOpen) return
+  setupOpen = v
+  try {
+    redraw?.()
+  } catch {
+    // no redraw: the band shows the line at its next draw
+  }
+}
+
 /** The band: one dim line above the prompt from the state bandSetter wrote, on the terminal and the desktop app alike;
  *  the event goes on only while a survey holds the band. */
 export function installBand(on: any): void {
   on('ui.render', { component: 'AbovePrompt' }, async ($: EngineInterface, e: Obj, next: (e: Obj) => unknown) => {
     if (e.props?.hasSurvey === true) return next(e)
-    const line = bandText(shown, e.props?.bodyColumns)
+    const line = bandText(shown && setupOpen ? { ...shown, setup: setupOpen } : shown, e.props?.bodyColumns)
     const { Text } = $.ui.resolve(e as any) as any
     return Text({ dimColor: true, children: line })
   }).catch(($: EngineInterface, e: Obj, next: (e: Obj) => unknown) => next(e))

@@ -41,7 +41,7 @@ the device's public key, the device id, the Claude account hash, and the harness
 |---|---|
 | Each session start, and when the sign-in check is due | the plugin version and the contract version |
 | 7 days before the sign-in expires | a hash of the next token |
-| Every subagent start (forks and teammates are skipped) | the first word of the task description (whitespace-separated, at most 32 characters; the rest of the description is never sent), its length in characters, the subagent type (at most 64 characters), the requested model and effort, the harness, the dispatch number in this session, a hashed project id (an HMAC of the project folder with a key kept only on this computer, 16 hex digits), a random per-session id, the main session's model id (so the subagent never runs on a larger model), and yes or no for whether your latest message asked for a review (decided on this computer; your message is never sent) |
+| Every subagent start (forks and teammates are skipped; nothing while `routing off`) | the first word of the task description (whitespace-separated, at most 32 characters; the rest of the description is never sent), its length in characters, the subagent type (at most 64 characters), the requested model and effort, the harness, the dispatch number in this session, a hashed project id (an HMAC of the project folder with a key kept only on this computer, 16 hex digits), a random per-session id, the main session's model id (so the subagent never runs on a larger model), and yes or no for whether your latest message asked for a review (decided on this computer; your message is never sent) |
 | After every turn of the main agent | counters only: context use in percent, turns, tool calls, finished todos, commits, minutes, and the per-session id |
 | Session start, the first prompt after a project's `agent-state.md` says `phase: running`, and after `/clear` or a compaction, only at methods level `suggest` (the default) | the per-session id, the role `auto`, the work phase, the version pinned, the channel (to fetch the working methods) |
 | Session start, only at methods level `on` (your CLAUDE.md has the agent-services section) | the same, once for each of the six phases |
@@ -82,7 +82,7 @@ emails and savings) goes to the admin's own claude.ai account the same way.
 | Anti-abuse records: failed signed requests and lockouts, per IP address (not hashed) and per account | yes | about 10 to 15 minutes, deleted at the next failed request after that |
 | Daily usage summaries | the whole summary as sent | 395 days; all of an account's days are dropped once it uploads nothing for 30 days |
 | Subagent and checkpoint requests | the request is not kept; one count per day, account, route and outcome | while the account exists |
-| Working-methods sessions | per-session id, role, device id, phase, the item versions delivered and when, and the marks the service puts into the served text for that session (a marker of your account and session hidden in the text, a watermark and canary strings), so that a copy found elsewhere can be traced to it; no text from you | 395 days |
+| Working-methods sessions | per-session id, role, device id, phase, the item versions delivered and when; no text from you | 395 days |
 | The working-methods channel you fetch (stable or beta) | one row per account | while the account exists |
 | The one-time estimate | not kept; one count per account per day | 30 days |
 | Weekly-email setting and sends | yes | while the account exists |
@@ -140,7 +140,8 @@ text of your messages (only to see whether one asks for a review), and the marke
   subagent call of the main conversation ran longer than 60 seconds (at most 3 per session), and when
   `.agent/steps.json` lists more steps ready to start than the last turn dispatched subagents.
 - The speed-up suggestion the routing service sends is added once to the end of each routed subagent's prompt.
-- The suggestion and the notes stop while the working methods are switched off.
+- The suggestion and the notes stop while the working methods are switched off; the suggestion also stops while
+  subagent routing is off (`/agent-services routing off`).
 
 ## 5. What comes back
 
@@ -156,10 +157,10 @@ Every answer has a fixed shape:
 - Checkpoint timing: now or not, and short lines to keep in a summary (at most 300 characters each), given to the
   model at the next prompt.
 - Working methods: a version and items of text (at most 20,000 characters each, each checked against its SHA-256),
-  given to the model with a prompt (level `suggest`) or written to `methods.md` (level `on`). Each served text
-  carries the service's hidden marker of your account and session. The plugin takes that marker out of the text
-  before the model sees it or `methods.md` holds it, keeps the session's watermark and canary strings in memory only (the fingerprint key it is sent is not kept),
-  for that session, and blanks them in the request log, which keeps each item's id and SHA-256 but not its text.
+  given to the model with a prompt (level `suggest`) or written to `methods.md` (level `on`). Served methods are
+  plain text you can read and quote. As a safeguard the plugin also strips any invisible characters (zero-width,
+  direction-control, variation-selector and tag characters) from served text before the model sees it or
+  `methods.md` holds it. The request log keeps each item's id and SHA-256 but not its text.
   When the model calls the `lesson_lookup` tool, at level `suggest` it gets the text served now; at `on` it is
   pointed to the approved text your CLAUDE.md loads; at `off` it gets no items.
 - Savings and report: dollar and token figures by day, and short report lines (at most 300 characters each) for the
@@ -175,19 +176,22 @@ Every answer has a fixed shape:
 | everything sent to the service | `/agent-services offline on` (back: `offline off`), or `/agent-services logout` |
 | the daily upload, the weekly email and the savings page | `/agent-services sharing off` (never asked again; `sharing not_now` asks again in 7 days; each part alone: `sharing page off`, `sharing mail off`) |
 | the working methods and the planning gate | `/agent-services methods off` (works signed out too; `methods suggest` keeps them as suggestions without the CLAUDE.md line) |
+| subagent routing (the routing request, its deny or model change, and the suggestion added to subagent prompts) | `/agent-services routing off` (back: `routing on`; works signed out too) |
 | everything on this computer | `/agent-services remove`, then `claude plugin uninstall agent-services@agent-plugin` |
 
-Subagent routing and checkpoint timing have no switch of their own: they stop when you sign out or uninstall, and
-offline mode stops them. The planning gate follows the methods level: only at `methods on` does it hold file edits
+Checkpoint timing has no switch of its own: it stops when you sign out or uninstall, and offline mode stops it;
+those stop subagent routing too. The planning gate follows the methods level: only at `methods on` does it hold file edits
 (Edit, Write, MultiEdit, NotebookEdit) until a project's `agent-state.md` has a plan, and an Edit of at most 10
 changed lines passes (so do writes to `agent-state.md` and to files under `.agent/`); at `suggest` it holds nothing and adds one reminder to the next prompt; at `off`, in a session
 nobody can be asked in (such as `claude -p`) and for subagents it does nothing. It does not cover Bash: a file
 written through a Bash command is never held. Where your company set the daily upload for everyone, only its admin
 can change it.
 
-The plugin asks its setup questions (the savings record and the methods level) together, in the dialog of
-`/agent-services setup` or through the model, never in a session nobody can be asked in, and an unanswered question
-at most once every 7 days across all sessions. `/agent-services status` only says how many wait.
+The plugin asks its setup questions (the savings record and the methods level) together, only in the dialog of
+`/agent-services setup` (or right after a sign-in through that dialog); the model is never told to ask them. While
+one is open, the line above the prompt says how many and names `/agent-services setup`; after the command ran,
+answered or not, that line comes back at most once every 7 days across all sessions. `/agent-services status` only
+says how many wait.
 
 `/agent-services remove` signs out (the service ends the sign-in), takes the agent-services section out of your
 CLAUDE.md (with the same checks as `methods off`), deletes every value in the plugin store (the sign-in credential

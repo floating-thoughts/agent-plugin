@@ -2,8 +2,8 @@
 //
 // - $.command.register declares the command; a command.run hook answers it with { text } only: no model, no Bash,
 //   no Python and no `context` field, so neither the sign-in code nor an answer enters the model's context.
-// - Thirteen words: status, login, logout, setup, sharing, savings, methods, update, offline, estimate, info, remove,
-//   company (USAGE). `code` stays as a hidden sign-in fallback and `served` as a hidden owner tool. The 0.5.0
+// - Fourteen words: status, login, logout, setup, sharing, savings, methods, routing, update, offline, estimate, info,
+//   remove, company (USAGE). `code` stays as a hidden sign-in fallback and `served` as a hidden owner tool. The 0.5.0
 //   spellings (data, hooks, outbox, trust, savings <part>, dashboard) still work for one version: they answer as the
 //   new word does, plus one line that names it (renameOf).
 // - The sign-in code is never taken from the command line: typed command arguments are written to prompt history.
@@ -21,10 +21,13 @@
 // - status is read only: it never asks; it says how many setup questions wait. It also shows the auto-update setup
 //   state (the plugin never writes the user's settings) and the terminal update line where the engine has no
 //   $.process.
-// - The setup questions (the savings record, choice.ts; the methods level, methods.ts) are asked together: by
-//   `setup` in the engine's dialog (also right after a sign-in through the dialog), or by the model at a prompt
-//   (promptNote) where someone can answer (choice.ts canAsk). An unanswered question is asked at most once per 7 days
-//   across all sessions (the shared "last asked" time); `sharing off` is never asked again.
+// - The setup questions (the savings record, choice.ts; the methods level, methods.ts) are asked together, only by
+//   `setup` in the engine's dialog (also right after a sign-in through the dialog). The model is never told to ask
+//   them: while any is open, the band above the prompt shows one line naming /agent-services setup (band.ts
+//   bandSetup, from setupDue). An unanswered question is shown or asked at most once per 7 days across all sessions
+//   (the shared "last asked" time); `sharing off` is never asked again.
+// - `routing off` (ROUTING_KEY, default on) makes the agent.spawn hook do nothing at all (routingOff): no request, no
+//   deny, no model change, nothing added to the subagent's prompt.
 //
 // The Command class is harness-neutral (its deps are injected); the functions at the end are the Claude Code
 // adapter over `$`.
@@ -49,7 +52,8 @@ import { companyCommand } from './boss'
 import { hasTrust, type TrustFile, unbalancedTrust, withoutTrust, withTrust } from './trust'
 import { approveMethods, importLine, LEVEL_KEY, type Level, levelOf, methodsDiff, methodsNoted, methodsNotes,
   previewMethods, readLevel, settlePending, syncMethodsNow } from './methods'
-import { framing, lineDiff, NOTE_LABEL, pendingNoteText, setupNoteText, updateNoteText } from './review'
+import { framing, lineDiff, NOTE_LABEL, pendingNoteText, updateNoteText } from './review'
+import { bandSetup } from './band'
 import { ORG_PAUSED_LINE, ORG_SAVINGS_TEXT, ORG_SET_TEXT, orgChoice, orgNotice, sharingQuestion } from './org'
 import { hooksText } from './hooks_list'
 import { removeAll, removedMarker, resetRemoved, type RemoveDeps } from './remove'
@@ -68,13 +72,13 @@ export const COMMAND_SPEC = {
   description: 'Sign in to agent-services, show its status, or sign out',
   argumentHint:
     '[status | login [<email>] | logout | setup | sharing [on | off | not_now | preview | page on|off | mail on|off] | ' +
-    'savings | methods [off | suggest | on | preview | diff | accept | keep] | update | offline on|off | ' +
-    'estimate [preview | send] | info [data | hooks | log [<day>]] | remove | company [mail on|off]]',
+    'savings | methods [off | suggest | on | preview | diff | accept | keep] | routing [on | off] | update | ' +
+    'offline on|off | estimate [preview | send] | info [data | hooks | log [<day>]] | remove | company [mail on|off]]',
 } as const
 
-// Every word the command answers: the thirteen of USAGE, then the hidden `code` (sign-in fallback) and `served`.
-export const KNOWN_COMMANDS = ['status', 'login', 'logout', 'setup', 'sharing', 'savings', 'methods', 'update', 'offline',
-  'estimate', 'info', 'remove', 'company', 'code', 'served']
+// Every word the command answers: the fourteen of USAGE, then the hidden `code` (sign-in fallback) and `served`.
+export const KNOWN_COMMANDS = ['status', 'login', 'logout', 'setup', 'sharing', 'savings', 'methods', 'routing', 'update',
+  'offline', 'estimate', 'info', 'remove', 'company', 'code', 'served']
 /** The subcommands that work while signed out (`methods` alone and `methods off` too, see dispatch). */
 export const AUTH_FAIL_COMMANDS = ['status', 'login', 'code', 'logout', 'update', 'info', 'remove']
 export const ASK_HEADER = 'Sign-in'
@@ -86,6 +90,7 @@ export const STATUS_HELLO_MS = 4000 // status waits this long at most for a hell
 export const OUTBOX_SHOW = 10 // outbox lines shown
 export const OUTBOX_LINE_CHARS = 300
 export const ESTIMATE_KEY = 'estimate_answer' // { made_at, estimate }: the last estimate answer (wiring.ts reads it)
+export const ROUTING_KEY = 'routing' // { on: boolean, at }: the subagent routing switch; missing means on
 
 // The one savings record: the private page, the weekly email and the daily numbers-only upload together (choice.ts).
 // One answer sets all three; the page and the email keep their own subcommands (sharing page|mail on|off).
@@ -119,8 +124,8 @@ export const METHODS_LINE: Readonly<Record<string, string>> = {
   off: `Working methods: off. Nothing of them reaches Claude and the planning gate does nothing. ${COMMAND} methods ` +
     'suggest turns them back on.',
 }
-// The tool the model calls with the user's answers to the setup questions (promptNote); it runs the same subcommands
-// as the slash command, limited to these. The 0.5.0 setup words still work for one version (SETUP_ALIASES).
+// The tool the model calls with the user's answers (the user asked it to change a choice); it runs the same
+// subcommands as the slash command, limited to these. The 0.5.0 setup words still work for one version (SETUP_ALIASES).
 export const SETUP_COMMANDS = [
   'sharing on',
   'sharing not_now',
@@ -133,6 +138,8 @@ export const SETUP_COMMANDS = [
   'methods diff',
   'methods accept',
   'methods keep',
+  'routing on',
+  'routing off',
   'update',
   'info data',
   'info hooks',
@@ -152,7 +159,9 @@ export const SETUP_SPEC = {
     'suggestions; "methods on" makes them the user\'s own instructions through one marked section in the user\'s ' +
     'CLAUDE.md and lets the planning gate hold larger file edits until there is a plan (read "methods preview" with ' +
     'the user first); "methods off" turns them off. "methods diff" shows how changed methods differ from the approved ' +
-    'ones; "methods accept" takes the new text, "methods keep" keeps the approved one. "update" updates the plugin to ' +
+    'ones; "methods accept" takes the new text, "methods keep" keeps the approved one. "routing off" stops the ' +
+    'subagent routing advice (no request, no deny, no model change, nothing added to subagent prompts) and "routing ' +
+    'on" turns it back on. "update" updates the plugin to ' +
     'the newest listed version. "info data" returns the plugin\'s data note (every request it sends and when, what ' +
     'the service keeps and for how long, what a company admin sees, the local files, and what can be turned off); ' +
     '"info hooks" lists every hook the plugin registers and what it does. Only call it with an answer the user gave, ' +
@@ -229,8 +238,8 @@ export const ERROR_TEXT: Record<string, string> = {
 
 export const USAGE =
   `Usage: ${COMMAND} [status | login [<email>] | logout | setup | sharing [on | off | not_now | preview | page on|off | ` +
-  'mail on|off] | savings | methods [off | suggest | on | preview | diff | accept | keep] | update | offline on|off | ' +
-  'estimate [preview | send] | info [data | hooks | log [<day>]] | remove | company [mail on|off]]'
+  'mail on|off] | savings | methods [off | suggest | on | preview | diff | accept | keep] | routing [on | off] | ' +
+  'update | offline on|off | estimate [preview | send] | info [data | hooks | log [<day>]] | remove | company [mail on|off]]'
 
 // The 0.5.0 spellings, kept for one version: [old words, new words] (a trailing '*' passes the rest on).
 export const RENAMED: readonly (readonly [string, string])[] = [
@@ -580,7 +589,7 @@ export class Command {
     const rest = words.slice(1)
     const svc = this.d.svc
     if (!KNOWN_COMMANDS.includes(sub)) return `Unknown subcommand "${sub.slice(0, 40)}". ${USAGE}`
-    const signedOutOk = AUTH_FAIL_COMMANDS.includes(sub) || (sub === 'methods' && (rest.length === 0 || (rest.length === 1 && rest[0]!.toLowerCase() === 'off')))
+    const signedOutOk = AUTH_FAIL_COMMANDS.includes(sub) || sub === 'routing' || (sub === 'methods' && (rest.length === 0 || (rest.length === 1 && rest[0]!.toLowerCase() === 'off')))
     if (!signedOutOk) {
       const st = await svc.authState(true)
       // nothing else works while signed out, and nothing is sent
@@ -603,6 +612,8 @@ export class Command {
         return rest.length ? USAGE : this.savings()
       case 'methods':
         return this.methods(rest)
+      case 'routing':
+        return this.routing(rest)
       case 'update':
         return rest.length ? USAGE : this.update()
       case 'offline':
@@ -669,7 +680,7 @@ export class Command {
     const ul = updatesLine()
     if (ul) lines.push(ul)
     if (auth === 'ok') {
-      lines.push(await this.recordLine(), await this.methodsLine())
+      lines.push(await this.recordLine(), await this.methodsLine(), await this.routingLine())
       const n = (await this.safe(() => this.openQuestions(), [] as Question[])).length
       if (n) lines.push(`${n} question${n === 1 ? '' : 's'} waiting: run ${COMMAND} setup.`)
     }
@@ -722,6 +733,18 @@ export class Command {
     if (!(this.d.canAsk ? this.d.canAsk() : false)) return []
     if (!askDue(await this.askedAt(), this.d.now())) return []
     return this.safe(() => this.openQuestions(), [])
+  }
+
+  /** How many setup questions the band names now (band.ts bandSetup): signed in, open, and none shown or asked in the
+   * last 7 days; 0 on any error. */
+  async setupDue(): Promise<number> {
+    try {
+      if (!(await this.signedIn())) return 0
+      if (!askDue(await this.askedAt(), this.d.now())) return 0
+      return (await this.openQuestions()).length
+    } catch {
+      return 0
+    }
   }
 
   /** /agent-services setup: every open question in the dialog, one after the other; nothing else. */
@@ -784,11 +807,11 @@ export class Command {
       `Then run ${COMMAND} methods on.`
   }
 
-  /** The note the model gets with a prompt (one at a time): the company's choice once; the open setup questions at
-   * most once per 7 days and only where someone can answer; from the second prompt of a session on, a newer plugin
-   * version or a changed methods text. null: nothing to say. */
+  /** The note the model gets with a prompt (one at a time): the company's choice once; from the second prompt of a
+   * session on, a newer plugin version or a changed methods text. Never the setup questions: the band names them.
+   * null: nothing to say. */
   async promptNote(first: boolean, update: () => Promise<{ installed: string; latest: string } | null>,
-    pending: () => Promise<boolean>): Promise<{ text: string; which: 'org' | 'setup' | 'update' | 'pending' } | null> {
+    pending: () => Promise<boolean>): Promise<{ text: string; which: 'org' | 'update' | 'pending' } | null> {
     if (!(await this.signedIn())) return null
     const told = await orgNotice(this.d.store)
     if (told) {
@@ -801,12 +824,6 @@ export class Command {
     const facts = async () => {
       const st = await this.safe(() => this.d.svc.status(), {} as any)
       return framing(st?.account_id, st?.plan)
-    }
-    const due = await this.questionsDue()
-    if (due.length) {
-      await this.stampAsked()
-      const q = due.includes('savings') || due.includes('page') ? await sharingQuestion(this.d.store, SHARING_QUESTION) : ''
-      return { text: setupNoteText(due, await facts(), { savings: q, page: PAGE_QUESTION, methods: METHODS_QUESTION }), which: 'setup' }
     }
     if (first) return null // the update notice waits until after the first turn of work
     const u = (await this.autoUpdateOn()) ? null : await this.safe(update, null)
@@ -1303,6 +1320,27 @@ export class Command {
     return `Served items: channel ${s.channel}; ${pins.length ? 'pinned: ' + pins.join(', ') : 'no pins'}.`
   }
 
+  /** The subagent routing switch, in one line. */
+  private async routingLine(): Promise<string> {
+    const v = await this.safe(() => this.d.store.get(ROUTING_KEY), null)
+    return v && typeof v === 'object' && (v as { on?: unknown }).on === false
+      ? `Subagent routing: off. Subagents start as dispatched and nothing is asked of the service; ${COMMAND} routing on turns it back on.`
+      : `Subagent routing: on. Each subagent dispatch asks the service for advice on its model and effort; ${COMMAND} routing off turns it off.`
+  }
+
+  /** routing [on | off]: the switch of the agent.spawn hook (routingOff). Works signed out: nothing is sent. */
+  private async routing(rest: string[]): Promise<string> {
+    const w = (rest[0] ?? '').toLowerCase()
+    if (rest.length === 0) return this.routingLine()
+    if (rest.length !== 1 || !['on', 'off'].includes(w)) return USAGE
+    if (!(await safeSet(this.d.store, ROUTING_KEY, { on: w === 'on', at: this.d.now() }))) return errorText('store_unavailable')
+    return w === 'off'
+      ? 'Subagent routing is off: agent-services sends no routing request, denies no subagent, changes no model and ' +
+        `adds nothing to subagent prompts. ${COMMAND} routing on turns it back on.`
+      : `Subagent routing is on: each subagent dispatch asks the service for advice on its model and effort. ${COMMAND} ` +
+        'routing off turns it off.'
+  }
+
   private async offline(rest: string[]): Promise<string> {
     const w = (rest[0] ?? '').toLowerCase()
     if (rest.length !== 1 || !['on', 'off'].includes(w)) return USAGE
@@ -1555,7 +1593,9 @@ export function serveCommand(
   }))
   on('command.run', { command: COMMAND_NAME }, async ($: EngineInterface, e: { args?: string }) => {
     const args = String(e?.args ?? '')
-    const text = await (await servedCommand($)).run(args)
+    const cmd = await servedCommand($)
+    const text = await cmd.run(args)
+    void cmd.setupDue().then(bandSetup, () => undefined) // band.ts: the setup line follows the answers
     try {
       void Promise.resolve(after?.(args.trim().split(/\s+/)[0]?.toLowerCase() || 'status')).catch(() => undefined)
     } catch {
@@ -1579,6 +1619,17 @@ async function servedCommand($: EngineInterface): Promise<Command> {
   if (!servedOptions) throw new Error('the command is not served')
   if (!servedCmd) servedCmd = new Command(engineDeps($, await servedOptions()))
   return servedCmd
+}
+
+/** register.ts agent.spawn: true when the user turned subagent routing off (`routing off`); then the hook does
+ * nothing at all. Reads $.store only; false on any error (the default is on). */
+export async function routingOff($: EngineInterface): Promise<boolean> {
+  try {
+    const v = await $.store.get(ROUTING_KEY)
+    return !!v && typeof v === 'object' && (v as { on?: unknown }).on === false
+  } catch {
+    return false
+  }
 }
 
 /** The toast that says a pasted code was taken (best effort; the drop reason says it too). */
@@ -1605,7 +1656,7 @@ export async function pastedCode(
     if (answer === null) return null // no sign-in waits: an ordinary message
     if (answer.startsWith('Signed in')) {
       void Promise.resolve(servedAfter?.('login')).catch(() => undefined)
-      void syncMethodsNow() // the setup questions come with a later prompt (promptNote)
+      void syncMethodsNow() // the band names the open setup questions from the next prompt on (setupDue)
     }
     tookCode($)
     return `${PASTED_TAKEN}
@@ -1617,8 +1668,8 @@ ${PASTED_FAILED}` // a code-shaped message is never forwarded once the sign-in p
   }
 }
 
-/** The note for this prompt (Command.promptNote): the company's choice once, the setup questions, and from the
- * session's second prompt on a newer version or changed methods; null when there is none. */
+/** The note for this prompt (Command.promptNote): the company's choice once, and from the session's second prompt
+ * on a newer version or changed methods; null when there is none. It also sets the band's setup line. */
 export async function onboardingNote($: EngineInterface): Promise<string | null> {
   try {
     if (!servedOptions) return null
@@ -1626,6 +1677,7 @@ export async function onboardingNote($: EngineInterface): Promise<string | null>
     const session = String(await $.session.id())
     const first = prompted !== session
     prompted = session
+    bandSetup(await cmd.setupDue()) // band.ts: the open setup choices are named above the prompt, never asked here
     const note = await cmd.promptNote(first, () => takeUpdateNote($), async () => (await methodsNotes($)).pending)
     if (note?.which === 'pending') methodsNoted()
     return note?.text ?? null

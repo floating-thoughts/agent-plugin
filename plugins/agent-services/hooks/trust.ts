@@ -1,6 +1,6 @@
 // The user's own CLAUDE.md line that makes the served working methods their instructions (methods level "on").
 // The plugin never decides this: the setup question asks, and before "on" the model reads the full text ("methods
-// preview") and tells the user what it is (review.ts setupNoteText); only the user's answer, through the setup tool
+// preview") and tells the user what it is (command.ts askOne); only the user's answer, through the setup tool
 // or `/agent-services methods on`, writes one marked section to the user-level CLAUDE.md that imports a local file
 // (methods.ts) holding the text the user approved. `methods suggest` and `methods off` remove the section.
 

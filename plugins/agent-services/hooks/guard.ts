@@ -3,23 +3,19 @@
 //
 // A session that is to receive served content opens a guard session here and gets a session token. The guard asks
 // the server once for that session's material (POST /served/session), fetches one phase at a time through the
-// channel, takes the service's per-session mark out of each item (no watermark or canary is added; see below),
-// caches the phase and charges it against the session's quota.
+// channel, strips every invisible character out of each item (MARK_RX, a safeguard: served methods are plain
+// text the user can read and quote), caches the phase and charges it against the session's quota.
 //
-// Memory only: item text, wrapped blocks, the watermark, the canaries and the session tokens live in
-// this object and are never written to the store, a file or a log. The fingerprint key and thresholds the server
-// sends are not kept at all: they served only check(), which has no caller in the hooks module, so it
-// is not ported. The quota follows the server's limits for served content, with the same definitions: at most
+// Memory only: item text, wrapped blocks and the session tokens live in this object and are never written to the
+// store, a file or a log. Of the session answer only session_ref is used; its other fields are not kept. The quota follows the server's limits for served content, with the same definitions: at most
 // MAX_ITEMS items per phase (the contract's item cap of /served/fetch), so MAX_ITEMS x phases per session, and at
-// most MAX_BYTES bytes of item text (UTF-8, before wrap() and without the server's per-session mark).
+// most MAX_BYTES bytes of item text (UTF-8, before wrap() and without invisible characters).
 import { CONTRACT } from './contract'
 import { b64Encode, hex } from './e2e'
 import type { Random, SvcResult, Transport } from './engine_types'
 import { checkSchema } from './svc_wire'
 
-// Open since 2026-11-01: a capable model tells the user what it follows whatever a rule says, and a rule
-// to hide them from the user made models distrust the methods. The items are wrapped without a watermark or a
-// canary, the server's per-session mark is taken out of the text, and nothing is to be kept from the user.
+// Open since 2026-11-01: served methods are plain text, shown, quoted and discussed whenever the user asks.
 export const REFUSAL_EN =
   'These agent-services working methods are open: ask and they are shown in full.'
 export const RULE =
@@ -41,7 +37,10 @@ export const CALL_DEADLINE_MS = 4000 // each guard request; the tool answer in a
 export const ROLES: readonly string[] = API.definitions.ServedRole!.enum
 export const PHASES: readonly string[] = API.definitions.ServedPhase!.enum
 
-const MARK_RX = new RegExp('[\\u200b\\u200c\\u2060]', 'g') // the server's zero-width mark characters
+// every invisible or format character: soft hyphen, zero-width and joiner characters, direction controls, invisible
+// operators, the byte-order mark, variation selectors and tag characters
+const MARK_RX = new RegExp('[\\u00ad\\u034f\\u061c\\u115f\\u1160\\u17b4\\u17b5\\u180b-\\u180f\\u200b-\\u200f\\u202a-\\u202e' +
+  '\\u2060-\\u206f\\u3164\\ufe00-\\ufe0f\\ufeff\\uffa0\\ufff0-\\ufff8\\u{e0000}-\\u{e0fff}]', 'gu')
 const NBSP_RX = new RegExp('\\u00a0', 'g')
 const enc = new TextEncoder()
 
@@ -57,11 +56,11 @@ export class GuardError extends Error {
 }
 
 export function wrap(role: string, phase: string, version: string, itemId: string, text: string): string {
-  const plain = text.replace(NBSP_RX, ' ').replace(MARK_RX, '') // the server's invisible mark, of no use now
+  const plain = text.replace(NBSP_RX, ' ').replace(MARK_RX, '') // no invisible character reaches the model
   return `<agent-method id="${role}/${phase}/${itemId}@${version}">\n${plain}\n</agent-method>`
 }
 
-/** UTF-8 bytes of an item text as the server counts it: without its per-session mark. */
+/** UTF-8 bytes of an item text, without invisible characters. */
 export function unmarkedBytes(text: string): number {
   return enc.encode(text.replace(NBSP_RX, ' ').replace(MARK_RX, '')).length
 }
@@ -87,8 +86,6 @@ type Session = {
   token: string
   ref: string
   role: string
-  watermark: string
-  canaries: string[]
   cache: Map<string, GuardAnswer>
   items: Set<string>
   bytes: number
@@ -146,8 +143,6 @@ export class Guard {
         token,
         ref,
         role,
-        watermark: b.watermark as string,
-        canaries: [...(b.canaries as string[])],
         cache: new Map(),
         items: new Set(),
         bytes: 0,

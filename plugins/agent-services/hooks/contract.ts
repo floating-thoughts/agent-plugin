@@ -6,7 +6,7 @@ export type ToolSpec = {
   input_schema: Record<string, unknown>
 }
 
-export const CONTRACT_SHA256 = "b5dff83829d92c99b99a849af2153f267d36e1a1f9856d35ba6f96e49b2d6d3c"
+export const CONTRACT_SHA256 = "2ffc3452f07aebeedbc829aa52d59cb06c59121b07b55cfc897f16dbfaf2f8df"
 
 export const API = "svc/1" as const
 export const PREFIX = "/svc/v1" as const
@@ -663,13 +663,13 @@ export const CONTRACT = {
    "type": "string",
    "pattern": "^[a-z]{2,8}-[0-9a-f]{16,32}$",
    "maxLength": 41,
-   "description": "opaque session marker"
+   "description": "legacy placeholder"
   },
   "SessionTag": {
    "type": "string",
    "pattern": "^[a-z]{2,8}-[0-9a-f]{16,32}$",
    "maxLength": 41,
-   "description": "opaque session marker string"
+   "description": "legacy placeholder"
   },
   "Version": {
    "type": "string",
@@ -1930,7 +1930,7 @@ export const CONTRACT = {
       },
       "watermark": {
        "$ref": "#/definitions/SessionMark",
-       "description": "this session's marker"
+       "description": "legacy field: the same fixed placeholder for every session; served text carries no marks"
       },
       "canaries": {
        "type": "array",
@@ -1940,14 +1940,14 @@ export const CONTRACT = {
        "items": {
         "$ref": "#/definitions/SessionTag"
        },
-       "description": "this session's marker strings"
+       "description": "legacy field: the same fixed placeholder for every session; served text carries no marks"
       },
       "fp": {
        "type": "object",
        "properties": {
         "key": {
          "$ref": "#/definitions/Sha256",
-         "description": "this session's fingerprint HMAC key"
+         "description": "legacy field: the same fixed placeholder for every session; served text carries no marks"
         },
         "shingle": {
          "type": "integer",
@@ -2014,7 +2014,7 @@ export const CONTRACT = {
    ],
    "x-inventory": {
     "service": "updates",
-    "purpose": "sends only the random session id and role; receives this session's parameters in return",
+    "purpose": "sends only the random session id and role; receives fixed legacy fields and the thresholds in return",
     "default": "on (once when the session opens; not sent when served content is turned off)",
     "retention": "session record kept 13 months",
     "sent_to": [

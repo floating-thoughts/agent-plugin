@@ -30,12 +30,17 @@ export const STATE_FILE = 'agent-state.md'
 export const WRITE_TOOLS: readonly string[] = ['Edit', 'Write', 'MultiEdit', 'NotebookEdit']
 export const PHASE_WAIT_MS = 2000 // the gate's own cap inside a tool.call hook; later than that the call goes on
 export const STATE_TEMPLATE = 'phase: planning\n\n## Goal\n\n## Open questions\n\n## Plan\n'
+// STATE_TEMPLATE filled in: the shortest file the gate lets through; every deny reason ends with it
+export const STATE_EXAMPLE = 'phase: running\n\n## Goal\n\nFix the login timeout.\n\n## Open questions\n\n## Plan\n\n' +
+  '- Raise the timeout and add a test for it.\n'
 export const PLANNING_REASON = 'agent-services planning gate (a plugin rule): agent-state.md is still in planning (its ' +
   'first line is not `phase: running`), so file changes wait until planning is finished. Finish the goal check, write the plan under `## Plan` (one `- ` line ' +
-  'per step), then set the first line to `phase: running`. Writes to agent-state.md itself are always allowed.'
+  'per step), then set the first line to `phase: running`. Writes to agent-state.md itself are always allowed. ' +
+  'A valid file:\n\n' + STATE_EXAMPLE
 export const INCOMPLETE_REASON = 'agent-services planning gate (a plugin rule): agent-state.md says `phase: running` but ' +
   'has no written goal and plan, so file changes still wait. A task can switch to running only with text under ' +
-  '`## Goal` and at least one `- ` step line under `## Plan`; fill them in, then try again.'
+  'a `## Goal` heading and at least one `- ` step line under a `## Plan` heading (level 2 or 3; any words may follow, ' +
+  'such as `## Plan (release order)`); fill them in, then try again. A valid file:\n\n' + STATE_EXAMPLE
 export const LESSON_REASON = 'finish planning first (agent-state.md phase: planning)'
 export const LESSON_OFF = 'the working methods are off (/agent-services methods suggest turns them back on)'
 export const LESSON_ON = 'the working methods you approved are already loaded by your CLAUDE.md; follow that text'
@@ -53,17 +58,21 @@ export function parseState(text: string | null): PhaseState {
   if (typeof text !== 'string') return { exists: false, phase: 'planning', goal: '', plan: [] }
   const lines = text.split(/\r?\n/) // a leading byte-order mark goes with trim() below
   const head = lines.find((l) => l.trim() !== '') ?? ''
-  const m = /^phase:\s*(planning|running)\s*$/i.exec(head.trim())
+  const m = /^phase\s*:\s*(planning|running)\s*$/i.exec(head.trim())
   const phase = m && m[1]!.toLowerCase() === 'running' ? 'running' : 'planning'
   const goal: string[] = []
   const plan: string[] = []
   let section = ''
   for (const line of lines) {
-    const h = /^##\s+(.*?)\s*$/.exec(line)
-    if (h) {
-      section = h[1]!.toLowerCase()
+    // a level-2 or level-3 heading starting with Goal, Plan or Open questions (any case, any words after) opens that
+    // section; any other heading of level 1 to 3 closes it; deeper headings stay inside the section
+    const h = /^\s{0,3}(#{1,6})\s+(.*?)\s*#*\s*$/.exec(line)
+    if (h && h[1]!.length <= 3) {
+      const t = h[1]!.length === 1 ? '' : h[2]!.toLowerCase()
+      section = /^goals?\b/.test(t) ? 'goal' : /^plan\b/.test(t) ? 'plan' : /^open questions?\b/.test(t) ? 'open questions' : ''
       continue
     }
+    if (h) continue
     if (section === 'goal' && line.trim()) goal.push(line.trim())
     if (section === 'plan' && /^\s*- +\S/.test(line)) plan.push(line.trim().slice(2).trim())
   }
@@ -95,8 +104,9 @@ export function isStatePath(path: unknown, cwd: string): boolean {
 
 export const missingReason = (cwd: string): string =>
   'agent-services planning gate (a plugin rule): there is no agent-state.md in this project yet, so file changes wait ' +
-  `until planning is finished. Create ${statePath(cwd)} from this template, fill in the goal, the open questions and ` +
-  'the plan (one `- ` line per step), then set the first line to `phase: running`:\n\n' + STATE_TEMPLATE
+  `until planning is finished. Create ${statePath(cwd)} from this template (at the end), fill in the goal, the open ` +
+  'questions and the plan (one `- ` line per step), then set the first line to `phase: running`. A valid file, filled in:\n\n' +
+  STATE_EXAMPLE + '\nThe template:\n\n' + STATE_TEMPLATE
 
 /** The deny reason for one tool call, or null to let it go on. Pure: `text` is the state document (null: missing). */
 export function writeDeny(tool: unknown, input: Obj, cwd: string, text: string | null): string | null {

@@ -40,7 +40,9 @@ export const HOOKS: readonly HookRow[] = [
   },
   {
     event: 'agent.spawn', matcher: '', file: 'register.ts', does: ['network', 'deny', 'rewrite', 'ui'],
-    what: 'Asks the service for routing advice on each subagent (forks and teammates are skipped). The advice can ' +
+    what: 'Does nothing at all while subagent routing is off (/agent-services routing off: no request, no deny, no ' +
+      'model change, nothing added). Otherwise it asks the service for routing advice on each subagent (forks and ' +
+      'teammates are skipped). The advice can ' +
       'deny the subagent with a reason, or set its model and effort. The request also carries the main session\'s ' +
       'model id and whether your latest message asked for a review (yes or no; your text is not sent). Unless the ' +
       'methods level is off, the service\'s speed-up suggestion is added once to the end of the subagent\'s prompt, ' +
@@ -85,7 +87,8 @@ export const HOOKS: readonly HookRow[] = [
   },
   {
     event: 'tool.call', matcher: 'tool: mcp__agent-services__setup', file: 'command.ts', does: ['answer', 'network', 'file'],
-    what: 'Runs one subcommand from a fixed list with the answer you gave (sharing, methods, update, info).',
+    what: 'Runs one subcommand from a fixed list with the answer you gave (sharing, methods, routing, update, info); ' +
+      'a choice-changing one only in the main conversation of a session you are at.',
     shown: 'The tool call and its answer.',
   },
   {
@@ -115,7 +118,8 @@ export const HOOKS: readonly HookRow[] = [
     what: 'Drops a message that is only a sign-in code while a sign-in waits for one, and finishes the sign-in with ' +
       'it, so the code never reaches the model. Adds context blocks for the model, after your text and without ' +
       'changing it: the service\'s compaction advice, the working methods of the current phase, and the plugin ' +
-      'notes (the setup questions, a newer version, the methods review), one planning reminder at methods level ' +
+      'notes (a newer version, and that /agent-services methods diff shows a change; never the setup questions), one ' +
+      'planning reminder at methods level ' +
       'suggest and, unless the methods level is off, a reminder to run long work in the background and the steps ' +
       'of .agent/steps.json ready to start, each labelled as an agent-services note. It notes locally whether ' +
       'your message asks for a review (the routing request carries only yes or no).',
@@ -138,7 +142,9 @@ export const HOOKS: readonly HookRow[] = [
   },
   {
     event: 'ui.render', matcher: 'component: AbovePrompt', file: 'band.ts', does: ['ui'],
-    what: 'Draws one dim line above the prompt (sign-in state, savings).',
+    what: 'Draws one dim line above the prompt (sign-in state, savings). While setup questions are open it says ' +
+      'how many and names /agent-services setup instead (at most once every 7 days after that command ran); the ' +
+      'questions are asked only when you run it.',
     shown: 'The line itself.',
   },
   {
@@ -153,7 +159,7 @@ export const HOOKS: readonly HookRow[] = [
 
 export const HOOKS_ALSO =
   'Not hooks, also used: the status line ($.ui.status; with the count of open lines in .agent/pending.md), timers (the request log is written every 5 seconds; the ' +
-  'update check), and questions in Claude Code\'s own dialog when you run a command (sign-in, the setup questions).'
+  'update check), and questions in Claude Code\'s own dialog when you run a command (sign-in, /agent-services setup).'
 
 /** The table as text, for /agent-services hooks and the setup tool. */
 export function hooksText(): string {
