@@ -1,20 +1,15 @@
 # agent-services
 
 agent-services is a Claude Code plugin. It connects Claude Code's hook events (subagent dispatch, tool calls,
-checkpoints and usage) to a small local core that runs on your own machine.
+checkpoints and usage) to our service. Everything runs inside Claude Code itself, in the plugin's hooks module.
 
-Every service needs a signed-in account. Until you sign in, the plugin stays off: hooks pass through unchanged,
-its tools answer only with its status, and nothing is sent anywhere.
+Every service needs a signed-in account. Until you sign in, or whenever the sign-in is no longer valid, the plugin is
+paused: hooks pass through unchanged, every one of its tools answers only with the sign-in line, and nothing is sent
+except the sign-in itself and a health check.
 
 ## Requirements
 
-Python 3.9 or newer, as `python`, `python3` or (on Windows) `py -3`: the plugin uses the first one it finds. It also
-needs the `cryptography` package. If that is missing, the sign-in command says so and offers to install it for you; to
-install it yourself (use `python3` if that is your Python):
-
-```
-python -m pip install --user cryptography
-```
+Claude Code: the terminal (CLI) or the desktop app. Nothing else: no Python, no packages, no background process.
 
 ## Install
 
@@ -44,11 +39,16 @@ claude plugin install agent-services@agent-plugin
 Turn on auto-update (required): inside Claude Code run `/plugin`, open **Marketplaces**, select `agent-plugin` and
 choose **Enable auto-update**.
 
-Then sign in inside Claude Code (a code is mailed to you; give it when asked):
+Then sign in inside Claude Code:
 
 ```
-/agent-services:agent-services login <email>
+/agent-services login <email>
 ```
+
+A one-time code is mailed to you. Claude Code then asks for it in its own question dialog; type it there, not on the
+command line. (Typed command lines are kept in the prompt history; the code is single use and expires after 10
+minutes, but the dialog keeps it out of the history altogether.) If you close the dialog, finish later in any session
+within 10 minutes with `/agent-services code`.
 
 ### 2. A team working in one project
 
@@ -67,7 +67,7 @@ it if it does) and commit it. Everyone who opens the project and trusts the fold
 }
 ```
 
-Each member then signs in once with `/agent-services:agent-services login <email>`.
+Each member then signs in once with `/agent-services login <email>`.
 
 ### 3. Machines managed by an organisation
 
@@ -92,7 +92,20 @@ Linux:   /etc/claude-code/managed-settings.json
 }
 ```
 
-Each user then signs in once with `/agent-services:agent-services login <email>`.
+Each user then signs in once with `/agent-services login <email>`.
+
+## Commands
+
+`/agent-services` (or `/agent-services status`) shows the sign-in, the plan, the service state and the auto-update
+setup. The others: `login [<email>]`, `code`, `logout`, `savings [preview | on | off | status | mail on | mail off]`,
+`estimate [preview | send]`, `served [status | pin <role> <version> | unpin <role> | channel <name>]`,
+`offline on | off` and `outbox [<day>]`. While the plugin is paused only `status`, `login`, `code` and `logout` work.
+The command answers by itself: no model reads the code or the answers.
+
+The tools the model can call are `mcp__agent-services__router_advice`, `lesson_lookup`, `savings`,
+`checkpoint_advice` and `status`. Earlier versions named them `mcp__plugin_agent-services_agent-services__<name>`;
+permission rules you wrote for the old names do nothing now and can be removed from your settings by hand. The
+plugin never writes your settings or permission rules.
 
 ## What you see
 
@@ -103,7 +116,7 @@ agent-services · saved $12.40 (8.1%) since 10-30 · today: 5 routed, 1 compacte
 ```
 
 The dollar figure and percentage come from the service (from the daily usage summaries, see below) and are refreshed
-at most every 30 minutes. Today's counts are local: subagents routed to a cheaper model, checkpoint compactions and
+at most every 10 minutes. Today's counts are local: subagents routed to a cheaper model, checkpoint compactions and
 indexed file reads. Before savings are turned on the line says `on` and shows the command that turns them on; before
 the first daily upload it says `savings show after the first daily upload`; when you are not signed in it shows the
 sign-in command. The line never shows model names, token counts, account details or file paths.
@@ -111,28 +124,62 @@ sign-in command. The line never shows model names, token counts, account details
 ## See what you saved
 
 ```
-/agent-services:agent-services savings on
-/agent-services:agent-services savings
+/agent-services savings preview
+/agent-services savings on
+/agent-services savings
 ```
 
 Savings are worked out by the service from a small daily usage summary. Nothing is uploaded until you turn it on:
-`savings on` first shows you exactly what one daily upload contains and asks before turning it on. After a day or more
-has been uploaded, `savings` shows what the services saved so far; `savings off` stops the uploads.
+`savings preview` shows you exactly what one daily upload contains, and `savings on` works only after that. After a
+day or more has been uploaded, `savings` shows what the services saved so far; `savings off` stops the uploads.
+`estimate preview` shows the summary a one-time savings estimate would send, and `estimate send` sends exactly that,
+once.
 
-## Service address
+## What is sent, and where it is kept
 
-The plugin ships with the address and public keys of our production service, so a fresh install signs in without
-any setup. It talks to the service named in `client.json` (in `~/.agent-services/services/`) when that file exists.
-If you were given another address and a server key, set them once before signing in:
+- **To our service.** Every request goes to the service's built-in address encrypted end to end (X25519,
+  AES-256-GCM) inside the TLS connection, and every answer must carry our server's Ed25519 signature; an answer that
+  does not is never used, and the plugin pauses with a notice instead. A proxy or CDN in between sees no email, code,
+  token or content. The only unencrypted request is a health check. What a request carries is minimized: a subagent
+  dispatch sends the first word and the length of its description, never the text; a daily summary carries counts
+  and token totals, never prompts, file contents or paths.
+- **The request log.** Every request is written, before it is sent, to
+  `~/.agent-services/services/outbox/<day>-<session>.jsonl` (secrets such as the code and the token redacted), with
+  previews and each call the model made to the plugin's tools. `/agent-services outbox` shows where it is and its
+  last lines. Files older than 90 days are cleared.
+- **The dashboard.** After a turn, at most every 10 minutes and only when it changed, the plugin asks Claude Code's
+  own Artifact tool to publish a dashboard page to your claude.ai account. That is the one thing that goes anywhere
+  but our service. The page holds only numbers (savings, counts, plan, service on or off), never text from a session,
+  a path or a host name. The call goes through Claude Code's normal permission check, so it happens only if you allow
+  the Artifact tool; if you deny it, the plugin stops trying for that session. Each attempt is logged in the request
+  log.
+- **Your sign-in.** The token and the device key are kept in Claude Code's plugin store, a plain file in your Claude
+  Code configuration folder (`~/.claude/plugins/store/`), protected only by your user account's file permissions.
+  Other plugins you install, and any program running as you, can read that file; a copy of it works as your sign-in
+  until the next rotation or sign-out. `/agent-services logout` ends the sign-in on the server and deletes it here.
+  Each new sign-in mails you a notice, and an administrator can end any sign-in.
+
+## Updating
+
+The plugin updates itself in the terminal and in the desktop app (see Install). Where Claude Code cannot run a
+command (a surface without it), the plugin runs nothing and instead shows, at most once a week in the status line and
+always in `/agent-services status`, the one terminal command that updates it:
 
 ```
-/agent-services:agent-services connect https://<service host> <server key> e2e:<encryption key>
+claude plugin marketplace update agent-plugin && claude plugin update agent-services@agent-plugin
 ```
 
-The connection is checked with your system's certificate store, and every answer must be signed with that server key;
-an answer that is not is never used, and the plugin pauses with a notice instead. Every request and answer is also
-encrypted end to end with the encryption key, so a proxy or CDN in between sees no sign-in code, token or content.
+## Moving from the Python version
+
+Versions before 0.2.0 ran a local Python process. On its first start this version stops that process through its
+own stop request (it signs out on the server first), imports its savings counters once, and writes
+`~/.agent-services/MIGRATED` with what it did. It never starts or kills any other process. The old files stay where
+they are; they are yours. Then sign in again with `/agent-services login`. If the old process was not running, its
+sign-in may stay valid on the server until it expires after 30 days unused; the status line says so once after you
+sign in.
 
 ## License
 
 All rights reserved; see `LICENSE`. The terms of use are in the end-user license agreement shipped by the installer.
+The vendored cryptography (`hooks/noble.js`: @noble/curves, @noble/hashes, @noble/ciphers) is MIT licensed; its
+notices are in that file.

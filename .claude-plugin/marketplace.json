@@ -5,7 +5,7 @@
     {
       "name": "agent-services",
       "source": "./plugins/agent-services",
-      "description": "Maps Claude Code hook events to the local core and applies its answers; services need a logged-in account; see the README for install"
+      "description": "Advice for Claude Code sessions from the agent-services server, run in the hooks module with no local process; services need a signed-in account; see the README for install"
     }
   ]
 }

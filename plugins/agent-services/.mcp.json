@@ -1,8 +1,0 @@
-{
-  "mcpServers": {
-    "agent-services": {
-      "command": "${CLAUDE_PLUGIN_ROOT}/hooks/agent-core",
-      "args": ["mcp", "--harness", "claude-code"]
-    }
-  }
-}

@@ -6,8 +6,10 @@
 // plugins once from that copy (terminal), or says once that a new session uses the update (desktop app). Skipped while
 // the gate is closed (signed out; a gate closed for an upgrade still updates), with
 // CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC set, and in -p runs. Every failure is swallowed: only lastUpdateError keeps it.
+// Where the engine has no $.process (plan 0.5: a surface without it), nothing is scheduled or run at all: the status
+// line then shows the one terminal command at most every 7 days instead (wiring.ts, status.ts updateCommand).
 import type { EngineInterface } from 'claude-code'
-import { dataDir } from './core'
+import { dataDir } from './command'
 
 export const START_DELAY_MS = 30_000 // the first check waits this long: nothing is spawned while a session starts
 export const CHECK_EVERY_MS = 600_000 // how often a session reads the shared state (one file read)
@@ -59,7 +61,9 @@ export function readUpdate(exitCode: number, stdout: string, stderr: string): Up
   return { kind: 'failed', reason: reason || `exit ${exitCode}` }
 }
 
-let gate: 'open' | 'closed' | 'upgrade' = 'open'
+export type Gate = 'open' | 'closed' | 'upgrade'
+let gate: Gate = 'open'
+let gateOf: (() => Promise<Gate>) | null = null
 let loadedAt: number | null = null
 let seenUpdate = 0 // the shared updatedAt this session has acted on
 let running: Promise<void> | null = null
@@ -67,6 +71,8 @@ let started = false
 let retry = false // a reload was refused: the next check lists again
 let told: string | null = null // the copy this session has logged the update line from
 export let lastUpdateError: string | null = null
+let processMissing = false
+let missingHook: (() => void) | null = null
 
 // Every core answer passes here: 'inactive' closes the gate (its notice, given once, tells an upgrade apart).
 export function noteGate(a: { fallback: string | null; notice: string | null }): void {
@@ -78,16 +84,20 @@ export function noteGate(a: { fallback: string | null; notice: string | null }):
 // an engine call that may throw or reject: `d` then
 const safe = <T>(f: () => Promise<T> | T, d: T): Promise<T> => Promise.resolve().then(f).catch(() => d)
 const text = async (read: () => Promise<unknown>) => String((await safe(read, '')) ?? '').trim()
-const sleep = ($: EngineInterface, ms: number) => new Promise<void>(done => void $.clock.after(ms, () => done()))
+function sleep($: EngineInterface, ms: number): Promise<void> {
+  return new Promise<void>(done => void $.clock.after(ms, () => done()))
+}
 async function statePath($: EngineInterface): Promise<string> {
   const own = (await text(() => $.env.get('CLAUDE_PLUGIN_DATA'))).replace(/[\\/]+$/, '')
   return own ? `${own}/${STATE_NAME}` : `${await dataDir($)}/services/${STATE_NAME}`
 }
-const readShared = async ($: EngineInterface, path: string): Promise<Shared> => {
+async function readShared($: EngineInterface, path: string): Promise<Shared> {
   const s = parse(await safe(() => $.fs.read(path), null))
   return s && typeof s === 'object' && !Array.isArray(s) ? (s as Shared) : {}
 }
-const writeShared = ($: EngineInterface, path: string, s: Shared) => $.fs.write(path, JSON.stringify(s))
+function writeShared($: EngineInterface, path: string, s: Shared) {
+  return $.fs.write(path, JSON.stringify(s))
+}
 
 // The lease: free or stale -> written, read back after LEASE_SETTLE_MS; ours only if our write is still there.
 async function takeLease($: EngineInterface, path: string, now: number): Promise<Lease | null> {
@@ -100,6 +110,8 @@ async function takeLease($: EngineInterface, path: string, now: number): Promise
 }
 
 async function run($: EngineInterface, interactive: boolean): Promise<void> {
+  if (processMissing) return
+  if (gateOf) gate = await gateOf().catch((): Gate => 'closed')
   if (gate === 'closed' || (await text(() => $.env.get('CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC')))) return
   if (!interactive && ((await safe(() => $.session.surfaces(), [])) ?? []).length === 0) return // a -p run
   const now = await $.clock.now()
@@ -112,7 +124,18 @@ async function run($: EngineInterface, interactive: boolean): Promise<void> {
   seenUpdate = Math.max(seenUpdate, shared.updatedAt ?? 0)
   const exe = (await text(() => $.env.get('CLAUDE_CODE_EXECPATH'))) || 'claude'
   const list = async () => (await $.process.run([exe, 'plugin', 'list', '--json'], { timeoutMs: 60_000 })).stdout
-  let listed = await list()
+  let listed: string
+  try {
+    listed = await list()
+  } catch (err) {
+    // no $.process on this surface (or it cannot start a command): run nothing from now on; the status line shows
+    // the terminal command instead
+    processMissing = true
+    try {
+      missingHook?.()
+    } catch {}
+    throw err
+  }
   const id = idOf(listed, $.plugin.name)
   if (id === null) return
   let updated: string | null = null
@@ -154,10 +177,34 @@ function check($: EngineInterface, interactive: boolean): Promise<void> {
   return running
 }
 
-// From session.start: schedules the checks once per loaded copy. Never throws, never waits.
-export function selfUpdate($: EngineInterface, interactive: boolean): void {
-  if (started) return
+/** False once a `$.process` call could not run here (a surface without it, plan 0.5); true until then. */
+export const canSelfUpdate = (): boolean => !processMissing
+
+// The engine's own refusal of an empty argv (measured 2026-10-31, CLI 2.1.316): `$.process` is there.
+const ARGV_REFUSAL = /non-empty list|argv/i
+
+/** Whether this surface has `$.process`, found without running anything: an empty argv is refused by the engine's
+ * own check where `$.process` exists, and the call fails otherwise. Once false, nothing is ever run here. */
+export async function probeProcess($: EngineInterface): Promise<boolean> {
+  let present: boolean
+  try {
+    await $.process.run([], { timeoutMs: 1000 })
+    present = true
+  } catch (err) {
+    present = ARGV_REFUSAL.test(String((err as { message?: unknown })?.message ?? err))
+  }
+  if (!present) processMissing = true
+  return present
+}
+
+// From session.start: schedules the checks once per loaded copy. Never throws, never waits. `gateFrom` (optional)
+// tells the gate at each check (signed out: closed; a shell-gate upgrade answer: upgrade); without it noteGate does.
+// `onMissing` is told once when `$.process` turns out to be missing: from then on nothing is run.
+export function selfUpdate($: EngineInterface, interactive: boolean, gateFrom?: () => Promise<Gate>, onMissing?: () => void): void {
+  if (started || processMissing) return
   started = true
+  if (gateFrom) gateOf = gateFrom
+  if (onMissing) missingHook = onMissing
   try {
     $.clock.after(START_DELAY_MS, () => void check($, interactive))
     $.clock.every(CHECK_EVERY_MS, () => void check($, interactive))

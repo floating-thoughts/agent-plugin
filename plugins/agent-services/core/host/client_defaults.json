@@ -1,6 +1,0 @@
-{
- "endpoint": "https://svc.yzcanadianholdings.com",
- "pin": {"kind": "ca"},
- "server_keys": ["q3eePMcOg3Ds0W/qzkEV1r18qJo7IDA83Tg6KY7DgJE="],
- "e2e_keys": ["MbNUgR1sQVd5oZlN77nOJraHgVSlMol9QeYfgB6fGnY="]
-}
