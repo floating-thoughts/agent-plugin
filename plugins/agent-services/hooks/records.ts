@@ -13,7 +13,7 @@ import { routingLevel } from './routing_level'
 
 /** Two more routing facts (0.6.0): the main session's model id (for the cap) and whether the person's latest message
  * asked for a review (only the boolean is sent). Absent: the fields are not sent. */
-export type RouteFlags = { main_model?: unknown; user_asked_review?: unknown }
+export type RouteFlags = { main_model?: unknown; user_asked_review?: unknown; scope?: unknown }
 
 export const OPEN_DEFAULTS = { idle_seconds: 180, max_seconds: 3600 }
 // Public list of common developer commands. A privacy filter: any other name is sent as "other".
@@ -141,6 +141,7 @@ export type CheckpointCounts = {
   commits: unknown
   minutes: unknown
   context_tokens?: unknown // 0.7.6: optional; an older server refuses it (422), then the call is repeated without it
+  event?: unknown // K6: the work event (contract enum, checked by core.ts checkArgs); retried without it like context_tokens
 }
 
 export type RecordsOptions = { store: KV; random: Random; harness?: string }
@@ -248,6 +249,9 @@ export class Records {
       body.user_asked_review = flags.user_asked_review === true
       // 0.6.2: only at routing strict; at suggest the field is not sent and the service never refuses a missing word
       if ((await routingLevel(this.store)) === 'strict') body.strict = true
+      // K6: the planned work's shape (counts and flags, checked by core.ts checkArgs); an empty one is not sent
+      const sc = flags.scope
+      if (sc && typeof sc === 'object' && !Array.isArray(sc) && Object.keys(sc).length) body.scope = { ...sc }
     }
     let ans: Record<string, unknown> | null = null
     const errors: (string | null)[] = []
@@ -260,6 +264,7 @@ export class Records {
         delete body.main_model
         delete body.user_asked_review
         delete body.strict
+        delete body.scope // older than K6 (2026-11-05)
         errors.length = 0
         ans = await this.post('/router/decide', body, 'router', deadlineMs, errors)
       }
@@ -292,10 +297,12 @@ export class Records {
     } as Record<string, unknown>
     const tk = c.context_tokens
     if (typeof tk === 'number' && Number.isInteger(tk) && tk >= 0) body.context_tokens = Math.min(tk, 10000000)
+    if (typeof c.event === 'string') body.event = c.event
     const statuses: (number | null)[] = []
     let ans = await this.post('/checkpoint/timing', body, 'checkpoint', deadlineMs, undefined, statuses)
-    if (ans === null && 'context_tokens' in body && statuses.includes(422)) {
+    if (ans === null && ('context_tokens' in body || 'event' in body) && statuses.includes(422)) {
       delete body.context_tokens // a server older than 0.7.6
+      delete body.event // older than K6 (2026-11-05)
       ans = await this.post('/checkpoint/timing', body, 'checkpoint', deadlineMs)
     }
     if (ans !== null && typeof ans.now === 'boolean' && Array.isArray(ans.keep_lines)) {

@@ -730,7 +730,8 @@ export class Wiring {
   async panel(): Promise<Panel> {
     const held = await get(this.d.store, USAGE_DAYS_KEY)
     const days = isObj(held) && isObj(held.days) ? held.days : {}
-    const savings = (await this.metricsOnNow()) ? await this.savingsBody(false) : null
+    // the savings record off -> { error: 'service_off' }, so the panel shows "off" rather than an unknown "--"
+    const savings = (await this.metricsOnNow()) ? await this.savingsBody(false) : { error: 'service_off' }
     // the week's counts for the Stats column: the last 7 local days of the store counters, summed
     const week: Record<string, number> = {}
     const now = this.now()
@@ -911,7 +912,12 @@ export class Wiring {
       const floor = await uploadFloor(this.d.store, today)
       const first = start < floor ? floor : start
       const st = start < floor ? { ...saved, last_uploaded_day: plusDays(floor, -1) } : saved
-      if (first > yesterday) return { sent: [], error: null }
+      if (first > yesterday) {
+        // nothing due yet after an account switch: write the state for this account now (last_uploaded_day = the day
+        // before the floor, as the loop below would), so a later tick sends from the switch day on to this account
+        if (await accountSwitched(this.d.store)) await this.saveState({ last_uploaded_day: st.last_uploaded_day })
+        return { sent: [], error: null }
+      }
       // 0.7.9: the server takes a day only with a granted consent record; a yes not recorded yet (one given before
       // 0.7.9, or a failed call) is recorded once first, and nothing is uploaded today when that fails
       if (entry.consent !== true && !(await this.consent(true))) return { sent: [], error: 'consent_failed' }
