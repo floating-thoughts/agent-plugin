@@ -150,6 +150,18 @@ export async function refreshUsage(
       const full = facts.full_days?.[d] ?? {}
       all[d] = { ...(all[d] ?? x), ...Object.fromEntries(Object.entries(x).filter(([k]) => typeof (full as Obj)[k] === 'number')) }
     }
+    // a stored day never shrinks: a rescan can be partial (the plugin's scan leaves over-4-MiB transcripts out when the
+    // days file does not cover the day; a transcript deleted since leaves a smaller days-file row), and the panel's
+    // figures are totals so far, so each field keeps the larger of the stored and the new value
+    for (const [d, old] of Object.entries(days)) {
+      if (!isObj(old) || !all[d]) continue
+      const t = { ...all[d] }
+      for (const k of ['tokens', 'usd', 'typed_bytes', 'agent_seconds', 'agent_sum_seconds', 'turns'] as const) {
+        const was = num(old[k])
+        if (was !== null && !(num(t[k]) !== null && t[k] >= was)) t[k] = was
+      }
+      all[d] = t
+    }
     const names = Object.keys(all).sort().slice(-800)
     const next: Record<string, UsageDay> = {}
     for (const d of names) next[d] = all[d]
