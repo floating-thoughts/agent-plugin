@@ -30,7 +30,7 @@ import type { Facts, MetricsState, Prices, TranscriptFile } from './metrics'
 import type { Outbox } from './outbox'
 import { redact } from './redact'
 import { updateCommand } from './status'
-import { probeProcess } from './update'
+import { probeProcess, selfUpdateLine } from './update'
 import { safeGet, safeSet } from './store'
 import type { KV } from './store'
 import { gateNotice, LOCKED_LINE, NOTICE_TEXT, PAUSED_LINE, PLAN_NOTICE, SERVED_CHANNELS, SERVED_ROLES } from './svc'
@@ -505,6 +505,8 @@ export class Command {
     const au = autoUpdateText(a, up)
     if (au) lines.push(au)
     if (up && !(a && !a.on && a.source === 'env')) lines.push(`To update the plugin, run this in a terminal: ${up}`)
+    const su = selfUpdateLine()
+    if (su) lines.push(su)
     if (auth === 'ok') lines.push(await this.dashboardLine())
     return lines.join('\n')
   }

@@ -72,6 +72,17 @@ let retry = false // a reload was refused: the next check lists again
 let told: string | null = null // the copy this session has logged the update line from
 export let lastUpdateError: string | null = null
 let processMissing = false
+let lastCheck: { at: number; what: string } | null = null // what this session's last check did, for the status
+
+/** The status line about this session's self-update checks (before the first one: when it comes). */
+export function selfUpdateLine(): string | null {
+  if (processMissing || !started) return null
+  if (!lastCheck) return 'Self-update: the first check runs about 30 seconds after the session starts.'
+  return `Self-update: last check ${new Date(lastCheck.at).toISOString().slice(11, 16)} UTC: ${lastCheck.what}.`
+}
+async function noted($: EngineInterface, what: string): Promise<void> {
+  lastCheck = { at: await safe(() => $.clock.now(), Date.now()), what }
+}
 let missingHook: (() => void) | null = null
 
 // Every core answer passes here: 'inactive' closes the gate (its notice, given once, tells an upgrade apart).
@@ -112,14 +123,21 @@ async function takeLease($: EngineInterface, path: string, now: number): Promise
 async function run($: EngineInterface, interactive: boolean): Promise<void> {
   if (processMissing) return
   if (gateOf) gate = await gateOf().catch((): Gate => 'closed')
-  if (gate === 'closed' || (await text(() => $.env.get('CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC')))) return
+  if (gate === 'closed') return noted($, 'skipped while signed out')
+  if (await text(() => $.env.get('CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC'))) {
+    return noted($, 'skipped (CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC is set)')
+  }
   if (!interactive && ((await safe(() => $.session.surfaces(), [])) ?? []).length === 0) return // a -p run
   const now = await $.clock.now()
   loadedAt ??= now
   const path = await statePath($)
   const shared = await readShared($, path)
   const due = now - (shared.checkedAt ?? 0) >= UPDATE_EVERY_MS
-  if (!due && !retry && !((shared.updatedAt ?? 0) > Math.max(loadedAt, seenUpdate))) return // nothing new since loaded
+  if (!due && !retry && !((shared.updatedAt ?? 0) > Math.max(loadedAt, seenUpdate))) {
+    // nothing new since loaded
+    const next = new Date((shared.checkedAt ?? 0) + UPDATE_EVERY_MS).toISOString().slice(11, 16)
+    return noted($, `not due (the update runs at most every 6 hours; next after ${next} UTC)`)
+  }
   retry = false
   seenUpdate = Math.max(seenUpdate, shared.updatedAt ?? 0)
   const exe = (await text(() => $.env.get('CLAUDE_CODE_EXECPATH'))) || 'claude'
@@ -137,15 +155,21 @@ async function run($: EngineInterface, interactive: boolean): Promise<void> {
     throw err
   }
   const id = idOf(listed, $.plugin.name)
-  if (id === null) return
+  if (id === null) {
+    const head = String(listed ?? '').replace(/\s+/g, ' ').slice(0, 80) || 'nothing'
+    return noted($, `${exe} plugin list --json does not list ${$.plugin.name} from a marketplace (it printed: ${head})`)
+  }
   let updated: string | null = null
   const lease = due ? await takeLease($, path, now) : null
+  if (due && !lease) await noted($, 'another session is updating')
   if (lease) {
     try {
       await $.process.run([exe, 'plugin', 'marketplace', 'update', id.slice(id.lastIndexOf('@') + 1)], { timeoutMs: RUN_TIMEOUT_MS })
       const r = await $.process.run([exe, 'plugin', 'update', id, '--json'], { timeoutMs: RUN_TIMEOUT_MS })
       const out = readUpdate(r.exitCode, String(r.stdout ?? ''), String(r.stderr ?? ''))
       lastUpdateError = out.kind === 'failed' ? out.reason.slice(0, 200) : null
+      const what = out.kind === 'updated' ? `updated to ${out.to.slice(0, 12)}` : 'already the latest version'
+      await noted($, out.kind === 'failed' ? `the update failed: ${lastUpdateError}` : what)
       if (out.kind === 'updated') updated = out.to.slice(0, 12)
     } finally {
       const s = await readShared($, path)
@@ -172,7 +196,10 @@ async function run($: EngineInterface, interactive: boolean): Promise<void> {
 // One check at a time in this session.
 function check($: EngineInterface, interactive: boolean): Promise<void> {
   running ??= run($, interactive)
-    .catch(err => void (lastUpdateError = String(err instanceof Error ? err.message : err).slice(0, 200)))
+    .catch(err => {
+      lastUpdateError = String(err instanceof Error ? err.message : err).slice(0, 200)
+      return noted($, `the check failed: ${lastUpdateError}`)
+    })
     .finally(() => void (running = null))
   return running
 }
