@@ -13,6 +13,9 @@ export type SvcResult = {
 // Each call carries the deadline it must answer within (agent.spawn 1 s, tool.call 8 s in all,
 // background work longer). The channel never sleeps out a Retry-After inside it.
 export type CallOptions = { kind: string; deadlineMs: number }
+// Which served items a fetch asks for (black-box step 5): jit = the phase without the items served just in time;
+// event = only the items of that just-in-time event. Only these names are sent.
+export type ServedSelect = { jit?: boolean; event?: string }
 
 // The shell gate as the Python client's gate_state(). Reasons: null (open), 'unknown' (no hello yet), 'login'
 // (no valid sign-in, or a 401 that did not recover), 'locked' (a 423 that did not recover), 'upgrade',
@@ -27,8 +30,9 @@ export interface Transport {
   gateState(): Promise<GateState>
   // One POST /auth/hello that opens or closes the gate; `body.plan` carries the plan. Never throws.
   handshake(opts: CallOptions): Promise<SvcResult>
-  // One phase of a role's served items (bound per session_ref, as Connector.fetch_served). Never throws.
-  fetchServed(sessionRef: string, role: string, phase: string, opts: CallOptions): Promise<SvcResult>
+  // One phase of a role's served items (bound per session_ref, as Connector.fetch_served). Never throws. With `state`
+  // (phase.ts gateState): the planning-gate verdict in the answer's `gate`, and no items. `select`: ServedSelect.
+  fetchServed(sessionRef: string, role: string, phase: string, opts: CallOptions, state?: Record<string, unknown>, select?: ServedSelect): Promise<SvcResult>
   // Forget the served binding of a session (local only, as Connector.end_served_session).
   endServedSession(sessionRef: string): void
 }

@@ -2,7 +2,7 @@
 // rule and the run-limit table live on the server; this file only builds the minimal records, sends them through
 // the svc channel and falls back to open defaults. What leaves the machine: the first word of a subagent
 // description, its length, a per-session dispatch number, a salted project hash, the command head (only from the
-// public KNOWN_HEADS list) and run durations. The rest of the description, paths and the local session id never
+// public KNOWN_HEADS list; run_limits.ts sends it without project hash or durations) and run durations. The rest of the description, paths and the local session id never
 // leave and are never written. The salt lives in the store (key SALT_KEY, 64 hex); it is not secret, only a
 // per-machine blind for project paths.
 
@@ -145,6 +145,7 @@ export type CheckpointCounts = {
   minutes: unknown
   context_tokens?: unknown // 0.7.6: optional; an older server refuses it (422), then the call is repeated without it
   event?: unknown // K6: the work event (contract enum, checked by core.ts checkArgs); retried without it like context_tokens
+  turn?: unknown // blackbox step 3: the main turn's counts (delegate.ts takeTurn); retried without it like event
 }
 
 export type RecordsOptions = { store: KV; random: Random; harness?: string }
@@ -294,7 +295,7 @@ export class Records {
 
   // ---------------- checkpoint
   async checkpoint(session: unknown, c: CheckpointCounts, deadlineMs = BACKGROUND_DEADLINE_MS):
-    Promise<{ now: boolean; keep_lines: string[]; fallback: string | null }> {
+    Promise<{ now: boolean; keep_lines: string[]; fallback: string | null; note?: string; cases?: string[] }> {
     const body = {
       session_ref: this.ref(session), context_pct: pctOf(c.context_pct), turns: intOf(c.turns),
       tool_calls: intOf(c.tool_calls), todos_done: intOf(c.todos_done), commits: intOf(c.commits), minutes: intOf(c.minutes),
@@ -302,15 +303,23 @@ export class Records {
     const tk = c.context_tokens
     if (typeof tk === 'number' && Number.isInteger(tk) && tk >= 0) body.context_tokens = Math.min(tk, 10000000)
     if (typeof c.event === 'string') body.event = c.event
+    const t = c.turn
+    if (t && typeof t === 'object' && !Array.isArray(t) && Object.keys(t).length) body.turn = { ...t }
     const statuses: (number | null)[] = []
     let ans = await this.post('/checkpoint/timing', body, 'checkpoint', deadlineMs, undefined, statuses)
-    if (ans === null && ('context_tokens' in body || 'event' in body) && statuses.includes(422)) {
+    if (ans === null && ('context_tokens' in body || 'event' in body || 'turn' in body) && statuses.includes(422)) {
       delete body.context_tokens // a server older than 0.7.6
       delete body.event // older than K6 (2026-11-05)
+      delete body.turn // older than the turn advice
       ans = await this.post('/checkpoint/timing', body, 'checkpoint', deadlineMs)
     }
     if (ans !== null && typeof ans.now === 'boolean' && Array.isArray(ans.keep_lines)) {
-      return { now: ans.now, keep_lines: ans.keep_lines.filter((x): x is string => typeof x === 'string'), fallback: null }
+      const out: { now: boolean; keep_lines: string[]; fallback: null; note?: string; cases?: string[] } =
+        { now: ans.now, keep_lines: ans.keep_lines.filter((x): x is string => typeof x === 'string'), fallback: null }
+      // the turn advice: served text, passed on as the server wrote it (absent when not sent)
+      if (typeof ans.note === 'string' && ans.note) out.note = ans.note
+      if (Array.isArray(ans.cases)) out.cases = ans.cases.filter((x): x is string => typeof x === 'string')
+      return out
     }
     return { now: false, keep_lines: [], fallback: 'no_suggestion' }
   }
@@ -327,7 +336,11 @@ export class Records {
       const idle = ans.idle_seconds
       const mx = ans.max_seconds
       if (typeof idle === 'number' && typeof mx === 'number' && idle >= 1 && mx >= 0) {
-        return { idle_seconds: idle, max_seconds: mx, source: 'service', fallback: null }
+        const out: Record<string, unknown> = { idle_seconds: idle, max_seconds: mx, source: 'service', fallback: null }
+        // black-box step 6: served advice, passed on as the server wrote it (absent when not sent)
+        if (typeof ans.background === 'boolean') out.background = ans.background
+        if (typeof ans.note === 'string' && ans.note) out.note = ans.note
+        return out
       }
     }
     return { ...OPEN_DEFAULTS, source: 'default', fallback: 'open_defaults' }

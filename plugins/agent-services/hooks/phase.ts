@@ -3,31 +3,33 @@
 // level (methods.ts levelNow):
 //
 // - "on" (the user made the methods their own instructions): file changes (Edit, Write, MultiEdit, NotebookEdit) on
-//   any path but agent-state.md are denied while the document is missing, says `phase: planning` (or has a
-//   malformed first line), or says `phase: running` without the served plan-validity criteria met (a goal and plan
-//   steps). Small edits pass (smallEdit: an Edit or MultiEdit that changes at most the served number of lines in
-//   all). Writes to agent-state.md always go through.
-// - "suggest" (the default): nothing is denied; the first such change of a session brings one reminder line with the
-//   next prompt (gateReminder).
-// - The criteria, the line count and the texts come from the served workflow table (workflow_table.ts); without it
-//   the gate denies nothing and reminds of nothing (fail open). The deny decision and reading agent-state.md stay here.
+//   any path but agent-state.md are denied while the service's verdict for the document holds them (gate_verdict.ts:
+//   only flags and one count about the document are sent, never its text or path). Small edits pass (smallEdit: an
+//   Edit or MultiEdit that changes at most the line count the verdict names, in all). Writes to agent-state.md and to
+//   files under `.agent/` always go through.
+// - "suggest" (the default): nothing is denied; the first held change of a session brings the verdict's reminder
+//   line with the next prompt.
+// - The criteria, the line count and the texts come with the verdict; without one (offline, signed out, late, an
+//   older service) the gate denies nothing and reminds of nothing (fail open). Reading agent-state.md, the deny
+//   itself and the templates (STATE_TEMPLATE, STATE_EXAMPLE) stay here.
 // - "off": the gate does nothing.
 // - Bash and the read tools are never held at any level: a file written through Bash is not seen by the gate.
 // - No session that nobody can be asked in (a -p run, choice.ts canAsk) is held.
-// - lesson_lookup answers only phase `plan` until the document is running (with the served table; without it nothing
-//   is held); any other phase gets an empty item list and a short reason, without asking the server. At "off" it gives no items, and at "on" it points to the
-//   approved text the CLAUDE.md line already loads.
+// - lesson_lookup answers only phase `plan` until the document is running (with a verdict; without one nothing is
+//   held); any other phase gets an empty item list and a short reason, without asking the server. At "off" it gives
+//   no items, and at "on" it points to the approved text the CLAUDE.md line already loads.
 // - Subagents are never held: the gate is the main agent's startup phase, and a subagent is dispatched by a main
 //   session that has already planned (often in a git worktree with no agent-state.md). The engine's `agentId` on
 //   tool.call marks a subagent, the same signal prompt.submit uses (pushLessons).
 // - The caller runs this only while signed in (`active`): in auth fail the plugin stays inert.
-// Harness-neutral apart from the level and canAsk: reading the file, the working directory and the auth state are
-// injected (register.ts wires them).
+// Harness-neutral apart from the level and canAsk: reading the file, the working directory, the auth state and the
+// service's verdict are injected (register.ts wires them).
 import { normPath } from './paths'
 import { canAsk } from './choice'
 import { levelNow, methodsActive, queueNotice, seenVersion } from './methods'
 import { autonomyNote, readAutonomy } from './autonomy'
-import { servedFlag, servedInt, servedText, workflowPart } from './workflow_table'
+import { askVerdict, knownVerdict, PLAN_STEPS_SENT_MAX } from './gate_verdict'
+import type { AskGate, GateLevel, GateState } from './gate_verdict'
 export { methodsStart } from './methods' // register.ts wires it beside pushStart
 export { noteAutonomy } from './autonomy' // register.ts tool.call, after the call ran
 
@@ -41,17 +43,6 @@ export const STATE_EXAMPLE = 'phase: running\n\n## Goal\n\nFix the login timeout
 export const LESSON_REASON = 'finish planning first (agent-state.md phase: planning)'
 export const LESSON_OFF = 'the working methods are off (/agent-services methods suggest turns them back on)'
 export const LESSON_ON = 'the working methods you approved are already loaded by your CLAUDE.md; follow that text'
-
-// The served planning-gate values (workflow table, section planning_gate); null without the table, and then the gate
-// denies nothing and reminds of nothing (fail open).
-/** The deny reason while agent-state.md is in planning, ending with STATE_EXAMPLE. */
-export const planningReason = (): string | null => servedText('planning_gate', 'planning_reason', { example: STATE_EXAMPLE })
-/** The deny reason for `phase: running` without the served criteria met, ending with STATE_EXAMPLE. */
-export const incompleteReason = (): string | null => servedText('planning_gate', 'incomplete_reason', { example: STATE_EXAMPLE })
-/** The suggest-level reminder, once per session. */
-export const gateReminder = (): string | null => servedText('planning_gate', 'reminder')
-/** An Edit or MultiEdit changing at most this many lines passes the gate at "on". */
-export const smallEditLines = (): number | null => servedInt('planning_gate', 'small_edit_lines', 0)
 
 export type PhaseState = { exists: boolean; phase: 'planning' | 'running'; goal: string; plan: string[] }
 type Read = (path: string) => Promise<string | null>
@@ -83,17 +74,20 @@ export function parseState(text: string | null): PhaseState {
   return { exists: true, phase, goal: goal.join('\n'), plan }
 }
 
-/** Running and meeting the served plan-validity criteria (a written goal, at least plan_steps_min plan steps): only
- * then is the work phase open. Without the table only the first line counts (the gate denies nothing then anyway). */
-export function isRunning(s: PhaseState): boolean {
-  if (s.phase !== 'running') return false
-  if (!workflowPart('planning_gate')) return true
-  const goal = servedFlag('planning_gate', 'goal_required') === true
-  return (!goal || s.goal !== '') && s.plan.length >= (servedInt('planning_gate', 'plan_steps_min', 0) ?? 0)
+/** What the service is told about a state document: flags and one count, no text. Pure. */
+export function gateState(s: PhaseState, level: GateLevel = 'on'): GateState {
+  return { exists: s.exists, running: s.phase === 'running', goal: s.goal !== '', plan_steps: Math.min(s.plan.length, PLAN_STEPS_SENT_MAX), level }
 }
 
-/** The work phase is open: no served planning-gate table (nothing is held then, like the gate), or isRunning. */
-export const workOpen = (s: PhaseState): boolean => !workflowPart('planning_gate') || isRunning(s)
+/** The work phase is open: the service's verdict for this state holds nothing; without a verdict only the first line
+ * counts. Never asks the service (askVerdict does). */
+export function isRunning(s: PhaseState, level: GateLevel = 'suggest'): boolean {
+  const v = knownVerdict(gateState(s, level))
+  return v ? !v.hold : s.phase === 'running'
+}
+
+/** Nothing is held for this state: no verdict (fail open), or a verdict that does not hold. */
+export const workOpen = (s: PhaseState, level: GateLevel = 'on'): boolean => !knownVerdict(gateState(s, level))?.hold
 
 const trimDir = (p: string): string => normPath(p).replace(/\/+$/, '')
 
@@ -115,25 +109,24 @@ export function isStatePath(path: unknown, cwd: string): boolean {
   return full === statePath(cwd).toLowerCase() || full.startsWith(`${trimDir(cwd)}/.agent/`.toLowerCase())
 }
 
-export const missingReason = (cwd: string): string =>
-  'agent-services planning gate (a plugin rule): there is no agent-state.md in this project yet, so file changes wait ' +
-  `until planning is finished. Create ${statePath(cwd)} from this template (at the end), fill in the goal, the open ` +
-  'questions and the plan (one `- ` line per step), then set the first line to `phase: running`. A valid file, filled in:\n\n' +
-  STATE_EXAMPLE + '\nThe template:\n\n' + STATE_TEMPLATE
-
-/** The deny reason for one tool call, or null to let it go on. Pure: `text` is the state document (null: missing). */
-export function writeDeny(tool: unknown, input: Obj, cwd: string, text: string | null): string | null {
-  if (typeof tool !== 'string' || !WRITE_TOOLS.includes(tool)) return null
-  if (!workflowPart('planning_gate')) return null // no served table: the gate fails open
-  if (smallEditLines() === null) return null // a partial table without a usable small_edit_lines: fail open too
-  if (isStatePath(input.file_path ?? input.notebook_path ?? input.path, cwd)) return null
-  const s = parseState(text)
-  if (!s.exists) return missingReason(cwd)
-  if (s.phase === 'planning') return planningReason()
-  return isRunning(s) ? null : incompleteReason()
+/** A served reason with its placeholders filled in here: {path} (this project's state document), {example} and
+ * {template}. Pure. */
+export function fillReason(reason: string, cwd: string): string {
+  const vars: Record<string, string> = { path: statePath(cwd), example: STATE_EXAMPLE, template: STATE_TEMPLATE }
+  return reason.replace(/\{(path|example|template)\}/g, (_all, k: string) => vars[k]!)
 }
 
-/** The reason a lesson_lookup for `phase` is held, or null to fetch it. Pure. */
+/** The reason for one tool call (at "on" the deny, at "suggest" the reminder), or null to let it go on. Pure apart
+ * from the verdicts already known (knownVerdict): `text` is the state document (null: missing). */
+export function writeDeny(tool: unknown, input: Obj, cwd: string, text: string | null, level: GateLevel = 'on'): string | null {
+  if (typeof tool !== 'string' || !WRITE_TOOLS.includes(tool)) return null
+  if (isStatePath(input.file_path ?? input.notebook_path ?? input.path, cwd)) return null
+  const v = knownVerdict(gateState(parseState(text), level))
+  if (!v || !v.hold || !v.reason) return null // no verdict: the gate fails open
+  return fillReason(v.reason, cwd)
+}
+
+/** The reason a lesson_lookup for `phase` is held, or null to fetch it. Pure apart from the verdicts already known. */
 export function lessonDeny(phase: unknown, text: string | null): string | null {
   if (phase === 'plan') return null
   return workOpen(parseState(text)) ? null : LESSON_REASON
@@ -148,15 +141,19 @@ export type GateDeps = {
   active(): Promise<boolean> // signed in (the auth gate); false: the gate does nothing
   cwd(): Promise<string | null>
   read: Read
+  ask?: AskGate | null // the service's verdict for a state (gate_verdict.ts); absent: only verdicts already known
+  level?: GateLevel // the methods level the reason is for (default on)
 }
 
-/** tool.call: the deny reason, or null (also when signed out, without a working directory, or on any error). */
-export async function toolGate(tool: unknown, input: Obj, d: GateDeps): Promise<string | null> {
+type Check = { why: string | null; small: number | null }
+
+async function gateCheck(tool: unknown, input: Obj, d: GateDeps): Promise<Check> {
+  const none: Check = { why: null, small: null }
   try {
-    if (typeof tool !== 'string' || !WRITE_TOOLS.includes(tool)) return null
-    if (!(await d.active())) return null
+    if (typeof tool !== 'string' || !WRITE_TOOLS.includes(tool)) return none
+    if (!(await d.active())) return none
     const start = await d.cwd()
-    if (typeof start !== 'string' || !start) return null
+    if (typeof start !== 'string' || !start) return none
     // the project is the nearest folder from the working directory up that has agent-state.md (a `cd` into a
     // subfolder keeps the project's plan); none: the working directory itself
     let cwd = trimDir(start)
@@ -169,14 +166,22 @@ export async function toolGate(tool: unknown, input: Obj, d: GateDeps): Promise<
       if (t !== null) { cwd = dir; text = t }
     }
     const target = input.file_path ?? input.notebook_path ?? input.path
-    if (isStatePath(target, cwd)) return null
+    if (isStatePath(target, cwd)) return none
     // a file outside the project (a temp or scratch folder, another repository) is never held
     if (typeof target === 'string' && /^([A-Za-z]:)?\//.test(normPath(target)) &&
-      !`${normPath(target).toLowerCase()}/`.startsWith(`${cwd.toLowerCase()}/`)) return null
-    return writeDeny(tool, input, cwd, text)
+      !`${normPath(target).toLowerCase()}/`.startsWith(`${cwd.toLowerCase()}/`)) return none
+    const level = d.level ?? 'on'
+    const v = await askVerdict(gateState(parseState(text), level), d.ask ?? null) // kept per state: asked once
+    return { why: writeDeny(tool, input, cwd, text, level), small: v ? v.small_edit_lines : null }
   } catch {
-    return null
+    return none
   }
+}
+
+/** tool.call: the reason, or null (also when signed out, without a working directory, without a verdict, or on any
+ * error). */
+export async function toolGate(tool: unknown, input: Obj, d: GateDeps): Promise<string | null> {
+  return (await gateCheck(tool, input, d)).why
 }
 
 /** lesson_lookup: the reason it is held, or null to fetch (no working directory: it is fetched as before). */
@@ -193,31 +198,43 @@ export async function lessonGate(phase: unknown, cwd: string | null, read: Read)
 export const lessonHold = (read: Read) => async (args: Obj, cwd: string | null): Promise<Obj | null> => {
   const level = await levelNow()
   if (level === 'off') return { ...heldLesson(args, LESSON_OFF), fallback: 'off' }
-  if (level === 'on') return { ...heldLesson(args, LESSON_ON), fallback: 'claude_md' }
+  if (level === 'on' && args.event === undefined) return { ...heldLesson(args, LESSON_ON), fallback: 'claude_md' } // just-in-time items by name pass
   return null // suggest: the text served now, never held (lessonGate stays for a caller that wants the planning hold)
 }
 
 const lines = (v: unknown): number => (typeof v === 'string' && v ? v.split(/\r?\n/).length : 0)
 
-/** An Edit or MultiEdit that changes at most smallEditLines() lines in all (each edit counts its longer side).
- * Write and NotebookEdit are never small, and nothing is without the served table. */
-export function smallEdit(tool: unknown, input: Obj): boolean {
-  const max = smallEditLines()
-  if (max === null) return false
+/** An Edit or MultiEdit that changes at most `max` lines in all (each edit counts its longer side; `max` comes with
+ * the service's verdict). Write and NotebookEdit are never small, and nothing is without a line count. */
+export function smallEdit(tool: unknown, input: Obj, max: number | null): boolean {
+  if (typeof max !== 'number') return false
   const one = (e: unknown) => (e && typeof e === 'object' ? Math.max(lines((e as Obj).old_string), lines((e as Obj).new_string)) : Infinity)
   if (tool === 'Edit') return one(input) <= max
   if (tool === 'MultiEdit') return Array.isArray(input.edits) && input.edits.reduce((n: number, e) => n + one(e), 0) <= max
   return false
 }
 
-type Runtime = { svc: { authState(): Promise<string> }; readText: Read; sleep: (ms: number) => Promise<unknown> } | null
+type Runtime = {
+  session?: unknown
+  svc: { authState(): Promise<string> }
+  core?: { servedGate?(session: unknown, state: Obj): Promise<unknown> }
+  readText: Read
+  sleep: (ms: number) => Promise<unknown>
+} | null
 
-const reminders = new WeakMap<object, 'due' | 'told'>() // one per runtime: the suggest-level reminder
+/** The runtime's way to ask the service for a verdict, or null (a runtime without it: only known verdicts count). */
+function askOf(r: { session?: unknown; core?: { servedGate?(session: unknown, state: Obj): Promise<unknown> } }): AskGate | null {
+  const core = r.core
+  if (!core || typeof core.servedGate !== 'function') return null
+  return (s) => core.servedGate!(r.session, s)
+}
+
+const reminders = new WeakMap<object, { due: string } | 'told'>() // one per runtime: the suggest-level reminder
 
 /** register.ts tool.call: the deny reason for a main-agent file change while planning, or null (`agent` set: a
  * subagent's call, never held). Only at methods level "on" is anything held (small edits pass); at "suggest" a held
  * change is let through and one reminder goes with the next prompt. Other tools never wait for the runtime; the
- * check is capped at PHASE_WAIT_MS (late: the call goes on). Never throws. */
+ * check is capped at PHASE_WAIT_MS (late: the call goes on, and the verdict is kept for the next call). Never throws. */
 export async function holdWrite(rt: Promise<Runtime>, tool: unknown, input: Obj, cwd: () => Promise<string>, agent?: unknown): Promise<string | null> {
   if (agent || typeof tool !== 'string' || !WRITE_TOOLS.includes(tool)) return null // a subagent: never held
   try {
@@ -225,7 +242,7 @@ export async function holdWrite(rt: Promise<Runtime>, tool: unknown, input: Obj,
     if (!r || !canAsk()) return null
     const level = await levelNow()
     if (level === 'off') return null
-    const gate = toolGate(tool, input, {
+    const gate = gateCheck(tool, input, {
       active: async () => (await r.svc.authState()) === 'ok',
       cwd: async () => {
         try {
@@ -235,11 +252,14 @@ export async function holdWrite(rt: Promise<Runtime>, tool: unknown, input: Obj,
         }
       },
       read: r.readText,
+      ask: askOf(r),
+      level,
     })
-    const why = await Promise.race([gate, Promise.resolve(r.sleep(PHASE_WAIT_MS)).then(() => null, () => null)])
-    if (why === null) return null
-    if (level === 'on') return smallEdit(tool, input) ? null : why
-    if (!reminders.has(r)) reminders.set(r, 'due')
+    const late: Check = { why: null, small: null }
+    const got = await Promise.race([gate, Promise.resolve(r.sleep(PHASE_WAIT_MS)).then(() => late, () => late)])
+    if (got.why === null) return null
+    if (level === 'on') return smallEdit(tool, input, got.small) ? null : got.why
+    if (!reminders.has(r)) reminders.set(r, { due: got.why })
     return null
   } catch {
     return null
@@ -248,10 +268,10 @@ export async function holdWrite(rt: Promise<Runtime>, tool: unknown, input: Obj,
 
 /** The suggest-level reminder for this prompt, once per session (null when none is due). */
 function takeReminder(r: object | null): string | null {
-  if (!r || reminders.get(r) !== 'due') return null
-  const text = gateReminder()
-  if (text) reminders.set(r, 'told') // no served text yet: it stays due
-  return text
+  const due = r ? reminders.get(r) : undefined
+  if (!r || !due || due === 'told') return null
+  reminders.set(r, 'told')
+  return due.due
 }
 
 // ------------------------------------------------------------------ push by phase
@@ -342,6 +362,8 @@ export type PushDeps = {
   waitMs?: number
   // what this session was sent, kept across processes (SENT_KEY); without it the record lives in memory only
   seen?: { get(): Promise<Sent>; set(s: Sent): Promise<unknown> }
+  gate?: AskGate | null // the service's planning-gate verdict (running or not); absent: only verdicts already known
+  level?: () => Promise<GateLevel> // the methods level the verdict is asked for (default suggest)
 }
 
 type Batch = Promise<unknown[]>
@@ -414,6 +436,8 @@ export class LessonPush {
     void timer.then(() => { late = true })
     if (!(await this.d.active())) return null
     const sent = await this.load()
+    // the plan group goes with every phase: its fetch starts now, beside the verdict request, not after it
+    if (!this.checked.has('plan') && !this.batch.plan) this.batch.plan = this.fetch(['plan'])
     const group: Group = (await this.running(cwd)) ? 'run' : 'plan'
     let changed = false
     if (this.repush) {
@@ -467,7 +491,18 @@ export class LessonPush {
 
   private async running(cwd: () => Promise<string | null>): Promise<boolean> {
     const dir = await cwd().catch(() => null)
-    return typeof dir === 'string' && !!dir && isRunning(parseState(await this.d.read(statePath(dir))))
+    if (typeof dir !== 'string' || !dir) return false
+    const s = parseState(await this.d.read(statePath(dir)))
+    const level: GateLevel = this.d.level ? await this.d.level().catch((): GateLevel => 'suggest') : 'suggest'
+    if (this.d.gate) {
+      // kept per state: asked once. Waited at most half the prompt's window, so the phase fetch still fits in it; a
+      // later verdict is kept for the next prompt, and meanwhile the first line counts (isRunning)
+      let timer: ReturnType<typeof setTimeout> | undefined
+      const half = new Promise<void>((res) => { timer = setTimeout(res, (this.d.waitMs ?? PHASE_WAIT_MS) / 2) })
+      await Promise.race([askVerdict(gateState(s, level), this.d.gate), half])
+      if (timer) clearTimeout(timer)
+    }
+    return isRunning(s, level)
   }
 }
 
@@ -475,7 +510,10 @@ type PushStore = { get(key: string): Promise<unknown>; set(key: string, value: u
 type PushRuntime = {
   session: string
   svc: { authState(): Promise<string> }
-  core: { ask(tool: string, args: unknown, o: { session: unknown; harness?: unknown; cwd?: unknown }): Promise<Obj> }
+  core: {
+    ask(tool: string, args: unknown, o: { session: unknown; harness?: unknown; cwd?: unknown }): Promise<Obj>
+    servedGate?(session: unknown, state: Obj): Promise<unknown>
+  }
   readText: Read
   sleep: (ms: number) => Promise<unknown>
   store?: PushStore
@@ -501,6 +539,8 @@ function lessonPush(r: NonNullable<PushRuntime>): LessonPush {
       read: r.readText,
       sleep: r.sleep,
       seen: sentStore(r.store, r.session),
+      gate: askOf(r),
+      level: async () => ((await levelNow()) === 'on' ? 'on' : 'suggest'),
     })
     pushes.set(r, p)
   }

@@ -278,6 +278,7 @@ export class Svc {
   private ready: Promise<void> | null = null
   private claude: string | null = null
   private servedBind = new Map<string, string>()
+  private servedJitRefused = false // the service refused `jit` once and took the request without it: not sent again
 
   constructor(deps: Deps) {
     this.session = String(deps.session)
@@ -1139,17 +1140,30 @@ export class Svc {
   }
 
   /** One phase of a role's served items. The first successful fetch of (session_ref, role) binds this session to
-   * the version served; later fetches send it as the pin. The texts stay in memory (the result) only. */
-  async fetchServed(sessionRef: string, role: string, phase: string, hook: Hook = 'tool'): Promise<Result> {
+   * the version served; later fetches send it as the pin. The texts stay in memory (the result) only.
+   * `select` (black-box step 5): `jit` asks for the phase without its just-in-time items (a service that refuses the
+   * field, an older one, is asked once more without it, and not with it again in this process); `event` asks for only
+   * that event's items (no retry: without the field the answer would be the whole phase). */
+  async fetchServed(sessionRef: string, role: string, phase: string, hook: Hook = 'tool', state?: Record<string, unknown>,
+    select?: { jit?: boolean; event?: string }): Promise<Result> {
     const key = `${sessionRef}\n${role}`
     const s = await this.settings()
     const bound = this.servedBind.get(key)
     const pin = bound ?? (SERVED_ROLES.includes(role) ? s.served.pins[role] ?? null : null)
-    const body = { session_ref: sessionRef, role, phase, pinned_version: pin, channel: s.served.channel }
+    const body: Record<string, unknown> = { session_ref: sessionRef, role, phase, pinned_version: pin, channel: s.served.channel }
+    if (state) body.state = state // a planning-gate question (phase.ts): the verdict comes in `gate`, with no items
+    if (select?.event) body.event = select.event
+    else if (select?.jit && !this.servedJitRefused) body.jit = true
     let res = await this.call('POST', SERVED_ROUTE, body, { hook })
     if (!res.ok && res.status === 409 && res.error === 'session_required') {
       const opened = await this.call('POST', '/served/session', { session_ref: sessionRef, role }, { hook })
       if (opened.ok) res = await this.call('POST', SERVED_ROUTE, body, { hook })
+    }
+    if (!res.ok && res.status === 422 && body.jit === true) { // maybe an older service: the whole phase, as before
+      delete body.jit
+      res = await this.call('POST', SERVED_ROUTE, body, { hook })
+      // a 422 says only bad_request: `jit` was the field refused only when the same request passes without it
+      if (res.ok) this.servedJitRefused = true
     }
     if (!res.ok) return res
     const b: any = res.body
@@ -1163,7 +1177,8 @@ export class Svc {
     ) {
       return R(false, { status: res.status, error: 'bad_response', fallback: FALLBACKS.served, attempts: res.attempts })
     }
-    if (!this.servedBind.has(key)) this.servedBind.set(key, b.version)
+    // a planning-gate answer binds nothing: it can come without a served version (the version is then a stand-in)
+    if (!state && !this.servedBind.has(key)) this.servedBind.set(key, b.version)
     return res
   }
 

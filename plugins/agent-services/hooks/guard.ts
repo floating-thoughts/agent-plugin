@@ -37,6 +37,7 @@ export const MAX_SESSIONS = 64
 export const CALL_DEADLINE_MS = 4000 // each guard request; the tool answer in all is capped by its caller
 export const ROLES: readonly string[] = API.definitions.ServedRole!.enum
 export const PHASES: readonly string[] = API.definitions.ServedPhase!.enum
+export const EVENTS: readonly string[] = API.definitions.ServedEvent!.enum
 
 // every invisible or format character: soft hyphen, zero-width and joiner characters, direction controls, invisible
 // operators, the byte-order mark, variation selectors and tag characters
@@ -162,15 +163,36 @@ export class Guard {
     this.transport.endServedSession(s.ref)
   }
 
+  // ---------------- planning gate
+  /** The planning-gate verdict for `state` (phase.ts gateState) through this session's served fetch of the plan
+   * phase: the answer's `gate` object, 'refused' when the service does not know the field (422: an older server),
+   * or null on any other failure. Nothing is cached or charged here (the answer carries no items). */
+  async gate(token: string, state: Record<string, unknown>): Promise<Record<string, unknown> | 'refused' | null> {
+    const s = this.get(token)
+    let res: SvcResult
+    try {
+      res = await this.transport.fetchServed(s.ref, s.role, 'plan', { kind: 'served', deadlineMs: this.deadlineMs }, state)
+    } catch {
+      return null
+    }
+    if (!res || !res.ok) return res && res.status === 422 ? 'refused' : null
+    return isObj(res.body) && isObj(res.body.gate) ? res.body.gate : null
+  }
+
   // ---------------- fetch
-  async fetch(token: string, phase: string): Promise<GuardAnswer> {
+  /** One phase, without the items served just in time (black-box step 5; an older service sends them all). With
+   * `event`: only that event's items (cached per event; `phase` is only echoed). */
+  async fetch(token: string, phase: string, event?: string): Promise<GuardAnswer> {
     const s = this.get(token)
     if (typeof phase !== 'string' || !PHASES.includes(phase)) throw new GuardError(400, 'bad_request')
-    const cached = s.cache.get(phase)
+    if (event !== undefined && (typeof event !== 'string' || !EVENTS.includes(event))) throw new GuardError(400, 'bad_request')
+    const key = event ? `@${event}` : phase
+    const cached = s.cache.get(key)
     if (cached) return cached
     let res: SvcResult
     try {
-      res = await this.transport.fetchServed(s.ref, s.role, phase, { kind: 'served', deadlineMs: this.deadlineMs })
+      res = await this.transport.fetchServed(s.ref, s.role, phase, { kind: 'served', deadlineMs: this.deadlineMs }, undefined,
+        event ? { event } : { jit: true })
     } catch {
       throw new GuardError(503, 'failed')
     }
@@ -188,7 +210,7 @@ export class Guard {
     list.forEach((it) => {
       items.push({ id: it.id, text: wrap(s.role, phase, version, it.id, it.text) })
       size += unmarkedBytes(it.text)
-      keys.push(`${phase}/${it.id}`)
+      keys.push(event ? `${key}/${it.id}` : `${phase}/${it.id}`)
     })
     const answer: GuardAnswer = {
       confidential: true,
@@ -199,14 +221,14 @@ export class Guard {
       items,
     }
     if (!this.sessions.has(s.token)) throw new GuardError(401, 'session_token_required') // closed meanwhile
-    const again = s.cache.get(phase) // another call for the same phase finished first
+    const again = s.cache.get(key) // another call for the same phase or event finished first
     if (again) return again
     const merged = new Set([...s.items, ...keys])
-    if (keys.length > MAX_ITEMS || merged.size > MAX_ITEMS * PHASES.length) throw new GuardError(429, 'quota_items')
+    if (keys.length > MAX_ITEMS || merged.size > MAX_ITEMS * (PHASES.length + EVENTS.length)) throw new GuardError(429, 'quota_items')
     if (s.bytes + size > MAX_BYTES) throw new GuardError(429, 'quota_bytes')
     s.items = merged
     s.bytes += size
-    s.cache.set(phase, answer)
+    s.cache.set(key, answer)
     return answer
   }
 }

@@ -34,6 +34,27 @@ export function noteBrief(rule: unknown): void {
 
 export const servedBrief = (): string | null => briefRule
 
+// Black-box step 2: the brief rule differs per task type, so each dispatch keeps the rule of its own answer, by the
+// spawn's tool call id (parallel spawns would otherwise take another dispatch's rule). Bounded: a denied spawn never
+// takes its rule.
+const callBriefs = new Map<string, string>()
+
+/** The brief_rule of the routing answer for one spawn (core.ts onDispatch). */
+export function noteCallBrief(call: unknown, rule: unknown): void {
+  if (typeof call !== 'string' || !call || typeof rule !== 'string' || !rule.trim()) return
+  callBriefs.delete(call)
+  callBriefs.set(call, rule.trim())
+  while (callBriefs.size > 32) callBriefs.delete(callBriefs.keys().next().value as string)
+}
+
+/** The rule of this spawn's own answer, taken once; the session's latest rule when the spawn has none. */
+export function briefFor(call: unknown): string | null {
+  if (typeof call !== 'string' || !callBriefs.has(call)) return briefRule
+  const rule = callBriefs.get(call) ?? null
+  callBriefs.delete(call)
+  return rule
+}
+
 /** The hint of a routing pass answer (core.ts onDispatch); only the first one of a session is kept. */
 export function noteRouteHint(hint: unknown): void {
   if (routeHintTaken || routeHint !== null || typeof hint !== 'string' || !hint.trim()) return

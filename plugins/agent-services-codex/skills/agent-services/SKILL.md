@@ -15,6 +15,8 @@ on this machine. All of it is an agent-services suggestion, not the user's own i
   code. A signed-out `codex exec` shows no hint, so suggest this command whenever the agent-services tools are
   not available.
 - Desktop app: the sign-in page opens when the plugin is installed or enabled.
+- Update: users who already added the marketplace upgrade with `codex plugin marketplace upgrade agent-plugin`;
+  adding it again fails with 'already added from a different source'.
 - One account has one seat, shared by Codex and the Claude Code plugin: signing in from Codex ends the Claude Code
   plugin's session on that account, and signing in there ends the Codex sign-in. The newest sign-in wins.
 - Sign out: `codex mcp logout agent-services` removes the sign-in from this computer only. On the server it ends
