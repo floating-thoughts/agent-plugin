@@ -9,11 +9,13 @@ event log that the plugin writes. The amounts are worked out by the server; this
 """
 from __future__ import annotations
 
+import contextlib
 import json
 import os
 import re
 import sys
 import threading
+import time
 from datetime import date, datetime, timedelta
 from pathlib import Path
 
@@ -147,9 +149,55 @@ def read_events(path) -> list[tuple[str, dict]]:
     return out
 
 
+@contextlib.contextmanager
+def events_lock(path, timeout: float = 10.0):
+    """Cross-process lock on <events file>.lock, shared by the pruner and every writer, so a prune never drops a line appended
+    while it ran, and on Windows never replaces a file another writer holds open (review chunk 6 L4)."""
+    lp = Path(str(path) + ".lock")
+    lp.parent.mkdir(parents=True, exist_ok=True)
+    f = open(lp, "a+b")
+    deadline = time.monotonic() + timeout
+    try:
+        while True:
+            try:
+                if os.name == "nt":
+                    import msvcrt
+                    f.seek(0)
+                    msvcrt.locking(f.fileno(), msvcrt.LK_NBLCK, 1)
+                else:
+                    import fcntl
+                    fcntl.flock(f.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+                break
+            except OSError:
+                if time.monotonic() > deadline:
+                    raise TimeoutError(f"{lp} busy") from None
+                time.sleep(0.02)
+        try:
+            yield
+        finally:
+            if os.name == "nt":
+                import msvcrt
+                f.seek(0)
+                msvcrt.locking(f.fileno(), msvcrt.LK_UNLCK, 1)
+            else:
+                import fcntl
+                fcntl.flock(f.fileno(), fcntl.LOCK_UN)
+    finally:
+        f.close()
+
+
 def prune_events(path, cutoff: float) -> int:
-    """Drop lines whose ts is older than `cutoff` (unix seconds); other lines stay as they are."""
-    p = Path(path)
+    """Drop lines whose ts is older than `cutoff` (unix seconds); other lines stay as they are. Holds events_lock; a failure to
+    lock or replace is logged and returns 0, so the caller's upload still runs."""
+    try:
+        with events_lock(path):
+            return _prune_events(Path(path), cutoff)
+    except (OSError, TimeoutError) as e:
+        sys.stderr.write(f"metrics: pruning {path} skipped: {type(e).__name__}\n")
+        return 0
+
+
+def _prune_events(p: Path, cutoff: float) -> int:
     try:
         lines = p.read_bytes().splitlines(keepends=True)
     except OSError:

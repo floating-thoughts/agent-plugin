@@ -8,7 +8,8 @@ CLI: `python -m host.services <serve|ensure|login start|login finish|logout|stat
 served status|pin|unpin|channel> --data-dir D [--keystore os|memory] [--allow-plain-loopback]`. Every command but `serve` runs `ensure` first and
 talks to the per-user daemon over loopback with the local token from connector.json. `connect --endpoint URL
 --server-key K [--server-key K2] [--e2e-key E [--e2e-key E2]] [--pin-sha256 HEX ...]` writes client.json (checked first) and stops a running
-daemon so the next command starts one with the new config; it is the only command that needs no client.json.
+daemon so the next command starts one with the new config. Without client.json the shipped production config
+host/client_defaults.json is used (`connect` overrides it).
 
 One daemon serves every shell that uses the same data dir. connector.json and GET /local/status name the daemon's
 shell version and code root; `ensure` replaces a running daemon only as `replace_daemon` says (a release shell
@@ -19,7 +20,7 @@ the device private key, the raw Claude accountUuid, the plugin update token (`di
 process's memory only; the outbox line has it as "[redacted]"; the daemon hands it out only on the local route
 POST /local/dist/token, to the plugin updater's read-only credential helper).
 
-client.json (<data dir>/services/client.json; `connect` writes it) has one of two forms:
+client.json (<data dir>/services/client.json; `connect` writes it; absent, host/client_defaults.json) has one of two forms:
   direct:  {"endpoint": "https://<IPv4>:<port>", "pin": {"kind": "cert_sha256", "sha256": [1-2 hex]}}
            (the server's own self-signed certificate is pinned; "server_keys" and "e2e_keys" optional)
   tunnel:  {"endpoint": "https://<hostname>[:<port>]", "pin": {"kind": "ca"}, "server_keys": [1-2 base64],
@@ -32,7 +33,10 @@ stale is never used: the request fails and the gate closes with reason "unverifi
 edge's own page, counts as an unreachable server and is backed off). Nothing ever falls back to an unverified answer.
 With "e2e_keys" set (it needs "server_keys"), the token, the device signature, the request and the answer are sealed
 to the first listed key, so the edge sees only the outer path category and ciphertext; there is no plaintext fallback.
-The token is bound to the endpoint it was issued by: a client.json naming another endpoint drops it (sign in again).
+The sign-in is bound to the endpoint, pins, server keys and e2e keys it was made with (client_fingerprint): a
+client.json that changes any of them drops it with the device binding (sign in again); `connect` says so.
+The daemon proves each answer to its local clients (httpbase.daemon_proof over the client's nonce); a client
+never uses an answer without it, so a process on the port of a stale connector.json is never the daemon.
 """
 from __future__ import annotations
 
@@ -56,7 +60,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-from host import e2e
+from host import e2e, httpbase
 from host.jsonschema_lite import check_schema, load_contract
 from host.services_keystore import KeyStore, KeyStoreUnavailable, MemoryKeyStore, default_keystore
 
@@ -207,9 +211,47 @@ NOTICE_TEXT = {
                     "and retries on its own.",
     "server_unverified": "agent-services stopped: an answer was not signed by the server's key, so it was not used "
                          "(a proxy or a fake server may be in the way). It tries again at the next session.",
-    "endpoint_changed": "The agent-services address in client.json changed, so the old sign-in was dropped; sign in "
-                        "again with /agent-services.",
+    "endpoint_changed": "The agent-services address or server keys in client.json changed, so this machine was "
+                        "signed out; sign in again with /agent-services.",
 }
+
+# Dropped when the sign-in no longer belongs to client.json (its fingerprint changed): the sign-in and the device
+# binding (a new sign-in registers a fresh device key with whichever server client.json now names).
+SIGN_OUT_NAMES = ("token", "token_next", "account_id", "plan", "expires_at", "device_key", "device_id", "endpoint")
+# Top-level request fields never written to the outbox (the sign-in code and anything token-like)
+REQUEST_SECRET = ("code", "token", "token_hash", "new_token_hash", "device_key", "password", "secret")
+
+
+def client_fingerprint(c: dict) -> str | None:
+    """The identity a sign-in is bound to: a hash of a parsed client.json's endpoint, certificate pins, server signing
+    keys and end-to-end keys (key store name "endpoint"). None for the plain loopback form (tests only)."""
+    if c.get("scheme") != "https":
+        return None
+    doc = {"endpoint": f"{c['scheme']}://{c['host']}:{c['port']}", "ca": bool(c.get("ca")),
+           "pins": sorted(str(x).lower() for x in c.get("pins") or []),
+           "server_keys": sorted(base64.b64encode(r).decode("ascii") for r in (c.get("server_keys") or {}).values()),
+           "e2e_keys": [base64.b64encode(r).decode("ascii") for r in (c.get("e2e_keys") or {}).values()]}
+    return "fp1:" + hashlib.sha256(json.dumps(doc, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
+
+
+def sign_out_keystore(ks: KeyStore) -> bool:
+    """Drop the sign-in and the device binding (SIGN_OUT_NAMES). True when a token was stored. Best effort per name."""
+    try:
+        had = bool(ks.get("token"))
+    except KeyStoreUnavailable:
+        had = True
+    for n in SIGN_OUT_NAMES:
+        try:
+            ks.delete(n)
+        except KeyStoreUnavailable:
+            pass
+    return had
+
+
+def _private_dirs(data_dir) -> Path:
+    """<data dir> and <data dir>/services, created (or narrowed) readable by the current user only."""
+    httpbase.private_dir(Path(data_dir))
+    return httpbase.private_dir(services_dir(data_dir))
 
 
 def claude_hash(path=None) -> str:
@@ -604,8 +646,7 @@ class Connector:
         self.client_version = client_version or "0.0.0"
         self._ca_file = ca_file   # tests only: trust this CA file instead of the system store (hostname endpoints)
         self._parse_config(config, allow_plain_loopback)
-        self._dir = services_dir(self.data_dir)
-        self._dir.mkdir(parents=True, exist_ok=True)
+        self._dir = _private_dirs(self.data_dir)
         self._io_lock = threading.Lock()
         self._state_lock = threading.Lock()
         self._rot_lock = threading.Lock()
@@ -630,27 +671,24 @@ class Connector:
         self._prune_outbox()
 
     def _bind_endpoint(self) -> None:
-        """The token belongs to the endpoint that issued it. A stored token from another endpoint (client.json was
-        changed, by `connect` or by hand) is dropped before anything is sent, so it never reaches a different server.
-        A token stored before endpoints were recorded is adopted for the current endpoint."""
-        if self._endpoint_id is None:
+        """The sign-in belongs to the server that issued it: client.json's endpoint, pins, signing keys and end-to-end
+        keys (client_fingerprint, key store name "endpoint"). A stored sign-in bound to another fingerprint (client.json
+        was changed by hand; `connect` signs out itself) is dropped with the device binding before anything is sent,
+        so it never reaches a different server or keys. A sign-in stored before bindings were recorded, or bound by an
+        older shell to the bare endpoint that is still the current one, is adopted for the current fingerprint."""
+        if self._bind_id is None:
             return
         try:
             tok, bound = self.ks.get("token"), self.ks.get("endpoint")
             if not tok:
                 return
-            if bound is None:
-                self.ks.set("endpoint", self._endpoint_id)
+            if bound is None or bound == self._endpoint_id:
+                self.ks.set("endpoint", self._bind_id)
                 return
         except KeyStoreUnavailable:
             return
-        if bound != self._endpoint_id:
-            self._drop_token()
-            for n in ("plan", "expires_at"):
-                try:
-                    self.ks.delete(n)
-                except KeyStoreUnavailable:
-                    pass
+        if bound != self._bind_id:
+            sign_out_keystore(self.ks)
             self._notice("endpoint_changed")
 
     # ---------------- config and settings
@@ -662,6 +700,7 @@ class Connector:
         self._e2e_send = c["e2e_send"]         # raw X25519 key requests are sealed to; None = no envelope
         # the token is bound to this; the plain loopback form (tests only) is not bound
         self._endpoint_id = f"{c['scheme']}://{c['host']}:{c['port']}" if c["scheme"] == "https" else None
+        self._bind_id = client_fingerprint(c)   # endpoint + pins + server keys + e2e keys
 
     def _settings_path(self) -> Path:
         return self._dir / "settings.json"
@@ -689,7 +728,8 @@ class Connector:
     def _save_settings(self) -> None:
         p = self._settings_path()
         tmp = p.with_suffix(".tmp")
-        tmp.write_text(json.dumps(self._settings, indent=1), encoding="utf-8")
+        with httpbase.open_private(tmp, "w") as f:
+            f.write(json.dumps(self._settings, indent=1))
         os.replace(tmp, p)
 
     @property
@@ -849,6 +889,12 @@ class Connector:
         body = {"session_ref": session_ref, "role": role, "phase": phase, "pinned_version": pin,
                 "channel": self.served_channel}
         res = self.call("POST", SERVED_ROUTE, body)
+        if not res.ok and res.status == 409 and res.error == "session_required":
+            # a caller without the guard (which opens it first): open the server session, which answers the same
+            # on a repeat, then fetch once more; the session material in the answer is not kept here
+            opened = self.call("POST", "/served/session", {"session_ref": session_ref, "role": role})
+            if opened.ok:
+                res = self.call("POST", SERVED_ROUTE, body)
         if not res.ok:
             return res
         b = res.body
@@ -953,12 +999,26 @@ class Connector:
         except KeyStoreUnavailable:
             return None
 
-    def _drop_token(self) -> None:
+    def _drop_token(self) -> bool:
+        """Delete the token and the next token; False when the key store refused a delete (it may still hold one)."""
+        ok = True
         for n in ("token", "token_next"):
             try:
                 self.ks.delete(n)
             except KeyStoreUnavailable:
-                pass
+                ok = False
+        return ok
+
+    def _promote_next(self) -> None:
+        """The server accepted token_next (a rotation it committed but whose answer was lost): it becomes the token."""
+        nxt = self._ks_get("token_next")
+        if not nxt:
+            return
+        try:
+            self.ks.set("token", nxt)
+            self.ks.delete("token_next")
+        except KeyStoreUnavailable:
+            pass
 
     def _expires_at(self) -> float | None:
         v = self._ks_get("expires_at")
@@ -980,8 +1040,25 @@ class Connector:
     def _append(self, path: Path, rec: dict) -> None:
         line = json.dumps(rec, ensure_ascii=False) + "\n"
         with self._io_lock:
-            with open(path, "a", encoding="utf-8", newline="\n") as f:
+            with httpbase.open_private(path, "a") as f:
                 f.write(line)
+
+    @staticmethod
+    def _redact_request(text: str | None) -> str | None:
+        """The outbox copy of a request body: top-level REQUEST_SECRET fields (the sign-in code, token hashes) become
+        "[redacted]". A body that is not a JSON object is kept as sent."""
+        if not text:
+            return text
+        try:
+            obj = json.loads(text)
+        except ValueError:
+            return text
+        if not isinstance(obj, dict) or not any(k in obj for k in REQUEST_SECRET):
+            return text
+        for k in REQUEST_SECRET:
+            if k in obj:
+                obj[k] = "[redacted]"
+        return json.dumps(obj, ensure_ascii=False, separators=(",", ":"))
 
     @staticmethod
     def _redact(text: str | None, fields) -> str | None:
@@ -1003,7 +1080,7 @@ class Connector:
     def _outbox(self, *, service, method, route, body_text, status, response_text, error, preview=False):
         self._append(outbox_path(self.data_dir), {
             "ts": _iso(self.clock.now()), "service": service, "method": method, "route": route[:120],
-            "preview": preview, "body_text": body_text, "status": status,
+            "preview": preview, "body_text": self._redact_request(body_text), "status": status,
             "response_text": None if response_text is None else response_text[:TEXT_LIMIT],
             "error": None if error is None else str(error)[:300]})
 
@@ -1031,7 +1108,7 @@ class Connector:
                     keep.append(ln if ln.endswith("\n") else ln + "\n")
             if len(keep) != len(lines):
                 tmp = p.with_suffix(".tmp")
-                with open(tmp, "w", encoding="utf-8", newline="\n") as f:
+                with httpbase.open_private(tmp, "w") as f:
                     f.writelines(keep)
                 os.replace(tmp, p)
 
@@ -1124,6 +1201,7 @@ class Connector:
         attempts = 0
         last: Result | None = None
         t0 = time.monotonic()
+        use_next = False   # after a 401 with the token: token_next once (a rotation whose answer was lost)
         while True:
             remaining = deadline.remaining()
             if remaining <= 0:
@@ -1133,7 +1211,7 @@ class Connector:
             if method == "POST":
                 headers["Content-Type"] = "application/json"
             if signed:
-                token = self._ks_get("token")
+                token = self._ks_get("token_next" if use_next else "token")
                 if not token:
                     last = Result(False, error="not_logged_in", attempts=attempts)
                     break
@@ -1235,12 +1313,17 @@ class Connector:
                 logged = self._redact(logged, secret)
             self._outbox(service=service, method=method, route=wire_path.split("?", 1)[0],
                          body_text=body_text, status=status, response_text=logged, error=None)
+            if use_next and status != 401:
+                self._promote_next()
             if 200 <= status < 300:
                 last = Result(True, status, parsed, None, None, attempts)
                 self._unthrottle()
                 break
             code = _error_code(parsed, status)
             last = Result(False, status, parsed, code, None, attempts)
+            if status == 401 and signed and not use_next and self._ks_get("token_next"):
+                use_next = True
+                continue
             if status == 401 and signed:
                 self._dist_cache = None
                 self._reset_plan()
@@ -1376,8 +1459,8 @@ class Connector:
         if res.ok and isinstance(res.body, dict):
             b = res.body
             self.ks.set("token", token)
-            if self._endpoint_id is not None:
-                self.ks.set("endpoint", self._endpoint_id)
+            if self._bind_id is not None:
+                self.ks.set("endpoint", self._bind_id)
             self.ks.delete("token_next")
             for n in ("account_id", "plan", "expires_at"):
                 if b.get(n) is not None:
@@ -1409,13 +1492,15 @@ class Connector:
             res = g
         self._dist_cache = None
         self._reset_plan()
-        self._drop_token()
+        dropped = self._drop_token()
         for n in ("account_id", "plan", "expires_at"):
             try:
                 self.ks.delete(n)
             except KeyStoreUnavailable:
                 pass
         self._set_gate("login")
+        if not dropped:   # the key store may still hold the token: never report a sign-out that did not happen
+            return Result(False, error="keystore_unavailable")
         return res
 
     # ---------------- plan
@@ -1497,7 +1582,8 @@ class Connector:
             if exp is None or exp - ROTATE_MARGIN > self.clock.now():
                 return None
             try:
-                new = secrets.token_urlsafe(32)
+                # an earlier rotation the server may have committed (its answer lost) is offered again, not replaced
+                new = self._ks_get("token_next") or secrets.token_urlsafe(32)
                 self.ks.set("token_next", new)
                 res = self._exchange("POST", PREFIX + "/auth/rotate",
                                      _dumps({"new_token_hash": hashlib.sha256(new.encode()).hexdigest()}),
@@ -1505,10 +1591,11 @@ class Connector:
                 if res.ok and isinstance(res.body, dict) and res.body.get("expires_at") is not None:
                     self.ks.set("token", new)
                     self.ks.set("expires_at", str(res.body["expires_at"]))
-                try:
-                    self.ks.delete("token_next")
-                except KeyStoreUnavailable:
-                    pass
+                    try:
+                        self.ks.delete("token_next")
+                    except KeyStoreUnavailable:
+                        pass
+                # not confirmed: token_next stays; a 401 with the token tries it once (_exchange) and promotes it
                 if res.status == 401 or self._blocked():
                     return res.error
                 return None
@@ -1672,8 +1759,14 @@ def _connector_json(data_dir) -> Path:
     return services_dir(data_dir) / "connector.json"
 
 
-def _load_client_config(data_dir) -> dict:
+def _load_client_config(data_dir, defaults: bool = False) -> dict:
+    """<data dir>/services/client.json; with `defaults`, the shipped production config (client_defaults.json next to
+    this file) when there is no client.json, so a fresh install signs in without `connect`. A client.json always wins
+    (`connect` writes one to override), and one identical to the defaults has the same client_fingerprint, so the
+    sign-in survives writing or removing it."""
     p = services_dir(data_dir) / "client.json"
+    if defaults and not p.exists():
+        p = Path(__file__).with_name("client_defaults.json")
     return json.loads(p.read_text(encoding="utf-8"))
 
 
@@ -1692,7 +1785,7 @@ class _Lock:
         self.f = None
 
     def acquire(self) -> bool:
-        self.path.parent.mkdir(parents=True, exist_ok=True)
+        httpbase.private_dir(self.path.parent)
         f = open(self.path, "a+b")
         try:
             if os.name == "nt":
@@ -1773,18 +1866,27 @@ def _session_args(path: str, body: dict):
                       "prior_durations": prior})
 
 
+DAEMON_SOCKET_TIMEOUT = 5.0   # seconds a daemon connection may sit idle (reading a request, writing an answer)
+DAEMON_MAX_HANDLERS = 32      # concurrent daemon connections; more are closed unanswered
+
+
+class _DaemonServer(httpbase.ExclusiveHTTPServer):
+    """The daemon's server: port-exclusive (no second bind on its port) with a cap on concurrent handlers."""
+    max_handlers = DAEMON_MAX_HANDLERS
+
+
 def serve(data_dir, keystore_kind="os", allow_plain_loopback=False) -> int:
-    from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
-    from host.httpbase import restrict_file
+    from http.server import BaseHTTPRequestHandler
 
     data_dir = Path(data_dir)
+    _private_dirs(data_dir)
     lock = _Lock(services_dir(data_dir) / "connector.lock")
     if not lock.acquire():
         return 0
     try:
         try:
             ks = _make_keystore(keystore_kind)
-            conn = Connector(data_dir, ks, _load_client_config(data_dir), allow_plain_loopback=allow_plain_loopback,
+            conn = Connector(data_dir, ks, _load_client_config(data_dir, defaults=True), allow_plain_loopback=allow_plain_loopback,
                              gate=True)
         except KeyStoreUnavailable:
             print(json.dumps({"error": "keystore_unavailable"}))
@@ -1809,6 +1911,8 @@ def serve(data_dir, keystore_kind="os", allow_plain_loopback=False) -> int:
 
         class H(BaseHTTPRequestHandler):
             server_version = "agent-connector"
+            timeout = DAEMON_SOCKET_TIMEOUT   # an idle or trickling connection is dropped, never held
+            _authed = False
 
             def log_message(self, *a):
                 pass
@@ -1818,16 +1922,24 @@ def serve(data_dir, keystore_kind="os", allow_plain_loopback=False) -> int:
                 self.send_response(code)
                 self.send_header("Content-Type", "application/json")
                 self.send_header("Content-Length", str(len(data)))
+                nonce = self.headers.get(httpbase.NONCE_HEADER) if self._authed else None
+                if httpbase.valid_nonce(nonce):
+                    # proves this answer comes from the holder of connector.json's token (httpbase.daemon_proof)
+                    self.send_header(httpbase.PROOF_HEADER, httpbase.daemon_proof(local_token, nonce, code,
+                                                                                  self.command, self.path, data))
                 self.end_headers()
                 self.wfile.write(data)
 
             def _handle(self, method):
+                self._authed = False
                 path = self.path.split("?", 1)[0]
                 # the guard's session routes (all but open) carry X-Session-Token, not the owner token
                 guarded = path.startswith("/session/served/") and path != "/session/served/open"
                 tok = self.headers.get("X-Connector-Token") or ""
-                if not guarded and not hmac.compare_digest(tok.encode(), local_token.encode()):
+                authed = hmac.compare_digest(tok.encode(), local_token.encode())
+                if not guarded and not authed:
                     return self._send(401, {"error": "auth_required"})
+                self._authed = authed
                 try:
                     n = int(self.headers.get("Content-Length") or 0)
                 except ValueError:
@@ -1973,15 +2085,18 @@ def serve(data_dir, keystore_kind="os", allow_plain_loopback=False) -> int:
             def do_PUT(self):
                 self._safe("PUT")
 
-        srv = ThreadingHTTPServer(("127.0.0.1", 0), H)
-        srv.daemon_threads = True
+        srv = _DaemonServer(("127.0.0.1", 0), H)
         cj = _connector_json(data_dir)
-        tmp = cj.with_suffix(".tmp")
-        tmp.write_text(json.dumps({"pid": os.getpid(), "port": srv.server_address[1], "token": local_token,
-                                   "shell": SHELL_VERSION, "root": str(ROOT)}), encoding="utf-8")
-        restrict_file(tmp)
-        os.replace(tmp, cj)
-        restrict_file(cj)
+        try:
+            # O_EXCL tmp with mode 0o600 (Windows: ACL narrowed to this user's SID first), then renamed
+            httpbase.write_secret(cj, json.dumps({"pid": os.getpid(), "port": srv.server_address[1],
+                                                  "token": local_token, "shell": SHELL_VERSION,
+                                                  "root": str(ROOT)}).encode("utf-8"))
+        except OSError:
+            srv.server_close()
+            tick_stop.set()
+            print(json.dumps({"error": "connector_file"}))
+            return 1
         try:
             srv.serve_forever(poll_interval=0.2)
         finally:
@@ -1998,18 +2113,33 @@ def serve(data_dir, keystore_kind="os", allow_plain_loopback=False) -> int:
         lock.release()
 
 
-def _local(data_dir, method, path, body=None, timeout=60.0, info=None):
+class DaemonUnverified(OSError):
+    """connector.json names a process that is gone, or the answer on its port carries no valid proof (httpbase.
+    daemon_proof): a stale file whose port another process may hold. Callers treat it as no daemon."""
+
+
+def _local(data_dir, method, path, body=None, timeout=60.0, info=None, *, verify=True):
     info = info or json.loads(_connector_json(data_dir).read_text(encoding="utf-8"))
+    token = info["token"]
+    if not isinstance(token, str):
+        raise ValueError("bad connector.json")
+    if verify and not httpbase.pid_alive(info.get("pid")):
+        raise DaemonUnverified("daemon_gone")
+    nonce = secrets.token_hex(16)
     conn = http.client.HTTPConnection("127.0.0.1", int(info["port"]), timeout=timeout)
     try:
-        headers = {"X-Connector-Token": info["token"]}
+        headers = {"X-Connector-Token": token, httpbase.NONCE_HEADER: nonce}
         data = None
         if body is not None:
             data = json.dumps(body).encode("utf-8")
             headers["Content-Type"] = "application/json"
         conn.request(method, path, body=data, headers=headers)
         r = conn.getresponse()
-        return r.status, json.loads(r.read() or b"{}")
+        raw = r.read()
+        if verify and not httpbase.proof_ok(token, nonce, r.status, method, path, raw,
+                                            r.getheader(httpbase.PROOF_HEADER)):
+            raise DaemonUnverified("unverified_answer")
+        return r.status, json.loads(raw or b"{}")
     finally:
         conn.close()
 
@@ -2141,12 +2271,40 @@ def _stop_daemon(data_dir, info: dict, status: dict, end: float) -> bool:
     return _until(end, free)
 
 
+def _retire_unproven(data_dir, end: float) -> None:
+    """No daemon proved itself (_probe), yet connector.json names a live pid and connector.lock is held: a daemon of
+    an older shell that sends no answer proof. It is asked to stop (POST /local/stop with its token; the answer is not
+    used) so this code can start one. A stale file (dead pid, lock free) needs nothing: the new daemon replaces it."""
+    try:
+        info = json.loads(_connector_json(data_dir).read_text(encoding="utf-8"))
+        if not isinstance(info, dict) or not httpbase.pid_alive(info.get("pid")):
+            return
+    except (OSError, ValueError):
+        return
+    lock = _Lock(services_dir(data_dir) / "connector.lock")
+
+    def free() -> bool:
+        if not lock.acquire():
+            return False
+        lock.release()
+        return True
+    if free():
+        return
+    try:
+        _local(data_dir, "POST", "/local/stop", {}, timeout=5, info=info, verify=False)
+    except (OSError, ValueError, KeyError, TypeError, http.client.HTTPException):
+        return
+    _until(min(end, time.monotonic() + 10), free)
+
+
 def ensure(data_dir, keystore_kind="os", allow_plain_loopback=False, wait=20.0, *, start=True) -> dict | None:
     """The running daemon of `data_dir` as {"pid", "port"}. One whose version `replace_daemon` says this caller
     replaces is stopped and one is started from this code; none running -> one is started from this code (with
-    start=False -> None). Callers take turns on ensure.lock, so two shells never stop or start a daemon at once."""
+    start=False -> None). Only a daemon that proves it holds connector.json's token counts as running (_local), so a
+    process on the port of a stale connector.json is never reported. Callers take turns on ensure.lock, so two
+    shells never stop or start a daemon at once."""
     end = time.monotonic() + wait
-    services_dir(data_dir).mkdir(parents=True, exist_ok=True)
+    _private_dirs(data_dir)
     turn = _Lock(services_dir(data_dir) / "ensure.lock")
     held = _until(end, turn.acquire)   # not had in time (a stuck caller): go on without it
     try:
@@ -2181,6 +2339,7 @@ def _ensure(data_dir, keystore_kind, allow_plain_loopback, end: float, start: bo
         return {"pid": p[0]["pid"], "port": p[0]["port"]}
     if not start:
         return None
+    _retire_unproven(data_dir, end)
     argv = [sys.executable, "-m", "host.services", "serve", "--data-dir", str(data_dir),
             "--keystore", keystore_kind]
     if allow_plain_loopback:
@@ -2206,12 +2365,14 @@ def _ensure(data_dir, keystore_kind, allow_plain_loopback, end: float, start: bo
     raise RuntimeError("daemon_timeout")
 
 
-def connect(data_dir, endpoint, server_keys, pins, e2e_keys=None) -> tuple[dict, int]:
+def connect(data_dir, endpoint, server_keys, pins, e2e_keys=None, keystore=None) -> tuple[dict, int]:
     """Write <data dir>/services/client.json for `endpoint` (hostname: pin ca; IPv4: pin cert_sha256 with `pins`) and
     the server's public keys (signing: `server_keys`; end-to-end envelope: `e2e_keys`, or server_keys entries written
     "e2e:<key>"), after the same check the daemon applies; then stop a running daemon so the next command starts one
-    with it. -> (answer, exit code). The keys are public; nothing secret is read or written. A different endpoint
-    makes the daemon drop the stored sign-in when it starts (Connector._bind_endpoint)."""
+    with it. -> (answer, exit code). The keys are public; nothing secret is written. A sign-in belongs to the
+    endpoint, pins and keys it was made with (client_fingerprint): when any of them changes, this machine is signed
+    out (token and device binding dropped from `keystore` now, and by the daemon when it starts in any case) and the
+    answer says so ("signed_out": true, "notice"), so a key rotation through `connect` needs a new sign-in."""
     if not isinstance(endpoint, str) or not endpoint:
         return {"error": "bad_client_config", "detail": "--endpoint is required"}, 1
     endpoint = endpoint.strip().rstrip("/").lower()   # host names are case-insensitive; the check wants lowercase
@@ -2231,18 +2392,37 @@ def connect(data_dir, endpoint, server_keys, pins, e2e_keys=None) -> tuple[dict,
         parse_client_config(cfg)
     except ValueError as e:
         return {"error": "bad_client_config", "detail": str(e)}, 1
-    d = services_dir(data_dir)
-    d.mkdir(parents=True, exist_ok=True)
+    d = _private_dirs(data_dir)
     path = d / "client.json"
+    try:
+        old = client_fingerprint(parse_client_config(json.loads(path.read_text(encoding="utf-8")), True))
+    except (OSError, ValueError, TypeError, AttributeError):
+        old = None
+    new = client_fingerprint(parse_client_config(cfg))
     tmp = path.with_name("client.json.tmp")
     tmp.write_text(json.dumps(cfg, indent=1) + "\n", encoding="utf-8")
     os.replace(tmp, path)
     p = _probe(data_dir)
     stopped = bool(p) and _stop_daemon(data_dir, p[0], p[1], time.monotonic() + 10)
-    return {"ok": True, "endpoint": endpoint, "pin": cfg["pin"]["kind"],
-            "server_keys": [_key_id(base64.b64decode(k)) for k in cfg.get("server_keys", [])],
-            "e2e_keys": [e2e.key_id(base64.b64decode(k)) for k in cfg.get("e2e_keys", [])],
-            "daemon_stopped": stopped}, 0
+    signed_out = False
+    if old is not None and old != new:
+        signed_out = True   # the daemon's _bind_endpoint drops it at its start even without a key store here
+        if keystore is not None:
+            sign_out_keystore(keystore)
+    elif old is None and keystore is not None:
+        try:
+            bound = keystore.get("endpoint") if keystore.get("token") else None
+        except KeyStoreUnavailable:
+            bound = None
+        if bound is not None and bound != new:
+            signed_out = sign_out_keystore(keystore)
+    ans = {"ok": True, "endpoint": endpoint, "pin": cfg["pin"]["kind"],
+           "server_keys": [_key_id(base64.b64decode(k)) for k in cfg.get("server_keys", [])],
+           "e2e_keys": [e2e.key_id(base64.b64decode(k)) for k in cfg.get("e2e_keys", [])],
+           "daemon_stopped": stopped, "signed_out": signed_out}
+    if signed_out:
+        ans["notice"] = NOTICE_TEXT["endpoint_changed"]
+    return ans, 0
 
 
 def main(argv=None) -> int:
@@ -2277,7 +2457,13 @@ def main(argv=None) -> int:
     if a.cmd == "serve":
         return serve(data_dir, a.keystore, a.allow_plain_loopback)
     if a.cmd == "connect":
-        return out(*connect(data_dir, a.endpoint, a.server_key, a.pin_sha256, a.e2e_key))
+        ks = None
+        if a.keystore == "os":   # memory: the daemon's sign-in ends with the daemon, which connect stops
+            try:
+                ks = default_keystore()
+            except KeyStoreUnavailable:
+                ks = None
+        return out(*connect(data_dir, a.endpoint, a.server_key, a.pin_sha256, a.e2e_key, keystore=ks))
     try:
         info = ensure(data_dir, a.keystore, a.allow_plain_loopback)
     except RuntimeError as e:

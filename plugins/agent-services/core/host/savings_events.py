@@ -16,7 +16,7 @@ import time
 from datetime import datetime, timezone
 from pathlib import Path
 
-from host.metrics import EVENTS_KEEP_DAYS, events_path
+from host.metrics import EVENTS_KEEP_DAYS, events_lock, events_path
 
 _LOCK = threading.Lock()   # one log per data dir; the daemon is threaded
 
@@ -100,7 +100,7 @@ class SavingsEvents:
     def _append(self, kind: str, now: float, fields: dict) -> None:
         line = json.dumps({"kind": kind, "ts": _iso(now), **fields}, ensure_ascii=False, separators=(",", ":"))
         self.path.parent.mkdir(parents=True, exist_ok=True)
-        with open(self.path, "a", encoding="utf-8", newline="\n") as f:
+        with events_lock(self.path), open(self.path, "a", encoding="utf-8", newline="\n") as f:   # shared with prune_events
             f.write(line + "\n")
 
     # ---------------------------------------------------------------- events

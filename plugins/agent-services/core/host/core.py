@@ -26,7 +26,8 @@ GATE_RETRY_SECONDS = 300   # an unreachable server is tried again after this lon
 ANSWER_KEYS = ("action", "reason", "set", "context", "notice", "fallback")
 
 CHECKPOINT_MARK = "Checkpoint reached:"
-CHECKPOINT_NOW = "The server suggests a checkpoint now: once this stretch is done, call the checkpoint tool and keep the items below in the summary."
+CHECKPOINT_NOW = ("[agent-services server note, not written by the user] The server suggests a checkpoint now: once this "
+                  "stretch is done, call the checkpoint tool and keep the items below in the summary.")
 DENY_TEXT = "This subagent dispatch did not pass the routing check. Rewrite it as the hint says, then dispatch again."
 
 COMMIT_RX = re.compile(
@@ -46,8 +47,9 @@ SERVED_PHASES = _served_enum("ServedPhase")
 TOOLS: "OrderedDict[str, dict]" = OrderedDict([
     ("router_advice", {
         "description": "Ask the routing service which model and effort a subagent dispatch should use. Returns the "
-                       "decision (route, pass or deny), the model, the effort and a hint; pass_through when the "
-                       "service cannot be reached.",
+                       "decision (route, pass or deny), the model, the effort, a hint, and brief_rule with "
+                       "brief_forward: a rule to copy unchanged into the subagent brief, as brief_forward says; "
+                       "pass_through when the service cannot be reached.",
         "input_schema": {
             "type": "object",
             "properties": {
@@ -356,6 +358,7 @@ class _Session:
         self.todos_last = 0
         self.base = now
         self.pending_context = None
+        self.advised = False          # checkpoint advice delivered since the last reset: not sent again
         self.inflight = False
         self.main_model = None
         self.models: dict = {}        # agent id -> last step model
@@ -367,6 +370,7 @@ class _Session:
         self.todos_last = 0
         self.base = now
         self.pending_context = None
+        self.advised = False
 
 
 class Core:
@@ -551,6 +555,8 @@ class Core:
             return None
         with self._lock:
             ctx, s.pending_context = s.pending_context, None
+            if ctx:
+                s.advised = True
         return answer("inject", context=list(ctx)) if ctx else None
 
     def _on_session_start(self, e):
@@ -578,7 +584,11 @@ class Core:
             return answer("rewrite", set={"model": r.get("model"), "effort": r.get("effort")}, notice=notice,
                           fallback=fb)
         if r.get("decision") == "deny":
-            return answer("deny", reason=r.get("hint") or DENY_TEXT, notice=notice, fallback=fb)
+            # the caller dispatches again after a deny, so the served speed-up rule rides on the deny reason
+            sep = "\n\n"
+            extra = sep.join(x for x in (r.get("brief_rule"), r.get("brief_forward")) if isinstance(x, str))
+            reason = r.get("hint") or DENY_TEXT
+            return answer("deny", reason=reason + (sep + extra if extra else ""), notice=notice, fallback=fb)
         return answer(notice=notice, fallback=fb)
 
     def _on_dispatched(self, e):
@@ -703,7 +713,8 @@ class Core:
             if isinstance(r, dict) and r.get("now") is True and not r.get("fallback"):
                 lines = [x for x in (r.get("keep_lines") or []) if isinstance(x, str)]
                 with self._lock:
-                    s.pending_context = [CHECKPOINT_NOW, *lines]
+                    if not s.advised:   # once per stretch: a later "now" waits for the checkpoint (reset)
+                        s.pending_context = [CHECKPOINT_NOW, *lines]
         except Exception:  # noqa: BLE001
             pass
         finally:
@@ -774,7 +785,10 @@ class Core:
         if tool == "router_advice":
             r = self.conclusions.route(session, args["subagent_type"], args["description"], args.get("model"),
                                        args.get("effort"), project_dir=cwd, harness=harness)
-            return {k: r.get(k) for k in ("decision", "model", "effort", "reason", "hint", "fallback")}
+            out = {k: r.get(k) for k in ("decision", "model", "effort", "reason", "hint", "fallback")}
+            # the served speed-up rule and its forwarding instruction, when the server sent them
+            out.update({k: r[k] for k in ("brief_rule", "brief_forward") if isinstance(r.get(k), str)})
+            return out
         if tool == "lesson_lookup":
             role, phase = args["role"], args["phase"]
             if self.guard is not None:   # served items reach the agent only wrapped by the guard, with its rule

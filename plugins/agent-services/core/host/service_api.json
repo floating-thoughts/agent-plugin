@@ -38,7 +38,7 @@
   "503": ["unavailable", "busy"]
  },
  "x-client-config": {
-  "path": "<data dir>/services/client.json (written by `agent_core.py connect`, from what the operator gives: endpoint, server keys and e2e keys; agent-svc-vps admin server-key prints them)",
+  "path": "<data dir>/services/client.json (absent: the shipped host/client_defaults.json; written by `agent_core.py connect`, from what the operator gives: endpoint, server keys and e2e keys; agent-svc-vps admin server-key prints them)",
   "schema": {
    "type": "object",
    "properties": {
@@ -515,8 +515,10 @@
     "model": {"anyOf": [{"enum": ["haiku", "opus", "sonnet"]}, {"type": "null"}]},
     "effort": {"anyOf": [{"enum": ["low", "medium", "high", "xhigh", "max"]}, {"type": "null"}]},
     "reason": {"enum": ["r1", "r2", "r3", "r4", "r5", "r6", "r7"]},
-    "hint": {"anyOf": [{"type": "string", "maxLength": 2000}, {"type": "null"}]}
-   }, "required": ["decision", "model", "effort", "reason", "hint"], "additionalProperties": false}},
+    "hint": {"anyOf": [{"type": "string", "maxLength": 2000}, {"type": "null"}]},
+    "brief_rule": {"type": "string", "maxLength": 2000, "x-served": true, "description": "the speed-up rule the calling agent forwards unchanged into the subagent brief"},
+    "brief_forward": {"type": "string", "maxLength": 500, "x-served": true, "description": "the instruction to forward brief_rule into the subagent brief"}
+   }, "required": ["decision", "model", "effort", "reason", "hint", "brief_rule", "brief_forward"], "additionalProperties": false}},
    "errors": {"403": ["not_in_plan"]},
    "x-inventory": {"service": "router", "purpose": "asks which model and effort to use before a subagent dispatch (sends only the first word of the task type and a count, not the description text)", "default": "on (on by default while Services is on)", "retention": "counts per decision per day; request bodies not stored", "sent_to": ["our_service"]}
   },

@@ -9,7 +9,11 @@ Nothing of this state is ever written to disk: item text, wrapped blocks, waterm
 thresholds, fingerprints and session tokens live in this process's memory only. The only log line is
 `confidential_block` (no text, no item ids, no material). Standard library only. The watermark, canaries,
 fingerprint key, shingle, window and match thresholds come from the server per session; the per-session cache quota
-follows the server's limits for served content (MAX_ITEMS is the contract's item cap for one phase).
+follows the server's limits for served content, with the same definitions: at most MAX_ITEMS items per phase (the
+contract's item cap for one phase, the same cap the server applies per phase), so MAX_ITEMS x phases per session, and at
+most MAX_BYTES bytes of item text (UTF-8, before wrap() and without the server's per-session mark, the same byte count
+the server applies to a version). The server marks each item text per session (no-break spaces and zero-width
+characters); normalize() drops both, so fingerprints match the text however it is quoted.
 """
 from __future__ import annotations
 
@@ -63,8 +67,17 @@ def wrap(role, phase, version, item_id, text, watermark, canary) -> str:
             f'{text}\n{canary}\n</agent-confidential>')
 
 
+_MARK_CHARS = str.maketrans("", "", "​‌⁠")   # the server's zero-width mark characters
+_NBSP = " "
+
+
 def normalize(text: str) -> str:
-    return "".join(text.split())
+    return "".join(text.split()).translate(_MARK_CHARS)
+
+
+def unmarked_bytes(text: str) -> int:
+    """UTF-8 bytes of an item text as the server counts it: without its per-session mark."""
+    return len(text.replace(_NBSP, " ").translate(_MARK_CHARS).encode("utf-8"))
 
 
 def fingerprints(text, key_hex, shingle, window) -> list[int]:
@@ -193,7 +206,7 @@ class Guard:
         for i, it in enumerate(b["items"]):
             w = wrap(s.role, phase, b["version"], it["id"], it["text"], m["watermark"], canaries[i % len(canaries)])
             items.append({"id": it["id"], "text": w})
-            size += len(w.encode("utf-8"))
+            size += unmarked_bytes(it["text"])
             k = f"{phase}/{it['id']}"
             keys.append(k)
             fps[k] = set(fingerprints(it["text"], m["key"], m["shingle"], m["window"]))
@@ -203,7 +216,7 @@ class Guard:
             if phase in s.cache:
                 return s.cache[phase]
             new_items = s.items | set(keys)
-            if len(new_items) > MAX_ITEMS:
+            if len(keys) > MAX_ITEMS or len(new_items) > MAX_ITEMS * len(self._phases):
                 raise GuardError(429, "quota_items")
             if s.bytes + size > MAX_BYTES:
                 raise GuardError(429, "quota_bytes")

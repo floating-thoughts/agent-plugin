@@ -189,8 +189,11 @@ class Conclusions:
                                                               and _MODEL_RX.match(body["requested_model"]))):
             ans = self._call("/router/decide", body, "router", errors)
         if ans is not None and ans.get("decision") in ("route", "pass", "deny"):
+            # brief_rule / brief_forward: served rule text, passed through as the server wrote it (no local copy;
+            # absent when the server sent none, so fallbacks keep their shape)
+            served = {k: ans[k] for k in ("brief_rule", "brief_forward") if isinstance(ans.get(k), str)}
             return {"decision": ans["decision"], "model": ans.get("model"), "effort": ans.get("effort"),
-                    "reason": ans.get("reason"), "hint": ans.get("hint"), "fallback": None, "notice": None}
+                    "reason": ans.get("reason"), "hint": ans.get("hint"), "fallback": None, "notice": None, **served}
         if errors == ["not_in_plan"]:   # not in the plan is not "temporarily unavailable"; no notice
             return {"decision": "pass", "model": None, "effort": None, "reason": None, "hint": None,
                     "fallback": "pass_through", "notice": None}

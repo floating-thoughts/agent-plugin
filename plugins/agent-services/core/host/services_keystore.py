@@ -212,7 +212,10 @@ class SecretToolKeyStore(KeyStore):
             raise KeyStoreUnavailable(f"secret-tool store failed ({r.returncode})")
 
     def _delete(self, name):
-        _run([self._bin, "clear", *self._attrs(name)])
+        # `secret-tool clear` exits 0 when nothing matched too; anything else is a failed delete (the value may stay)
+        r = _run([self._bin, "clear", *self._attrs(name)])
+        if r.returncode != 0:
+            raise KeyStoreUnavailable(f"secret-tool clear failed ({r.returncode})")
 
 
 def _raise(msg):

@@ -1,7 +1,9 @@
 """The client helper for the local core.
 
 `send_event` and `ask` talk to the running daemon's POST /core/event and POST /core/ask with the local token from
-connector.json. They never start the daemon, never raise and never print; any failure gives the open default
+connector.json. An answer counts only when connector.json's pid is alive and the answer carries the daemon's proof
+(httpbase.daemon_proof over a fresh nonce): anything else on that port is treated as no daemon.
+They never start the daemon, never raise and never print; any failure gives the open default
 (`FALLBACK`, or `host.core.open_answer`).
 
 CLI for command-type hooks: `python -m host.core_client event [--data-dir D] [--timeout S]` reads one JSON event on
@@ -11,10 +13,12 @@ from __future__ import annotations
 
 import http.client
 import json
+import secrets
 import sys
 import threading
 from pathlib import Path
 
+from host import httpbase
 from host.core import ANSWER_KEYS, open_answer
 
 FALLBACK = {"action": "allow", "reason": None, "set": None, "context": None, "notice": None,
@@ -36,15 +40,20 @@ def _post(data_dir, path: str, body: dict, timeout: float):
         try:
             info = json.loads((_data_dir(data_dir) / "services" / "connector.json").read_text(encoding="utf-8"))
             port, token = int(info["port"]), info["token"]
-            if not isinstance(token, str):
-                return
+            if not isinstance(token, str) or not httpbase.pid_alive(info.get("pid")):
+                return   # a connector.json whose daemon is gone: no daemon
             data = json.dumps(body, ensure_ascii=False).encode("utf-8")
+            nonce = secrets.token_hex(16)
             conn = http.client.HTTPConnection("127.0.0.1", port, timeout=max(timeout, 0.01))
             try:
                 conn.request("POST", path, body=data, headers={"Content-Type": "application/json",
-                                                               "X-Connector-Token": token})
+                                                               "X-Connector-Token": token,
+                                                               httpbase.NONCE_HEADER: nonce})
                 r = conn.getresponse()
                 raw = r.read()
+                if not httpbase.proof_ok(token, nonce, r.status, "POST", path, raw,
+                                         r.getheader(httpbase.PROOF_HEADER)):
+                    return   # not the daemon (no proof it holds the token): no daemon
                 out.append((r.status, json.loads(raw.decode("utf-8"))))
             finally:
                 conn.close()

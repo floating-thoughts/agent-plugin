@@ -85,8 +85,9 @@ Each user then signs in once with `/agent-services login <email>`.
 
 ## Service address
 
-The plugin talks to the service named in `client.json` (in `~/.agent-services/services/`). If you were given an
-address and a server key instead of that file, set them once before signing in:
+The plugin ships with the address and public keys of our production service, so a fresh install signs in without
+any setup. It talks to the service named in `client.json` (in `~/.agent-services/services/`) when that file exists.
+If you were given another address and a server key, set them once before signing in:
 
 ```
 /agent-services connect https://<service host> <server key> e2e:<encryption key>

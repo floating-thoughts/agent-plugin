@@ -1,7 +1,7 @@
 ---
 description: Sign in to agent-services, show its status, or sign out
 argument-hint: "[status | login <email> | code <email> <code> | logout | connect <endpoint> <server key> [<next key>] e2e:<key> [e2e:<next key>]]"
-allowed-tools: Bash(python:*), Bash(python -m pip install --user cryptography)
+allowed-tools: Bash(python "${CLAUDE_PLUGIN_ROOT}/hooks/agent_core.py" *), Bash(python -m pip install --user cryptography)
 ---
 
 Run the agent-services command line for the user. The entry point is
@@ -20,10 +20,12 @@ The user's arguments: `$ARGUMENTS`
   `python "${CLAUDE_PLUGIN_ROOT}/hooks/agent_core.py" connect --endpoint <endpoint> --server-key <server key>
   --e2e-key <key>` (one `--server-key` per plain key and one `--e2e-key` per key given with the `e2e:` prefix, the
   prefix removed; two of a kind only while the server rotates that key). It writes the service address, the server's
-  public signing keys and its public encryption keys to `client.json`; the operator gives all of them. An
+  public signing keys and its public encryption keys to `client.json`; the operator gives all of them. Without
+  `client.json` the plugin uses its built-in production service, so `connect` is only needed to use another one. An
   `https://<host name>` endpoint needs both kinds: every answer must be signed by a signing key, or the plugin pauses
   instead of using it, and every request is encrypted to the encryption key, so a proxy in between sees no
-  credentials or content. A new endpoint signs this machine out; report the answer, then suggest `login`.
+  credentials or content. A new endpoint, pin or key (a key rotation included) signs this machine out; the answer
+  then says `"signed_out": true` with a notice: report it, then suggest `login`.
 
 Requires Python 3.8 or newer with the `cryptography` package (`python -m pip install --user cryptography`).
 

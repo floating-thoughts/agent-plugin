@@ -113,8 +113,10 @@ export const register: Register = on => {
 
   on('prompt.submit', async ($, e: Ev, next) => {
     const a = await send($, 'prompt', e.agentId ?? null, { origin: e.origin?.kind ?? null })
-    if (a.action === 'inject' && a.context) {
-      return next({ ...e, text: e.text + '\n\n' + a.context.join('\n') })
+    // The server's advice rides as its own context block, labelled as the server's in its first line; the model
+    // reads it beside the prompt and the user's text is never rewritten.
+    if (a.action === 'inject' && a.context && a.context.length) {
+      return next({ ...e, context: [...(e.context ?? []), a.context.join('\n')] })
     }
     return next(e)
   }).catch(($, e, next) => next(e))
