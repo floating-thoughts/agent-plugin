@@ -24,46 +24,32 @@ export const BOARD_FIELDS = [...DATA_FIELDS, 'timeline', 'weekly'] as const // t
 export const TIMELINE_MAX = 12 // items shown, newest first
 export const OUTBOX_FILES_MAX = 60 // outbox files read per render (one per session and UTC day)
 export const WEEK_DAYS = 7
-// kind -> [one, many]: what the item says; a count above one uses the second form, {n} the count
-export const PHRASES: Record<string, [string, string]> = {
-  cheaper: ['Sent a job to a cheaper model', 'Sent {n} jobs to a cheaper model'],
-  model: ['Picked the right model for a job', 'Picked the right model for {n} jobs'],
-  cleanup: ['Suggested a memory cleanup at a good moment', 'Suggested {n} memory cleanups at good moments'],
-  tips: ['Loaded up-to-date working tips', 'Loaded up-to-date working tips {n} times'],
-  upload: ["Sent the day's usage numbers (counts only, never your work)", "Sent the day's usage numbers {n} times (counts only, never your work)"],
-  board: ['Updated this board', 'Updated this board {n} times'],
-}
-// where most of a week's savings came from (savings by_day `<lever>_usd`)
-export const LEVER_WORDS: Record<string, string> = {
-  route: 'sending jobs to cheaper models',
-  compact: 'memory cleanups',
-  index: 'looking up files instead of reading them whole',
-}
 export const ADMIN_LINE = 'Your company admin can see your email address, how many devices you use, and your savings figures.'
 export const OFF_LINE = `Turn on the savings record to see a weekly summary: ${COMMAND} sharing on`
 export const WAIT_LINE = 'Your weekly summary appears after your first full day of measured savings.'
-// PHRASES, LEVER_WORDS and the 0.005 USD threshold are the built-in values; the served board table (rules
-// board.json: phrases, lever_words, min_usd) wins while the tables are held.
+// The timeline phrases and the lever words are served only (rules board.json: phrases, lever_words): without them a
+// timeline item or the "Most of it came from" line is left out. min_usd is served too; its fallback 0.005 is the
+// money format's own floor (an amount below it prints as $0.00), not served know-how, so it stays.
 
-/** The smallest amount that counts as saved (a saved day, a best day, a lever, a change): served min_usd, else 0.005. */
+/** The smallest amount that counts as saved (a saved day, a best day, a lever, a change, the band's figure): served
+ * min_usd, else 0.005. */
 export function minUsd(): number {
   return servedNumber('board', 'min_usd', 0.005, 0.0001, 1)
 }
 
-/** The lever words in use: the served lever_words when it is an object of texts, else LEVER_WORDS. */
+/** The served lever words (lever -> words, savings by_day `<lever>_usd`), or none without the table. */
 export function leverWords(): Record<string, string> {
   const v = servedValue('board', 'lever_words')
-  if (!isObj(v)) return LEVER_WORDS
   const out: Record<string, string> = {}
-  for (const [k, w] of Object.entries(v)) if (typeof w === 'string' && w) out[k] = w
-  return Object.keys(out).length ? out : LEVER_WORDS
+  if (isObj(v)) for (const [k, w] of Object.entries(v)) if (typeof w === 'string' && w) out[k] = w
+  return out
 }
 
-/** The [one, many] phrase of a kind: the served phrases entry when it is two texts, else the built-in one. */
+/** The served [one, many] phrase of a kind (a count above one uses the second form, {n} the count), or undefined. */
 function phrasePair(kind: string): [string, string] | undefined {
   const v = servedValue('board', 'phrases')
   const p = isObj(v) ? v[kind] : undefined
-  return Array.isArray(p) && p.length === 2 && p.every((x) => typeof x === 'string') ? [p[0], p[1]] : PHRASES[kind]
+  return Array.isArray(p) && p.length === 2 && p.every((x) => typeof x === 'string') ? [p[0], p[1]] : undefined
 }
 
 type Obj = Record<string, any>
@@ -94,7 +80,7 @@ export function lineDay(line: unknown): string | null {
   return Number.isFinite(ms) ? localDay(ms) : null
 }
 
-/** What one outbox line did for the customer (a PHRASES kind), or null for lines that are not worth a line. */
+/** What one outbox line did for the customer (a board.json phrases kind), or null for lines that are not worth a line. */
 export function kindOf(line: unknown): string | null {
   if (!isObj(line)) return null
   if (line.kind === 'artifact_publish') return line.outcome === 'published' ? 'board' : null
@@ -110,9 +96,9 @@ export function kindOf(line: unknown): string | null {
   return null
 }
 
-const phrase = (kind: string, n: number): string => {
-  const [one, many] = phrasePair(kind)!
-  return n === 1 ? one : many.replace('{n}', String(n))
+const phrase = (kind: string, n: number): string | null => {
+  const p = phrasePair(kind)
+  return p ? (n === 1 ? p[0] : p[1].replace('{n}', String(n))) : null
 }
 
 /** "So far today: 3 jobs on a cheaper model, 1 memory cleanup." in the status line's words, or null. */
@@ -142,9 +128,10 @@ export function timelineOf(lines: unknown[] | null | undefined, counts: unknown,
     }
   }
   const items = [...groups.values()]
+    .filter((it) => phrasePair(it.kind) !== undefined) // no served phrase: the item is left out
     .sort((a, b) => (a.at < b.at ? 1 : a.at > b.at ? -1 : a.kind < b.kind ? -1 : 1))
     .slice(0, TIMELINE_MAX)
-    .map((it) => ({ ...it, text: phrase(it.kind, it.count) }))
+    .map((it) => ({ ...it, text: phrase(it.kind, it.count)! }))
   const c: Record<string, number> = {}
   if (isObj(counts)) for (const [k] of COUNTED) if ((num(counts[k]) ?? 0) > 0) c[k] = counts[k]
   return { items, counts: c, summary: todaySummary(c) }

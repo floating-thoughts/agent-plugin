@@ -2,11 +2,11 @@
 // whose command head is on the public list (records.ts KNOWN_HEADS) asks the service about that head; the answer is
 // kept in memory for the session, so each head is asked at most once. Only the head is sent: no arguments, paths,
 // project hash or durations; a head outside the list (`other`) sends nothing. The request waits at most 1 second
-// from the start of the call; a failure or a timeout counts as the open defaults (records.ts OPEN_DEFAULTS) and adds
+// from the start of the call; a failure or a timeout counts as the open default (no figures, no advice) and adds
 // nothing. When the answer says such commands are better run in the background, its note (served text, passed on as
 // the service wrote it) goes to the model once per head, with the result of a call of that head. Nothing here while
 // signed out, at methods level off, for a subagent's call or a call that already runs in the background.
-import { headWord, OPEN_DEFAULTS } from './records'
+import { headWord } from './records'
 import { methodsLevel } from './methods_level'
 import { signedIn } from './subagents'
 
@@ -38,7 +38,7 @@ export function commandWords(command: unknown): string[] {
 }
 
 const capped = (p: Promise<Answer>): Promise<Answer> => {
-  const fallback: Answer = { ...OPEN_DEFAULTS, source: 'default', fallback: 'open_defaults' }
+  const fallback: Answer = { source: 'default', fallback: 'open_defaults' }
   const timer = new Promise<Answer>((r) => setTimeout(() => r(fallback), RUN_LIMITS_DEADLINE_MS))
   return Promise.race([p.catch(() => fallback), timer])
 }

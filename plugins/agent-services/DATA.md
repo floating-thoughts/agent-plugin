@@ -94,10 +94,12 @@ sends only the update channel (stable or beta); no command, prompt, tool input o
 ever sent for these engines. The tables are kept in memory for that session only (never written to a file, the store or
 a log), and stay until the session ends even if the service becomes unreachable. Without them (signed out, offline,
 locked) every one of these engines is off; the band, the status line and one line at session start say so.
-The same tables also carry the parameters and wording of some features that work without them: the idle gap and
-typing speed of the time figures and their explanation, the review words the routing request's yes or no comes from,
-the patterns that count a git commit or a file read in parts with `sed -n`, and the board's phrases and saved-day
-threshold. Without the tables these use the plugin's built-in values (the review words then cover English only).
+The same tables also carry the parameters and wording of some smaller features: the idle gap and typing speed of the
+time figures and their explanation, and the board's saved-day threshold, which keep built-in values without the
+tables; and the review words the routing request's yes or no comes from, the patterns that count a git commit or a
+file read in parts with `sed -n`, the timing of row trimming, and the board's timeline phrases and lever words, which
+have none: without the tables the review answer is always no, no commit or part read is counted, rows are not
+trimmed, and the board leaves out its timeline items and the line naming where most savings came from.
 
 What the engines do on this computer, with the tables:
 

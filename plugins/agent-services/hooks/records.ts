@@ -15,7 +15,6 @@ import { routingLevel } from './routing_level'
  * asked for a review (only the boolean is sent). Absent: the fields are not sent. */
 export type RouteFlags = { main_model?: unknown; user_asked_review?: unknown; scope?: unknown }
 
-export const OPEN_DEFAULTS = { idle_seconds: 180, max_seconds: 3600 }
 // Public list of common developer commands. A privacy filter: any other name is sent as "other".
 export const KNOWN_HEADS: ReadonlySet<string> = new Set([
   'python', 'node', 'deno', 'bun', 'npm', 'npx', 'pnpm', 'yarn', 'pytest', 'pip', 'pip3', 'uv', 'uvx', 'poetry',
@@ -343,6 +342,6 @@ export class Records {
         return out
       }
     }
-    return { ...OPEN_DEFAULTS, source: 'default', fallback: 'open_defaults' }
+    return { source: 'default', fallback: 'open_defaults' } // no served limits: no figures and no advice
   }
 }

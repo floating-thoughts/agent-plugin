@@ -70,28 +70,18 @@ export const GATE_NOTICES: Readonly<Record<string, string>> = {
 export const PLAN_NOTICE = "agent-services: this account's plan does not include every service; the others run on their open " +
   'defaults. Plan changes happen on the account, with no reinstall.'
 
-// `git [options] commit`: an option is -c/-C with a value or -x/--name[=value]; a value holds at most one quoted
-// part. Up to five options, written out with no repeated group, so the served copy passes riskyPattern (rules.ts).
-const GIT_VAL = `[^\\s"']*(?:(?:"[^"]*"|'[^']*')[^\\s"']*)?`
-const GIT_OPT = `(?:\\s+--?[A-Za-z][\\w-]*(?:(?:=|(?<=\\s-[cC])\\s+)${GIT_VAL})?)?`
-export const COMMIT_RX = new RegExp(`(?:^|[\\s;&|(])git${GIT_OPT.repeat(5)}\\s+commit(?![\\w-])`)
-const SED_RX = /\bsed\s+-n\s+['"]?\d+,\d+p['"]?\s+("[^"]+"|'[^']+'|[^\s|;&>]+)/
-// COMMIT_RX and SED_RX are the built-in patterns; the served ones (rules patterns.json: commit, sed_range) win.
+// The commit and line-range patterns are served only (rules patterns.json: commit, sed_range); without the tables no
+// commit is counted and no sed read counts as an index read.
 
-/** A shell command that makes a git commit (counted for the checkpoint advice). */
+/** A shell command that makes a git commit (counted for the checkpoint advice); false without the served pattern. */
 export function isCommit(cmd: string): boolean {
-  return servedRegex('patterns', 'commit', COMMIT_RX).test(cmd.slice(0, RX_INPUT_MAX))
+  return servedRegex('patterns', 'commit')?.test(cmd.slice(0, RX_INPUT_MAX)) === true
 }
 
-/** The file a `sed -n 'A,Bp' file` command reads in part (an index read), or null. */
+/** The file a `sed -n 'A,Bp' file` command reads in part (an index read), or null (also without the served pattern). */
 export function sedRangePath(cmd: string): string | null {
-  const m = servedRegex('patterns', 'sed_range', SED_RX).exec(cmd.slice(0, RX_INPUT_MAX))
+  const m = servedRegex('patterns', 'sed_range')?.exec(cmd.slice(0, RX_INPUT_MAX))
   return m && typeof m[1] === 'string' ? m[1].replace(/^["']|["']$/g, '') : null
-}
-
-/** Tests: the built-in sources, compared with the served table. */
-export function builtinPatternSources(): { commit: string; sed_range: string } {
-  return { commit: COMMIT_RX.source, sed_range: SED_RX.source }
 }
 
 const DEFS = (CONTRACT as unknown as { definitions: Record<string, { enum: string[] }> }).definitions

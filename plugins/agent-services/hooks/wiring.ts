@@ -35,7 +35,7 @@ import { SALT_KEY } from './records'
 import { collect, pageChanged, publishedUrlOk, render as renderPage, renderDue } from './render'
 import { savingsDue, statusText, updateCommand, updateHintDue } from './status'
 import { counterDays, countsOf, dayCountsFromStore, dayEmpty, normalizeDay } from './day_counts'
-import { boardData, readOutboxDay, timelineOf, weeklyOf } from './board_facts'
+import { boardData, minUsd, readOutboxDay, timelineOf, weeklyOf } from './board_facts'
 import { bandFacts, paused, setBandPanel, type BandFacts, type BandKind, type BandState } from './band'
 import { readOrg } from './org'
 import { accountOf, accountSwitched, readEntry, recordConsent, uploadFloor, uploadOn, writeEntry } from './choice'
@@ -455,7 +455,7 @@ export class Wiring {
       const on = await this.metricsOnNow()
       const s = on ? await this.savingsBody(false) : null
       const usd = isObj(s) ? num(s.usd) : null
-      const total = usd !== null && usd >= 0.005 ? { usd, since: typeof s!.first_day === 'string' ? s!.first_day : null } : null
+      const total = usd !== null && usd >= minUsd() ? { usd, since: typeof s!.first_day === 'string' ? s!.first_day : null } : null
       const facts = await this.bandFacts()
       if (facts || total) {
         const f: BandFacts = facts ?? { saved_usd: null, days: 7, counts: {}, latest: null }
