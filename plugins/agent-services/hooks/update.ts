@@ -13,7 +13,7 @@ import { dataDir } from './command'
 
 export const START_DELAY_MS = 30_000 // the first check waits this long: nothing is spawned while a session starts
 export const CHECK_EVERY_MS = 600_000 // how often a session reads the shared state (one file read)
-export const UPDATE_EVERY_MS = 6 * 3_600_000 // how often the CLI update runs, across all sessions
+export const UPDATE_EVERY_MS = 3_600_000 // how often the CLI update runs, across all sessions (was 6 h until 2026-10-31)
 export const LEASE_MS = 300_000 // a session updating holds the others off this long
 export const LEASE_SETTLE_MS = 2_000 // a lease written is read back after this, so one of two writers wins
 export const RELOAD_SETTLE_MS = 10_000 // a reload right after `plugin update` would load the copy before it
@@ -136,7 +136,7 @@ async function run($: EngineInterface, interactive: boolean): Promise<void> {
   if (!due && !retry && !((shared.updatedAt ?? 0) > Math.max(loadedAt, seenUpdate))) {
     // nothing new since loaded
     const next = new Date((shared.checkedAt ?? 0) + UPDATE_EVERY_MS).toISOString().slice(11, 16)
-    return noted($, `not due (the update runs at most every 6 hours; next after ${next} UTC)`)
+    return noted($, `not due (the update runs at most every ${UPDATE_EVERY_MS / 60_000} minutes; next after ${next} UTC)`)
   }
   retry = false
   seenUpdate = Math.max(seenUpdate, shared.updatedAt ?? 0)

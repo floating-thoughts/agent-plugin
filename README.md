@@ -17,7 +17,7 @@ Claude Code: the terminal (CLI) or the desktop app. Nothing else: no Python, no 
 Pick one of the three ways below. Each has two required steps after installing: turn on auto-update, then sign in.
 Auto-update is off by default for marketplaces outside Anthropic's own, and Claude Code offers no way for a plugin to
 turn it on for you; without it you only get fixes and new services by updating by hand.
-The plugin also keeps itself up to date in the background: at most every 6 hours a session runs Claude Code's own
+The plugin also keeps itself up to date in the background: at most once an hour a session runs Claude Code's own
 plugin update for agent-services and reloads its plugins (in the desktop app, the next new session uses the update).
 Auto-update stays required: it is Claude Code's own path and also works when the plugin cannot run.
 
