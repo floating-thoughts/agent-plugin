@@ -17,7 +17,7 @@
 // response histogram by its estimated response count. `estimated` and `note` say how much was estimated that way.
 // With no unread file the body equals the Python one.
 import { BODY_LIMIT } from './contract'
-import { CLIENT_VERSION, type Request } from './metrics'
+import { CLIENT_VERSION, releaseVersion, type Request } from './metrics'
 import { pyRound, pySum } from './pyfmt'
 import type { Facts } from './transcripts'
 
@@ -138,7 +138,7 @@ export function buildRequest(facts: Facts, clientVersion: string = CLIENT_VERSIO
   const c = facts.compactions
   return {
     schema: SCHEMA,
-    client_version: clientVersion,
+    client_version: releaseVersion(clientVersion),
     harness: HARNESS,
     window: { first_day: facts.first_day, last_day: facts.last_day },
     by_model: byModel(facts),

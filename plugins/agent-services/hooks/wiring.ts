@@ -218,6 +218,11 @@ export class Wiring {
   /** O5: the company admin's board (boss.ts), rendered after the person's own board. */
   readonly boss: BossBoard
 
+  /** The plugin's version as the bodies carry it (metrics.ts releaseVersion), for the slash command's estimate. */
+  get clientVersion(): string | undefined {
+    return this.d.clientVersion
+  }
+
   constructor(deps: WiringDeps) {
     this.d = deps
     this.clock = deps.clock ?? (() => Date.now())

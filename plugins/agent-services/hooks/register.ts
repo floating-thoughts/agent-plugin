@@ -183,6 +183,7 @@ async function build($: EngineInterface): Promise<Rt | null> {
       clock: now,
       projectsRoot: `${dirs.configDir}/projects`,
       holder: session,
+      clientVersion: await shellVersion($), // the release version in every body (was the fixed 0.1.0)
       update: updates,
     })
     const core = new Core({
@@ -262,6 +263,7 @@ export const register: Register = (on) => {
       outbox: r.outbox,
       prices: PRICES,
       dailyBody: (day) => r.wiring.previewBody(day), // the preview's body, bounded to fit a hook
+      clientVersion: r.wiring.clientVersion,
       marketplace: MARKETPLACE,
       selfUpdates: () => updates.selfUpdates,
     }

@@ -28,7 +28,7 @@ import { estimateRequest } from './estimate'
 import { BodyTooLarge, DAILY_ROUTE, optIn, READ_LIMIT } from './metrics'
 import type { MetricsState } from './metrics'
 import { plusDays } from './pyfmt'
-import { scan, walkOrder } from './transcripts'
+import { Scanner, walkOrder } from './transcripts'
 import type { Facts, Prices, TranscriptFile } from './transcripts'
 import type { Outbox } from './outbox'
 import { redact } from './redact'
@@ -210,8 +210,10 @@ export type CommandDeps = {
   ask?: Ask | null
   autoUpdate?: () => Promise<AutoUpdate | null>
   updateLine?: () => Promise<string | null> // the terminal update line, or null where self-update runs
-  facts?: () => Promise<Facts | null> // the estimate's scan of this machine's history; null when there is none
+  facts?: () => Promise<Facts | ScanProgress | null> // the estimate's scan of this machine's history (EstimateScan);
+  // null when there is none
   dailyBody?: (day: string) => Promise<Record<string, unknown>> // one day's POST /metrics/daily body (may throw)
+  clientVersion?: string // the plugin's release version (the export's shell stamp), for the estimate body
   outbox?: Outbox | null
   outboxFs?: ReadFs | null
   sleep?: (ms: number) => Promise<unknown> // bounds the status hello (the command hook has about 10 s in all)
@@ -239,6 +241,33 @@ export function usd(x: unknown): string {
     .toFixed(2)
     .replace(/\B(?=(\d{3})+(?!\d))/g, ',')
   return (v < 0 ? '-$' : '$') + s
+}
+
+/** A plain-English summary of one POST /metrics/daily body, for a reader who will not read JSON: the day, the
+ * sessions, subagent runs, compactions, total tokens and estimated API cost, all summed from the body itself. One
+ * line: it follows the preview's lead-in on the same line, so the exact body stays alone on the next line. */
+export function dailySummary(body: Record<string, unknown>): string {
+  const rows = (k: string): Record<string, any>[] => {
+    const v = k === 'compact' ? (isObj(body.savings) ? body.savings.compact : null) : body[k]
+    return Array.isArray(v) ? v.filter(isObj) : []
+  }
+  const sum = (list: Record<string, any>[], f: (r: Record<string, any>) => unknown): number =>
+    list.reduce((n, r) => n + (num(f(r)) ?? 0), 0)
+  const count = (n: number, one: string, many: string): string =>
+    `${String(n).replace(/\B(?=(\d{3})+(?!\d))/g, ',')} ${n === 1 ? one : many}`
+  const models = rows('by_model')
+  const tokens = ['input_tokens', 'output_tokens', 'cache_read_tokens', 'cache_write_tokens'].reduce(
+    (n, k) => n + sum(models, (r) => r[k]),
+    0,
+  )
+  return (
+    `in plain words, on ${String(body.day ?? '?')} this machine had ` +
+    `${count(sum(rows('sessions'), (r) => r.count), 'session', 'sessions')}, ` +
+    `${count(sum(rows('by_task'), (r) => r.count), 'subagent run', 'subagent runs')} and ` +
+    `${count(rows('compact').length, 'compaction', 'compactions')}, using ${count(tokens, 'token', 'tokens')} in total ` +
+    `(about ${usd(sum(models, (r) => r.api_usd))} at API prices). Only these numbers are sent: no prompts, file ` +
+    'contents or file paths. The exact data, for anyone who wants to check:'
+  )
 }
 
 /** A 0-1 share as a percent with one decimal. */
@@ -330,11 +359,11 @@ export function autoUpdateText(a: AutoUpdate | null, updateLine: string | null =
 
 // ------------------------------------------------------------------ transcripts for the estimate
 
-/** Every *.jsonl under `root` (relative paths with '/'), in os.walk order; a file over READ_LIMIT is listed by size
- * with text null (estimate.ts scales it in), as is one that cannot be read. */
-export async function collectTranscripts(fs: ReadFs, root: string): Promise<TranscriptFile[] | null> {
+/** Every *.jsonl under `root` (relative paths with '/') with its listed size, in os.walk order; null when `root`
+ * cannot be listed. Nothing is read. */
+export async function listTranscripts(fs: ReadFs, root: string): Promise<{ rel: string; size: number }[] | null> {
   const base = root.replace(/[\\/]+$/, '')
-  const out: TranscriptFile[] = []
+  const out: { rel: string; size: number }[] = []
   let any = false
   const walk = async (rel: string, depth: number): Promise<void> => {
     let entries: readonly ListedFile[]
@@ -349,21 +378,87 @@ export async function collectTranscripts(fs: ReadFs, root: string): Promise<Tran
       if (e.kind === 'dir') {
         if (depth < 8) await walk(r, depth + 1)
       } else if ((e.kind === undefined || e.kind === 'file') && e.name.endsWith('.jsonl')) {
-        const size = typeof e.size === 'number' ? e.size : 0
-        let text: string | null = null
-        if (size <= READ_LIMIT) {
-          try {
-            text = String(await fs.read(`${base}/${r}`))
-          } catch {
-            text = null
-          }
-        }
-        out.push({ rel: r, size, text })
+        out.push({ rel: r, size: typeof e.size === 'number' ? e.size : 0 })
       }
     }
   }
   await walk('', 0)
   return any ? walkOrder(out) : null
+}
+
+/** One listed transcript as scan() takes it: a file over READ_LIMIT, or one that cannot be read, has text null
+ * (estimate.ts scales it in by size). */
+async function readTranscript(fs: ReadFs, base: string, f: { rel: string; size: number }): Promise<TranscriptFile> {
+  let text: string | null = null
+  if (f.size <= READ_LIMIT) {
+    try {
+      text = String(await fs.read(`${base}/${f.rel}`))
+    } catch {
+      text = null
+    }
+  }
+  return { rel: f.rel, size: f.size, text }
+}
+
+/** Every *.jsonl under `root`, read, in os.walk order (see listTranscripts and readTranscript). */
+export async function collectTranscripts(fs: ReadFs, root: string): Promise<TranscriptFile[] | null> {
+  const listed = await listTranscripts(fs, root)
+  if (!listed) return null
+  const base = root.replace(/[\\/]+$/, '')
+  const out: TranscriptFile[] = []
+  for (const f of listed) out.push(await readTranscript(fs, base, f))
+  return out
+}
+
+export type ScanProgress = { progress: { done: number; total: number } } // bytes of readable transcripts
+
+/**
+ * The estimate's scan of every transcript, spread over runs of the command. A hook has 10 s of its own time, where
+ * the reads are free and the parse is not; a long history takes longer (measured 11.8 s for 2.1 GB on the owner's
+ * machine), so each step() parses for about `sliceMs` (5 s, leaving room for finish()) and answers its progress, and
+ * the next run goes on where it stopped. The facts are scan() of the same files (transcripts.ts Scanner). A scan
+ * left for more than `maxAgeMs` (30 minutes) starts again.
+ */
+export class EstimateScan {
+  private job: { files: { rel: string; size: number }[]; next: number; scanner: Scanner; done: number; total: number; at: number } | null =
+    null
+
+  private readonly fs: ReadFs
+  private readonly prices: Prices
+  private readonly opt: { clock?: () => number; sliceMs?: number; maxAgeMs?: number }
+
+  constructor(fs: ReadFs, prices: Prices, opt: { clock?: () => number; sliceMs?: number; maxAgeMs?: number } = {}) {
+    this.fs = fs
+    this.prices = prices
+    this.opt = opt
+  }
+
+  async step(root: string): Promise<Facts | ScanProgress | null> {
+    const clock = this.opt.clock ?? (() => Date.now())
+    if (!this.job || clock() - this.job.at > (this.opt.maxAgeMs ?? 1_800_000)) {
+      this.job = null
+      const files = await listTranscripts(this.fs, root)
+      if (!files) return null
+      const total = files.reduce((n, f) => n + (f.size <= READ_LIMIT ? f.size : 0), 0)
+      this.job = { files, next: 0, scanner: new Scanner(this.prices), done: 0, total, at: clock() }
+    }
+    const job = this.job
+    const base = root.replace(/[\\/]+$/, '')
+    const start = job.next
+    let used = 0
+    while (job.next < job.files.length) {
+      if (job.next > start && used >= (this.opt.sliceMs ?? 5000)) return { progress: { done: job.done, total: job.total } }
+      const f = job.files[job.next]!
+      const file = await readTranscript(this.fs, base, f) // a read is the engine's time, not the hook's
+      const t = clock()
+      job.scanner.add(file)
+      used += clock() - t
+      job.next += 1
+      if (f.size <= READ_LIMIT) job.done += f.size
+    }
+    this.job = null
+    return job.scanner.finish()
+  }
 }
 
 // ------------------------------------------------------------------ the command
@@ -582,8 +677,9 @@ export class Command {
     if (this.d.dailyBody) {
       const day = plusDays(localDay(this.d.now()), -1)
       try {
-        const text = this.d.svc.preview('POST', DAILY_ROUTE, await this.d.dailyBody(day))
-        if (text !== null) upload = `Exactly what one daily upload sends (for ${day}):\n${text}`
+        const body = await this.d.dailyBody(day)
+        const text = this.d.svc.preview('POST', DAILY_ROUTE, body)
+        if (text !== null) upload = `Exactly what one daily upload sends (for ${day}): ${dailySummary(body)}\n${text}`
       } catch {
         // the description below stands
       }
@@ -797,7 +893,7 @@ export class Command {
       if (text === null) return 'The daily usage summary could not be built.'
       await this.saveMetrics({ previewed_day: day })
       return (
-        `This is exactly what one daily upload sends (for ${day}); nothing was sent:\n${text}\n` +
+        `This is exactly what one daily upload sends (for ${day}); nothing was sent: ${dailySummary(body)}\n${text}\n` +
         `Turn the upload on with ${COMMAND} savings on.`
       )
     }
@@ -845,7 +941,15 @@ export class Command {
     }
     const facts = this.d.facts ? await this.safe(() => this.d.facts!(), null) : null
     if (!facts) return estimateError('no_data')
-    const prep = estimateRequest(facts)
+    if ('progress' in facts) {
+      const mib = (n: number) => (n / 1048576).toFixed(0)
+      return (
+        `Reading this machine's Claude Code history for the estimate: ${mib(facts.progress.done)} of ` +
+        `${mib(facts.progress.total)} MiB so far. Nothing was sent. Run ${COMMAND} estimate again to go on; it ` +
+        'continues where it stopped.'
+      )
+    }
+    const prep = estimateRequest(facts, this.d.clientVersion)
     if ('error' in prep) return estimateError(prep.error)
     const text = this.d.svc.preview('POST', '/diagnostic/estimate', prep.body)
     if (text === null) return estimateError('invalid_body')
@@ -1006,6 +1110,7 @@ export type EngineOptions = {
   outbox?: Outbox | null
   prices?: Prices | null // the shipped prices (modules/usage/prices.json); without them the estimate has no data
   dailyBody?: (day: string) => Promise<Record<string, unknown>>
+  clientVersion?: string
   marketplace?: string
   now?: () => number
   selfUpdates?: () => boolean // false where the engine has no $.process: status then shows the terminal update line
@@ -1014,6 +1119,7 @@ export type EngineOptions = {
 /** The command's deps over `$`. */
 export function engineDeps($: EngineInterface, o: EngineOptions): CommandDeps {
   const readText = readTextOf($)
+  let estimateScan: EstimateScan | null = null
   const fs: ReadFs = {
     list: async (p) => (await $.fs.list(p)).map((e: any) => ({ name: String(e.name), kind: e.kind, size: e.size })),
     read: async (p) => String(await $.fs.read(p)),
@@ -1042,10 +1148,11 @@ export function engineDeps($: EngineInterface, o: EngineOptions): CommandDeps {
     facts: async () => {
       if (!o.prices) return null
       const d = await engineDirs($)
-      const files = await collectTranscripts(fs, `${d.configDir}/projects`)
-      return files ? scan(files, o.prices) : null
+      estimateScan ??= new EstimateScan(fs, o.prices)
+      return estimateScan.step(`${d.configDir}/projects`) // a part of a long history per run (fits the hook)
     },
     dailyBody: o.dailyBody,
+    clientVersion: o.clientVersion,
     outbox: o.outbox ?? null,
     outboxFs: fs,
     sleep: (ms) => Promise.resolve($.clock.sleep(ms)),

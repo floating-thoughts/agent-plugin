@@ -1,6 +1,7 @@
 // Transcript facts (cleanup route R6, moved from metrics.ts unchanged): the usage module's prices and usage
 // counts, the transcript walk order and entry collection, the dispatch type words and scan(), the facts the
 // daily body and the estimate are built from. Nothing here touches the engine: files and prices are passed in.
+import { utf8 } from './e2e'
 import { cmp, cmpTuple, isObj, localDay, localMonth, parseIso, pyLen, pyRound, pySum } from './pyfmt'
 
 export const FIELDS = ['input', 'output', 'cacheRead', 'cacheWrite5m', 'cacheWrite1h'] as const
@@ -132,30 +133,33 @@ export function place(rel: string): [string, string, boolean] {
 /** modules/usage collect(): one entry per (message.id, requestId), each token field the maximum over its rows. */
 export function collect(files: TranscriptFile[]): Map<string, Entry> {
   const seen = new Map<string, Entry>()
-  for (const file of files) {
-    if (typeof file.text !== 'string') continue
-    for (const raw of lines(file.text)) {
-      if (!raw.includes('"usage"') || !raw.includes('"assistant"')) continue
-      const row = parseLine(raw)
-      if (!isObj(row) || row.type !== 'assistant') continue
-      const message = isObj(row.message) ? row.message : {}
-      const usage = message.usage
-      const model = typeof message.model === 'string' ? message.model : ''
-      const stamp = row.timestamp
-      if (!isObj(usage) || !stamp || model.startsWith('<')) continue
-      const moment = parseIso(stamp, 'local')
-      if (moment === null) continue
-      const key = JSON.stringify([message.id ?? null, row.requestId ?? null])
-      const counts = usageOf(usage)
-      const held = seen.get(key)
-      if (!held) {
-        seen.set(key, { model, moment, isFast: usage.speed === 'fast', counts, file: file.rel })
-      } else {
-        for (const f of FIELDS) held.counts[f] = Math.max(held.counts[f], counts[f])
-      }
+  for (const file of files) collectInto(seen, file)
+  return seen
+}
+
+/** collect() of one more file into `seen` (the files in order give collect()'s map). */
+function collectInto(seen: Map<string, Entry>, file: TranscriptFile): void {
+  if (typeof file.text !== 'string') return
+  for (const raw of lines(file.text)) {
+    if (!raw.includes('"usage"') || !raw.includes('"assistant"')) continue
+    const row = parseLine(raw)
+    if (!isObj(row) || row.type !== 'assistant') continue
+    const message = isObj(row.message) ? row.message : {}
+    const usage = message.usage
+    const model = typeof message.model === 'string' ? message.model : ''
+    const stamp = row.timestamp
+    if (!isObj(usage) || !stamp || model.startsWith('<')) continue
+    const moment = parseIso(stamp, 'local')
+    if (moment === null) continue
+    const key = JSON.stringify([message.id ?? null, row.requestId ?? null])
+    const counts = usageOf(usage)
+    const held = seen.get(key)
+    if (!held) {
+      seen.set(key, { model, moment, isFast: usage.speed === 'fast', counts, file: file.rel })
+    } else {
+      for (const f of FIELDS) held.counts[f] = Math.max(held.counts[f], counts[f])
     }
   }
-  return seen
 }
 
 export const normModel = (model: unknown): string => {
@@ -252,73 +256,57 @@ const sizeOf = (f: TranscriptFile): number =>
 
 /** tools/diagnostic/facts.py scan() for the parts the daily and estimate bodies use. */
 export function scan(files: TranscriptFile[], prices: Prices): Facts {
-  const readable = files.filter((f) => typeof f.text === 'string')
-  const unread: UnreadFile[] = files
-    .filter((f) => typeof f.text !== 'string')
-    .map((f) => ({ rel: f.rel, size: sizeOf(f), subagent: place(f.rel)[2] }))
-  const seen = collect(readable)
-  const byDay: Record<string, DayFacts> = {}
-  const dayOf = (day: string) => (byDay[day] ??= newDay())
-  const unpriced = new Set<string>()
-  const days: string[] = []
-  const mainResponses = new Map<string, number>()
-  const mainDays: Record<string, Set<string>> = {}
-  for (const entry of seen.values()) {
-    const model = normModel(entry.model)
-    const c = entry.counts
-    const tokens = c.input + c.cacheWrite5m + c.cacheWrite1h + c.output
-    const cost = costOf(entry, prices)
-    if (cost === null) unpriced.add(model)
-    const usd = cost === null ? 0 : cost
-    const [project, session, isSub] = place(entry.file)
-    const day = localDay(entry.moment)
-    days.push(day)
-    const daily = (dayOf(day).by_model[model] ??= {
-      input_tokens: 0,
-      output_tokens: 0,
-      cache_read_tokens: 0,
-      cache_write_tokens: 0,
-      tokens: 0,
-      api_usd: 0,
-      responses: 0,
-      main_responses: 0,
-      subagent_responses: 0,
-    })
-    daily.input_tokens += c.input
-    daily.output_tokens += c.output
-    daily.cache_read_tokens += c.cacheRead
-    daily.cache_write_tokens += c.cacheWrite5m + c.cacheWrite1h
-    daily.tokens += tokens
-    daily.api_usd += usd
-    daily.responses += 1
-    if (isSub) {
-      daily.subagent_responses += 1
-    } else {
-      daily.main_responses += 1
-      const k = JSON.stringify([project, session])
-      mainResponses.set(k, (mainResponses.get(k) ?? 0) + 1)
-      ;(mainDays[day] ??= new Set()).add(session)
-    }
+  const s = new Scanner(prices)
+  for (const f of files) s.add(f)
+  return s.finish()
+}
+
+type RawDispatch = { moment: number; rel: string; order: number; project: string; session: string; block: Obj }
+
+/**
+ * scan() one file at a time, so a caller under a hook's time budget can spread it over several runs and drop each
+ * text once it is added: add() the files in the order scan() would get them, then finish(). The facts are those of
+ * scan() over the same files (the same entry and dispatch de-duplication, in the same order).
+ */
+export class Scanner {
+  private readonly prices: Prices
+  private files = 0
+  private readonly unread: UnreadFile[] = []
+  private readonly seen = new Map<string, Entry>()
+  private readonly byDay: Record<string, DayFacts> = {}
+  private readonly compactions = { total: 0, manual: 0, auto: 0 }
+  private readonly sessionRows = new Map<string, SessionRow>()
+  private readonly raw: RawDispatch[] = []
+  private readonly seenBlocks = new Set<string>()
+  private readonly read = { files: 0, bytes: 0, main_bytes: 0, subagent_bytes: 0 }
+
+  constructor(prices: Prices) {
+    this.prices = prices
   }
 
-  const compactions = { total: 0, manual: 0, auto: 0 }
-  const sessionRows = new Map<string, SessionRow>()
-  const raw: { moment: number; rel: string; order: number; project: string; session: string; block: Obj }[] = []
-  const seenBlocks = new Set<string>()
-  let readBytes = 0
-  let mainBytes = 0
-  let subBytes = 0
-  for (const file of readable) {
+  private dayOf(day: string): DayFacts {
+    return (this.byDay[day] ??= newDay())
+  }
+
+  /** One more transcript file; its text is not kept. */
+  add(file: TranscriptFile): void {
+    this.files += 1
+    if (typeof file.text !== 'string') {
+      this.unread.push({ rel: file.rel, size: sizeOf(file), subagent: place(file.rel)[2] })
+      return
+    }
+    collectInto(this.seen, file)
     const [project, session, isSub] = place(file.rel)
     const key = JSON.stringify([project, session])
     const size = sizeOf(file)
-    readBytes += size
-    if (isSub) subBytes += size
-    else mainBytes += size
+    this.read.files += 1
+    this.read.bytes += size
+    if (isSub) this.read.subagent_bytes += size
+    else this.read.main_bytes += size
     const moments: number[] = []
     const comps: [number | null, unknown][] = []
     const disp: [number | null, number, Obj][] = []
-    lines(file.text as string).forEach((line, order) => {
+    lines(file.text).forEach((line, order) => {
       if (isSub && !line.includes('compact_boundary') && !line.includes('tool_use')) return
       const row = parseLine(line)
       if (!isObj(row)) return
@@ -346,20 +334,15 @@ export function scan(files: TranscriptFile[], prices: Prices): Facts {
       }
       let minutes = 0
       if (moments.length >= 2) minutes = pyRound(((last as number) - (first as number)) / 1e6 / 60, 1)
-      sessionRows.set(key, {
-        session_id: session,
-        project,
-        month: first !== null ? localMonth(first) : null,
-        minutes,
-        responses: mainResponses.get(key) ?? 0,
-      })
+      // responses are counted in finish(), once every file's entries are in
+      this.sessionRows.set(key, { session_id: session, project, month: first !== null ? localMonth(first) : null, minutes, responses: 0 })
     }
     for (const [moment, trigger] of comps) {
-      compactions.total += 1
+      this.compactions.total += 1
       const kind = trigger === 'manual' || trigger === 'auto' ? trigger : null
-      if (kind) compactions[kind] += 1
+      if (kind) this.compactions[kind] += 1
       if (moment !== null) {
-        const daily = dayOf(localDay(moment))
+        const daily = this.dayOf(localDay(moment))
         daily.compactions += 1
         if (kind === 'manual') daily.compactions_manual += 1
         if (kind === 'auto') daily.compactions_auto += 1
@@ -368,58 +351,105 @@ export function scan(files: TranscriptFile[], prices: Prices): Facts {
     for (const [moment, order, block] of disp) {
       if (block.id !== undefined && block.id !== null) {
         const id = JSON.stringify(block.id)
-        if (seenBlocks.has(id)) continue
-        seenBlocks.add(id)
+        if (this.seenBlocks.has(id)) continue
+        this.seenBlocks.add(id)
       }
       if (moment === null) continue
-      raw.push({ moment, rel: file.rel, order, project, session, block })
+      this.raw.push({ moment, rel: file.rel, order, project, session, block })
     }
   }
 
-  const rows = [...sessionRows.values()].sort((a, b) =>
-    cmpTuple([a.month ?? '', a.project, a.session_id], [b.month ?? '', b.project, b.session_id]),
-  )
-  raw.sort((a, b) => cmpTuple([a.moment, a.rel, a.order], [b.moment, b.rel, b.order]))
-  const dispatches: Dispatch[] = []
-  const numbers = new Map<string, number>()
-  for (const d of raw) {
-    const data = isObj(d.block.input) ? d.block.input : {}
-    const desc = data.description
-    const k = JSON.stringify([d.project, d.session])
-    numbers.set(k, (numbers.get(k) ?? 0) + 1)
-    const row: Dispatch = {
-      session_id: d.session,
-      project: d.project,
-      day: localDay(d.moment),
-      type_word: typeWord(desc),
-      subagent_type: subagentType(data.subagent_type),
-      requested_model: requestedModel(data.model),
-      requested_effort: effortOf(data.effort),
-      desc_len: typeof desc === 'string' ? pyLen(desc) : 0,
-      dispatch_no: numbers.get(k) as number,
+  /** The facts of every file added (call it once). */
+  finish(): Facts {
+    const unpriced = new Set<string>()
+    const days: string[] = []
+    const mainResponses = new Map<string, number>()
+    const mainDays: Record<string, Set<string>> = {}
+    for (const entry of this.seen.values()) {
+      const model = normModel(entry.model)
+      const c = entry.counts
+      const tokens = c.input + c.cacheWrite5m + c.cacheWrite1h + c.output
+      const cost = costOf(entry, this.prices)
+      if (cost === null) unpriced.add(model)
+      const usd = cost === null ? 0 : cost
+      const [project, session, isSub] = place(entry.file)
+      const day = localDay(entry.moment)
+      days.push(day)
+      const daily = (this.dayOf(day).by_model[model] ??= {
+        input_tokens: 0,
+        output_tokens: 0,
+        cache_read_tokens: 0,
+        cache_write_tokens: 0,
+        tokens: 0,
+        api_usd: 0,
+        responses: 0,
+        main_responses: 0,
+        subagent_responses: 0,
+      })
+      daily.input_tokens += c.input
+      daily.output_tokens += c.output
+      daily.cache_read_tokens += c.cacheRead
+      daily.cache_write_tokens += c.cacheWrite5m + c.cacheWrite1h
+      daily.tokens += tokens
+      daily.api_usd += usd
+      daily.responses += 1
+      if (isSub) {
+        daily.subagent_responses += 1
+      } else {
+        daily.main_responses += 1
+        const k = JSON.stringify([project, session])
+        mainResponses.set(k, (mainResponses.get(k) ?? 0) + 1)
+        ;(mainDays[day] ??= new Set()).add(session)
+      }
     }
-    dispatches.push(row)
-    const daily = dayOf(row.day)
-    daily.dispatches_by_type[row.type_word] = (daily.dispatches_by_type[row.type_word] ?? 0) + 1
-    daily.dispatches_by_model[row.requested_model] = (daily.dispatches_by_model[row.requested_model] ?? 0) + 1
-  }
+    for (const [k, row] of this.sessionRows) row.responses = mainResponses.get(k) ?? 0
 
-  const sortedDays: Record<string, DayFacts> = {}
-  for (const day of Object.keys(byDay).sort()) sortedDays[day] = byDay[day]
-  const md: Record<string, string[]> = {}
-  for (const day of Object.keys(mainDays).sort()) md[day] = [...mainDays[day]].sort()
-  const sortedList = [...days].sort()
-  return {
-    transcripts: files.length,
-    first_day: sortedList.length ? sortedList[0] : null,
-    last_day: sortedList.length ? sortedList[sortedList.length - 1] : null,
-    by_day: sortedDays,
-    compactions,
-    sessions: { count: rows.length, rows },
-    dispatches,
-    main_days: md,
-    unpriced: [...unpriced].sort(),
-    read: { files: readable.length, bytes: readBytes, main_bytes: mainBytes, subagent_bytes: subBytes },
-    unread,
+    const rows = [...this.sessionRows.values()].sort((a, b) =>
+      cmpTuple([a.month ?? '', a.project, a.session_id], [b.month ?? '', b.project, b.session_id]),
+    )
+    const raw = this.raw
+    raw.sort((a, b) => cmpTuple([a.moment, a.rel, a.order], [b.moment, b.rel, b.order]))
+    const dispatches: Dispatch[] = []
+    const numbers = new Map<string, number>()
+    for (const d of raw) {
+      const data = isObj(d.block.input) ? d.block.input : {}
+      const desc = data.description
+      const k = JSON.stringify([d.project, d.session])
+      numbers.set(k, (numbers.get(k) ?? 0) + 1)
+      const row: Dispatch = {
+        session_id: d.session,
+        project: d.project,
+        day: localDay(d.moment),
+        type_word: typeWord(desc),
+        subagent_type: subagentType(data.subagent_type),
+        requested_model: requestedModel(data.model),
+        requested_effort: effortOf(data.effort),
+        desc_len: typeof desc === 'string' ? pyLen(desc) : 0,
+        dispatch_no: numbers.get(k) as number,
+      }
+      dispatches.push(row)
+      const daily = this.dayOf(row.day)
+      daily.dispatches_by_type[row.type_word] = (daily.dispatches_by_type[row.type_word] ?? 0) + 1
+      daily.dispatches_by_model[row.requested_model] = (daily.dispatches_by_model[row.requested_model] ?? 0) + 1
+    }
+
+    const sortedDays: Record<string, DayFacts> = {}
+    for (const day of Object.keys(this.byDay).sort()) sortedDays[day] = this.byDay[day]
+    const md: Record<string, string[]> = {}
+    for (const day of Object.keys(mainDays).sort()) md[day] = [...mainDays[day]].sort()
+    const sortedList = [...days].sort()
+    return {
+      transcripts: this.files,
+      first_day: sortedList.length ? sortedList[0] : null,
+      last_day: sortedList.length ? sortedList[sortedList.length - 1] : null,
+      by_day: sortedDays,
+      compactions: { ...this.compactions },
+      sessions: { count: rows.length, rows },
+      dispatches,
+      main_days: md,
+      unpriced: [...unpriced].sort(),
+      read: { ...this.read },
+      unread: [...this.unread],
+    }
   }
 }

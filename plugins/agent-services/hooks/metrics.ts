@@ -63,6 +63,12 @@ export type {
 } from './transcripts'
 
 export const CLIENT_VERSION = '0.1.0'
+
+/** The client_version a body carries: the plugin's release version (the export's shell stamp) when it is one, else
+ * CLIENT_VERSION (a development copy has no stamp and reports 'dev', which the schema's Version refuses). */
+export function releaseVersion(v: string | null | undefined): string {
+  return typeof v === 'string' && /^\d+\.\d+\.\d+([-+][0-9A-Za-z.-]+)?$/.test(v) && v.length <= 40 ? v : CLIENT_VERSION
+}
 export const BACKFILL_DAYS = 30
 export const HARNESS = 'claude-code'
 export const BODY_BYTES = 65536
@@ -278,7 +284,7 @@ export function dailyBody(day: string, input: DailyInput): Obj {
     .map((kind) => ({ kind, harness: HARNESS, count: perKind[kind] }))
   const body: Obj = {
     day,
-    client_version: input.clientVersion ?? CLIENT_VERSION,
+    client_version: releaseVersion(input.clientVersion),
     by_model: byModel,
     by_task: byTask,
     sessions,
