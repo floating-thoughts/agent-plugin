@@ -15,6 +15,7 @@ import { routeNoteFor } from './flow_state'
 import { resumeNotification, resumeStart } from './resume'
 import { continueVia } from './stall'
 import { reportHasOpen, reportPrompt, reportStop, turnTexts } from './failure_report'
+import { recentRows } from './session_rows'
 import { installCacheBreak } from './cache_break'
 export { cacheStep, cacheStepStart, cacheTurnEnd } from './cache_break'
 import { jobPermission, jobsToolEnd } from './jobs'
@@ -206,12 +207,7 @@ export async function stopCheck($: EngineInterface, e: Obj, next: Next): Promise
   const out = stopSendBack(e, done)
   if (out === done || out?.block === undefined) {
     const last = String(e?.last_assistant_message ?? '')
-    let recent: unknown = []
-    if (done?.block === undefined && reportHasOpen('')) {
-      try {
-        recent = await $.session.messages({ last: 60 })
-      } catch {}
-    }
+    const recent: unknown = done?.block === undefined && reportHasOpen('') ? await recentRows($, 60) : []
     const block = done?.block === undefined ? reportStop('', last, turnTexts(recent, last)) : null
     if (!block) return out
     return (await continueVia($, 'report', 'stop')).ok ? { ...done, block } : done

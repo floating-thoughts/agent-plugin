@@ -3,6 +3,7 @@ import { methodsLevel } from './methods_level'
 import { planSteps, PLAN_FILE } from './plan_file'
 import { engineStore } from './store'
 import { rulesLive } from './rules'
+import { recentRows } from './session_rows'
 import { toolInput } from './tools'
 
 type Obj = Record<string, any>
@@ -132,11 +133,7 @@ export async function concurrencyCall($: EngineInterface, e: Obj, next: any, liv
       const input = toolInput(e)
       const key = dispatchKey(String(e.tool), input)
       if (key !== null && !denied.includes(key)) {
-        let recent: unknown = []
-        try {
-          recent = await $.session.messages({ last: 40 })
-        } catch {}
-        note = concurrencyVerdict({ tool: String(e.tool), input, recent, stateText: await stateText($) })
+        note = concurrencyVerdict({ tool: String(e.tool), input, recent: await recentRows($, 60), stateText: await stateText($) })
       }
     }
   } catch {
