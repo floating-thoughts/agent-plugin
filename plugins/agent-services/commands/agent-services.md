@@ -11,12 +11,15 @@ Run the agent-services command line for the user. The entry point is
 The user's arguments: `$ARGUMENTS`
 
 - No arguments or `status`: run `"${CLAUDE_PLUGIN_ROOT}/hooks/agent-core" status` and report whether the
-  account is signed in, its plan and any notice, in one or two sentences.
+  account is signed in, its plan and any notice, in one or two sentences. If `auto_update.on` is false, add that
+  setup is not finished (next paragraph).
 - `login <email>`: run `"${CLAUDE_PLUGIN_ROOT}/hooks/agent-core" login start --email <email>`. A sign-in code
   is mailed to that address; ask the user for it, then continue as for `code`.
 - `code <email> <code>`: run `"${CLAUDE_PLUGIN_ROOT}/hooks/agent-core" login finish --email <email> --code <code>`
-  and report whether the sign-in worked. The plugin turns on once the service accepts the sign-in. If it worked,
-  offer the estimate (next item) right after the sign-in confirmation.
+  and report whether the sign-in worked. The plugin turns on once the service accepts the sign-in. If it worked and
+  `auto_update.on` is false, say that one required setup step is left and give `auto_update.how` as numbered steps:
+  turning on auto-update is how the user receives fixes and new services without reinstalling; it takes effect
+  from the next session. Never change the user's settings yourself. Then offer the estimate (next item).
 - `estimate`: first run `"${CLAUDE_PLUGIN_ROOT}/hooks/agent-core" estimate preview`, show its `body_text` and ask
   the user, in one sentence, whether to send it to get their savings estimate; nothing is sent before a clear yes.
   On yes, run `"${CLAUDE_PLUGIN_ROOT}/hooks/agent-core" estimate`. It reads this machine's Claude Code history,

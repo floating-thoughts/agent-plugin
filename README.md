@@ -18,7 +18,9 @@ python -m pip install --user cryptography
 
 ## Install
 
-Pick one of the three ways below. Each ends with signing in.
+Pick one of the three ways below. Each has two required steps after installing: turn on auto-update, then sign in.
+Auto-update is off by default for marketplaces outside Anthropic's own, and Claude Code offers no way for a plugin to
+turn it on for you; without it you only get fixes and new services by updating by hand.
 
 ### 1. Just you
 
@@ -36,6 +38,9 @@ claude plugin marketplace add floating-thoughts/agent-plugin
 claude plugin install agent-services@agent-plugin
 ```
 
+Turn on auto-update (required): inside Claude Code run `/plugin`, open **Marketplaces**, select `agent-plugin` and
+choose **Enable auto-update**.
+
 Then sign in inside Claude Code (a code is mailed to you; give it when asked):
 
 ```
@@ -51,7 +56,8 @@ it if it does) and commit it. Everyone who opens the project and trusts the fold
 {
   "extraKnownMarketplaces": {
     "agent-plugin": {
-      "source": { "source": "github", "repo": "floating-thoughts/agent-plugin" }
+      "source": { "source": "github", "repo": "floating-thoughts/agent-plugin" },
+      "autoUpdate": true
     }
   },
   "enabledPlugins": { "agent-services@agent-plugin": true }
@@ -75,7 +81,8 @@ Linux:   /etc/claude-code/managed-settings.json
 {
   "extraKnownMarketplaces": {
     "agent-plugin": {
-      "source": { "source": "github", "repo": "floating-thoughts/agent-plugin" }
+      "source": { "source": "github", "repo": "floating-thoughts/agent-plugin" },
+      "autoUpdate": true
     }
   },
   "enabledPlugins": { "agent-services@agent-plugin": true }

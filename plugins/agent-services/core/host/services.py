@@ -2654,6 +2654,12 @@ def main(argv=None) -> int:
         if a.cmd == "status" and isinstance(body.get("notice"), str):
             err["notice"] = body["notice"]
         return out(err, 1)
+    if a.cmd == "status" or (a.cmd == "login" and a.arg == "finish"):   # a required setup step, read only
+        try:
+            from host import auto_update
+            body = {**body, "auto_update": auto_update.state()}
+        except Exception:  # noqa: BLE001 - the check never fails the command
+            pass
     return out(body)
 
 
