@@ -295,6 +295,7 @@ export const ERROR_TEXT: Record<string, string> = {
   license_inactive: 'This account has no active license, so the sign-in was refused; contact support.',
   bad_request: `The service refused the sign-in request; start again with ${COMMAND} login.`,
   invalid_body: 'That input is not valid.',
+  check_required: `agent-services asks for a quick browser check before it mails a code; run ${COMMAND} login again and open the link it shows.`,
 }
 
 export const USAGE =
@@ -1290,7 +1291,21 @@ export class Command {
       if (email === null) return `Sign-in not started. Run ${COMMAND} login <email> to start it.`
     }
     if (!validEmail(email)) return `"${email.slice(0, 80)}" is not an email address; nothing was sent.`
-    const r = await this.d.svc.loginStart(email)
+    let r = await this.d.svc.loginStart(email)
+    const cb = isObj(r.body) ? r.body : {}
+    if (!r.ok && r.error === 'check_required' && typeof cb.check_url === 'string' && /^https:\/\/[^\s"<>]{1,300}$/.test(cb.check_url)) {
+      // the service asks for a browser check first (only under signs of abuse); the token is kept by svc.loginStart
+      const done = 'I passed the check'
+      const a = this.d.ask
+        ? await this.dialog(`Before it mails a sign-in code, agent-services asks for a quick check in your browser: open ${cb.check_url} ` +
+          `and pass it, then choose "${done}".`, [done, 'Cancel'], 'Check')
+        : null
+      if (a !== done) {
+        return `No code was mailed yet. Open ${cb.check_url} in your browser, pass the check, then run ${COMMAND} login ` +
+          `${email} again within 10 minutes.`
+      }
+      r = await this.d.svc.loginStart(email)
+    }
     if (!r.ok) {
       return `No code was mailed: ${errorText(r.error)}`
     }

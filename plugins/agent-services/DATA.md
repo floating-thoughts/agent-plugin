@@ -36,7 +36,10 @@ your IP address, the time and the size of each request, but not its content.
 your Claude account id (read from `~/.claude.json`), a time stamp, a random nonce and a device signature.
 
 **Signing in** (`/agent-services login`): your email address. Then the one-time code, a hash of a new random token,
-the device's public key, the device id, the Claude account hash, and the harness (`claude-code`).
+the device's public key, the device id, the Claude account hash, and the harness (`claude-code`). Only when many
+sign-ins were started from your network or overall, the service first asks for a browser check: the plugin shows a
+link to a page on the service that loads the network provider's bot check (its script runs in your browser, not in
+Claude Code); once you passed it, the plugin sends the check's one-time token with your email address again.
 
 **Automatically, while you are signed in:**
 
@@ -143,7 +146,8 @@ What the engines do on this computer, with the tables:
 | Your account: email, company, plan, status, role | yes | while the account exists; a deleted account is signed out at once and erased for good 7 days later (every row linked to it) |
 | Each sign-in: device id, device public key, Claude account hash, harness, a token check value, plugin version, times | yes | while the sign-in is active, then 30 days after it ended |
 | Sign-in code | a check value, and the code encrypted with a server key (so the same code can be mailed again) | deleted when used; an unused or expired code stays until the next code request for that account replaces it |
-| Sign-in IP addresses | as keyed hashes only, for rate limits and known-address checks | from 1 hour to 30 days after use, deleted at the next sign-in activity after that (known addresses: at that account's next successful sign-in), so a row can stay longer |
+| Sign-in IP addresses | as keyed hashes only (the address and its range: IPv4 /24, IPv6 /48), for rate limits and known-address checks | from 1 hour to 30 days after use, deleted at the next sign-in activity after that (known addresses: at that account's next successful sign-in), so a row can stay longer |
+| Sign-in lockout counts: wrong codes and code requests per IP address, IP range, device id, email address and pairs of these, as keyed hashes only (no email address is ever locked) | yes | 24 hours after the last count or the end of its lock |
 | Anti-abuse records: failed signed requests and lockouts, per IP address (not hashed) and per account | yes | about 10 to 15 minutes, deleted at the next failed request after that |
 | Daily usage summaries | the whole summary as sent | 395 days; all of an account's days are dropped once it uploads nothing for 30 days |
 | Subagent and checkpoint requests | the request is not kept; one count per day, account, route and outcome | while the account exists |
@@ -203,7 +207,7 @@ fetched, never another member's. For the admin, the same command still shows the
 | `~/.agent-services/dashboard/`, `~/.agent-services/boss/`, `~/.agent-services/services/*.json` | your savings page (a company admin's board, with member emails in the per-member view; the admin's computer empties the board page and deletes its cached company summary from the plugin store after sign-out, when the account is no longer the admin, and once the summary is more than 30 minutes old, checked when the board is refreshed after a turn and about every minute while Claude Code runs) and their publish state (`dashboard.json`, `boss.json`), and for each board the page format last published and the version of its figures document (`dashboard-live.json`, `boss-live.json`) |
 | `~/.agent-services/methods.md`, `methods.approved.md`, `methods.pending.md` | the working-methods text |
 | `~/.agent-services/methods.seen.md`, `methods.previous.md` | the served working-methods text of the version last seen and of the one before it, so `/agent-services methods diff` can show what changed |
-| Claude Code's plugin store (see above), keys `checkpoint_counts`, `terms_accepted`, `redline_override` | checkpoint counters per hashed session id; the terms version you accepted at sign-in (sent with the code, with "business use, 18 or older"); the weekly reset until which you let your agent start subagents past the usage line |
+| Claude Code's plugin store (see above), keys `checkpoint_counts`, `terms_accepted`, `redline_override`, `login_check` | checkpoint counters per hashed session id; the browser check token the service gave for a sign-in under signs of abuse (with the email, 10 minutes); the terms version you accepted at sign-in (sent with the code, with "business use, 18 or older"); the weekly reset until which you let your agent start subagents past the usage line |
 | `~/.agent-services/services/asked.json` | when a setup question was last asked, by any session (an unanswered question waits 7 days) |
 | `plugin-update.json` (in Claude Code's data folder for this plugin, else `~/.agent-services/services/`) | the update check's state |
 | `~/.agent-services/MIGRATED` | what the one-time move from an older version did |

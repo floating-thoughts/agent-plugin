@@ -19,9 +19,14 @@ covers only the Codex path.
   hooks send only a fixed event name, the task name of a subagent (v2) or the turn id (v1), and, after each model
   request (Codex 0.167 or later), the model name, the request status and the token counts. Codex adds its thread
   id to each call; the service keeps it only as a hash.
+- The sign-in page can use Cloudflare Turnstile, a bot check with no puzzle in most cases, before it mails a sign-in
+  code. Turnstile runs in your browser and Cloudflare processes browser and device signals for it; the service keeps
+  none of them. To slow down code guessing, the service also counts sign-in attempts per IP address, IP range,
+  email address and a keyed hash of your browser's User-Agent and language headers with the IP range; it keeps these
+  counts only as keyed hashes and only for 24 hours.
 - The service does not keep your work. It keeps your account, your sign-ins, counts, ids and versions, and IP
   addresses (in its request log only as keyed hashes). The token counts are kept, as daily sums per model, only if
-  you turn on Codex usage sharing (an unchecked box on the sign-in page); otherwise they are discarded unread. The
+  you turn on Codex usage sharing (Yes on the sign-in page; neither answer is preselected); otherwise they are discarded unread. The
   details are below.
 - How the service makes its advice is a business secret and is not published. Its answers come back in a fixed
   format, listed in section 5.
@@ -36,8 +41,9 @@ access token.
 |---|---|---|
 | You run `codex mcp login agent-services` (or Codex asks you to sign in) | `GET /.well-known/oauth-protected-resource/mcp`, `GET /.well-known/oauth-authorization-server` | nothing beyond the request itself |
 | The same, in your browser | `GET /oauth/authorize` | the Codex client id, the loopback address Codex listens on (`http://127.0.0.1:<port>/...`), a PKCE code challenge, a random state value, the `/mcp` address and the scope Codex asks for |
-| You enter your email on the sign-in page | `POST /oauth/authorize` (step email) | the same values and your email address; the service mails a sign-in code to it |
-| You enter the code and press "Allow" | `POST /oauth/authorize` (step code) | the same values, your email address, the code, when terms are shown the terms version you accepted, and whether you ticked the box "Upload my Codex usage counts"; your browser is then sent back to Codex on your own computer with a one-time authorization code |
+| You open the sign-in page while the bot check is on | your browser loads Cloudflare Turnstile from `challenges.cloudflare.com` | Turnstile runs in your browser and sends Cloudflare signals about the browser and the device (such as your IP address, the browser's headers and how the page is used) to decide whether a person is signing in; we receive only its pass or fail token. No cookie of ours; no Google service |
+| You enter your email on the sign-in page | `POST /oauth/authorize` (step email) | the same values, your email address and, while the bot check is on, the Turnstile token (our server sends that token with our Turnstile key to Cloudflare to check it, nothing else); the service mails a sign-in code to it |
+| You enter the code and press "Allow" | `POST /oauth/authorize` (step code) | the same values, your email address, the code, when terms are shown the terms version you accepted, and your answer, Yes or No, to "Upload my Codex usage counts?"; your browser is then sent back to Codex on your own computer with a one-time authorization code |
 | Codex finishes the sign-in | `POST /oauth/token` | the client id, the authorization code, the PKCE verifier, the loopback address and the `/mcp` address |
 | About once an hour while Codex uses the service | `POST /oauth/token` (refresh) | the client id and the refresh token |
 | You sign out in Codex | nothing: `codex mcp logout` (checked on Codex 0.167) removes the tokens from your computer and sends no request; the service offers `POST /oauth/revoke` should a later Codex use it | (if sent) the client id and a token |
@@ -57,7 +63,7 @@ read-only.
 | Request log: time, path (never the query or the body), status, error code, account id, a sign-in id, keyed hashes of IP addresses, the rate limit hit (IP addresses taken out), latency | yes | 90 days (also capped by size) |
 | Your account: email, company, plan, status, role | yes | while the account exists; a deleted account is erased for good 7 days later |
 | Each Codex sign-in: a random id `codex_<16 hex>`, harness `codex`, status and times; no device key | yes | while the sign-in is active, then 30 days after it ended |
-| Sign-in codes, rate limits and lockouts | as for the Claude Code plugin: check values and keyed IP hashes, clear IPs only in short-lived anti-abuse records | see the Claude Code plugin's data note |
+| Sign-in codes, rate limits and lockouts | as for the Claude Code plugin: check values, keyed hashes of IP addresses, IP ranges and of a light fingerprint of the sign-in page's browser (User-Agent, Accept-Language, IP range; no cookie), clear IPs only in short-lived anti-abuse records | see the Claude Code plugin's data note |
 | Authorization codes | only a sha256 of each, with the loopback address and the PKCE challenge | used once within 60 seconds; the retention pass deletes the row a day after it expired |
 | Access and refresh tokens | only a sha256 of each, with times and how they follow each other | access tokens are valid 1 hour, refresh tokens until the sign-in ends; the retention pass deletes an access token row a day after it expired, and every token row a day after it was revoked or its sign-in ended |
 | Your methods choice (on, off or suggest) and the checksum of methods text you accepted | yes | while the account exists |
@@ -82,8 +88,10 @@ The same as for the Claude Code plugin (see its data note, section 3), plus a Co
 summary email. It holds company totals for the week, never a figure for one person, from the members who turned on
 Codex usage sharing: the number of model requests and the tokens per model, an estimated cost at OpenAI's public list
 prices (a model without a public price is shown in tokens only), and how many times subagent advice was given and
-followed. It claims no saving for Codex, and Codex use adds nothing to the savings figures. While the company's
-savings record is off, the Codex part is empty too. The company can pause agent-services for everyone; while it is
+followed. It claims no saving for Codex, and Codex use adds nothing to the savings figures. The Codex part is left
+out of the email and the company board while fewer than 3 members with Codex use that week share it, because the
+totals would then be one or two people's own figures. While the company's savings record is off, the Codex part is
+empty too. The company can pause agent-services for everyone; while it is
 paused, Codex gets no methods and no advice, and the token counts are discarded.
 
 ## 4. Files on your computer
@@ -111,8 +119,10 @@ agent-services writes no file on your computer. Codex itself keeps:
 ## 6. What you can turn off
 
 - Working methods: `setup_methods` with `methods off` (back with `methods on` or `methods suggest`).
-- Codex usage sharing is off unless you tick the box "Upload my Codex usage counts" on the sign-in page. To turn it
-  on later, sign in again (`codex mcp logout agent-services`, then `codex mcp login agent-services`) and tick the box.
+- Codex usage sharing is off unless you answer Yes to "Upload my Codex usage counts?" on the sign-in page; No turns
+  it off. To change it later, sign in again (`codex mcp logout agent-services`, then `codex mcp login agent-services`)
+  and answer again. Your answer counts once you entered the right code, even if Codex then does not finish the
+  sign-in.
   To turn it off, ask Codex to call `setup_sharing` with `sharing off`; `sharing preview` shows what is sent and kept.
   Your company admin can turn it off for everyone by turning the savings record off. There is no backfill: counts
   start when sharing is on, and only Codex 0.167 or later sends them.

@@ -42,7 +42,7 @@ accepted as the trusted hash.
 - `setup_methods`: changes the stored methods choice (`methods suggest`, `methods on`, `methods off`,
   `methods accept`, `methods keep`). Call it only with the user's own answer; Codex asks the user to approve it.
 - `setup_sharing`: Codex usage sharing (token counts per model per day, sent after each model request). It turns
-  on only with the unchecked box on the sign-in page; `sharing off` turns it off, `sharing preview` shows what is
+  on only with Yes on the sign-in page (No turns it off); `sharing off` turns it off, `sharing preview` shows what is
   sent and kept. Call it only with the user's own answer.
 
 When the server cannot be reached, the hooks fail open and Codex goes on unchanged.

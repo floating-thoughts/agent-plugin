@@ -6,7 +6,7 @@ export type ToolSpec = {
   input_schema: Record<string, unknown>
 }
 
-export const CONTRACT_SHA256 = "491aeb99f98d9939e697453ebe61dd6466089b10f576a011bcec0f21f4b45f02"
+export const CONTRACT_SHA256 = "aec6987299b6a055a9c4665565631f4a848480586e877143931bde56a722221f"
 
 export const API = "svc/1" as const
 export const PREFIX = "/svc/v1" as const
@@ -312,6 +312,21 @@ export const CONTRACT = {
    "busy",
    "restarted"
   ]
+ },
+ "x-login-check": {
+  "route": "POST /auth/login/start",
+  "request_field": "check: optional string (at most 100 characters), the token of a passed check",
+  "error": {
+   "status": 403,
+   "code": "check_required",
+   "body": {
+    "error": "check_required",
+    "check_url": "https://<server origin>/check?t=<token>",
+    "check": "<token>"
+   }
+  },
+  "when": "only under signs of abuse (server-side rules, not published); never without Turnstile keys and a public base URL",
+  "flow": "the person opens check_url (Turnstile widget) and passes it; the client then retries /auth/login/start with {email, check}; a token is single use and lasts 10 minutes"
  },
  "x-client-config": {
   "path": "<data dir>/services/client.json (absent: the shipped host/client_defaults.json; written by the Python client's staging setup, from what the operator gives: endpoint, server keys and e2e keys; the server's admin CLI prints them (server-key))",
