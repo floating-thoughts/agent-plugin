@@ -79,21 +79,30 @@ function mailText(s: Obj): string {
 /** The company board page from a GET /org/summary answer (escaped; no script, no clock time). */
 export function bossHtml(s: Obj): string {
   const people: Obj[] = Array.isArray(s.people) ? s.people : []
+  const top = Math.max(0, ...people.map((p) => (typeof p.usd === 'number' ? p.usd : 0)))
   const rows = people.length
     ? people
         .map((p) => {
           const usd = typeof p.usd === 'number' ? money(p.usd) : 'no data yet'
           const dev = p.devices === 0 ? 'not signed in' : p.devices === 1 ? '1 device' : `${p.devices} devices`
           const cls = typeof p.usd === 'number' ? '' : ' class="none"'
-          return `<tr><td>${esc(p.email)}</td><td${cls}>${esc(usd)}</td><td>${esc(dev)}</td></tr>`
+          const pct = typeof p.usd === 'number' && top > 0 ? Math.max(0, Math.round((p.usd / top) * 100)) : 0
+          return `<tr><td>${esc(p.email)}</td><td${cls}>${esc(usd)}</td><td>${esc(dev)}</td>` +
+            `<td class="bar" aria-hidden="true"><span style="width:${pct}%"></span></td></tr>`
         })
         .join('\n')
-    : '<tr><td colspan="3" class="none">Nobody is set up yet.</td></tr>'
+    : '<tr><td colspan="4" class="none">Nobody is set up yet.</td></tr>'
   const savings = s.savings === 'on' ? 'On for everyone.' : s.savings === 'off' ? 'Off for everyone: nothing is uploaded.' : 'Each person decides.'
   const paused = s.paused ? 'Paused for everyone in your company.' : 'Running.'
   const total = typeof s.total_usd === 'number' ? s.total_usd : 0
   const prev = typeof s.prev_usd === 'number' ? s.prev_usd : null
   const week = isObj(s.week) ? span(String(s.week.first_day), String(s.week.last_day)) : ''
+  // the change pill: green up, red down, neutral when equal or nothing to compare with
+  const trend = prev === null ? 'flat' : Math.round(total * 100) > Math.round(prev * 100) ? 'up'
+    : Math.round(total * 100) < Math.round(prev * 100) ? 'down' : 'flat'
+  const used = Number(s.seats_used) || 0
+  const paid = typeof s.seats_paid === 'number' ? s.seats_paid : null
+  const measured = people.filter((p) => typeof p.usd === 'number').length
   return `<!doctype html>
 <html lang="en">
 <head>
@@ -101,54 +110,83 @@ export function bossHtml(s: Obj): string {
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Company savings board</title>
 <style>
-:root { --bg: #f6f5f1; --surface: #ffffff; --border: #e4e1d8; --text: #1d1c19; --muted: #6b675e; --accent: #1f7a5a; --none: #9a958a; color-scheme: light; }
+:root { --bg: #f7f7fb; --surface: #ffffff; --border: #e7e6ef; --text: #0e0d16; --muted: #636175; --accent: #5b3df5; --accent-soft: #eeeaff; --up: #127a4b; --up-soft: #e3f5ec; --down: #b4372f; --down-soft: #fbe9e7; --none: #8e8ca0; color-scheme: light; }
 @media (prefers-color-scheme: dark) {
-  :root:not([data-theme="light"]) { --bg: #141412; --surface: #1d1c1a; --border: #33312d; --text: #efede7; --muted: #a8a397; --accent: #4cc596; --none: #7a766c; color-scheme: dark; }
+  :root:not([data-theme="light"]) { --bg: #0d0c14; --surface: #16151f; --border: #2a2838; --text: #f3f2f8; --muted: #a3a1b5; --accent: #9d8cff; --accent-soft: #241f45; --up: #4fd394; --up-soft: #13301f; --down: #ff8a80; --down-soft: #3a1714; --none: #77758a; color-scheme: dark; }
 }
-:root[data-theme="dark"] { --bg: #141412; --surface: #1d1c1a; --border: #33312d; --text: #efede7; --muted: #a8a397; --accent: #4cc596; --none: #7a766c; color-scheme: dark; }
+:root[data-theme="dark"] { --bg: #0d0c14; --surface: #16151f; --border: #2a2838; --text: #f3f2f8; --muted: #a3a1b5; --accent: #9d8cff; --accent-soft: #241f45; --up: #4fd394; --up-soft: #13301f; --down: #ff8a80; --down-soft: #3a1714; --none: #77758a; color-scheme: dark; }
 * { box-sizing: border-box; }
-body { margin: 0; background: var(--bg); color: var(--text); font: 16px/1.5 system-ui, -apple-system, "Segoe UI", sans-serif; }
-main { max-width: 760px; margin: 0 auto; padding: 24px 16px 48px; }
-.eyebrow { color: var(--muted); font-size: 14px; margin: 0; }
-h1 { font-size: 30px; margin: 4px 0; }
+body { margin: 0; background: var(--bg); color: var(--text); font: 16px/1.5 Inter, system-ui, -apple-system, "Segoe UI", sans-serif; }
+main { max-width: 960px; margin: 0 auto; padding: 0 16px 56px; }
+.top { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 18px 0; border-bottom: 1px solid var(--border); }
+.brand { font-weight: 800; letter-spacing: -0.02em; white-space: nowrap; }
+.brand i { display: inline-block; width: 10px; height: 10px; border-radius: 3px; background: var(--accent); margin-right: 8px; }
+.pill { padding: 4px 12px; border-radius: 999px; background: var(--accent-soft); color: var(--accent); font-size: 14px; font-weight: 600; overflow-wrap: anywhere; text-align: right; }
+.hero { padding: 40px 0 8px; }
+.eyebrow { color: var(--muted); font-size: 13px; font-weight: 700; letter-spacing: 0.08em; text-transform: uppercase; margin: 0; }
+h1 { font-size: clamp(32px, 6vw, 52px); line-height: 1.08; font-weight: 800; letter-spacing: -0.035em; margin: 10px 0 12px; }
 h1 b { color: var(--accent); }
-h2 { font-size: 18px; margin: 0 0 12px; }
-section { background: var(--surface); border: 1px solid var(--border); border-radius: 14px; padding: 16px; margin-top: 16px; }
 .muted, .note { color: var(--muted); }
+.change { display: inline-block; padding: 6px 14px; border-radius: 999px; font-weight: 600; font-size: 15px; background: var(--accent-soft); margin: 4px 0 0; }
+.change.up { background: var(--up-soft); color: var(--up); }
+.change.down { background: var(--down-soft); color: var(--down); }
+.kpis { display: grid; grid-template-columns: repeat(auto-fit, minmax(190px, 1fr)); gap: 16px; margin-top: 28px; }
+.kpi { background: var(--surface); border: 1px solid var(--border); border-radius: 16px; padding: 18px 20px; }
+.kpi span { display: block; color: var(--muted); font-size: 14px; font-weight: 600; }
+.kpi strong { display: block; font-size: 30px; font-weight: 800; letter-spacing: -0.03em; margin-top: 6px; font-variant-numeric: tabular-nums; }
+h2 { font-size: 20px; font-weight: 800; letter-spacing: -0.02em; margin: 0 0 14px; }
+section { background: var(--surface); border: 1px solid var(--border); border-radius: 16px; padding: 22px 20px; margin-top: 20px; }
 .note { font-size: 14px; margin-bottom: 0; }
+.scroll { overflow-x: auto; }
 table { width: 100%; border-collapse: collapse; }
-th, td { text-align: left; padding: 8px 6px; border-bottom: 1px solid var(--border); overflow-wrap: anywhere; }
-th { color: var(--muted); font-weight: 600; font-size: 14px; }
-td:nth-child(2), th:nth-child(2) { text-align: right; white-space: nowrap; }
-.none { color: var(--none); }
-dl { margin: 0; }
-dl div { display: flex; flex-wrap: wrap; gap: 4px 16px; padding: 8px 0; border-bottom: 1px solid var(--border); }
-dt { font-weight: 600; min-width: 190px; }
-dd { margin: 0; }
-code { font-size: 14px; }
-footer { color: var(--muted); font-size: 13px; margin-top: 20px; }
+th, td { text-align: left; padding: 12px 8px; border-bottom: 1px solid var(--border); overflow-wrap: anywhere; }
+tbody tr:last-child td { border-bottom: 0; }
+th { color: var(--muted); font-weight: 700; font-size: 12px; letter-spacing: 0.06em; text-transform: uppercase; }
+td:nth-child(2), th:nth-child(2) { text-align: right; white-space: nowrap; font-weight: 700; font-variant-numeric: tabular-nums; }
+td:nth-child(3) { color: var(--muted); font-size: 14px; }
+.bar { width: 28%; min-width: 80px; }
+td.bar span { display: block; height: 8px; border-radius: 999px; background: var(--accent); }
+td.none { color: var(--none); font-weight: 400; }
+dl { margin: 0; display: grid; grid-template-columns: repeat(auto-fit, minmax(260px, 1fr)); gap: 12px; }
+dl div { border: 1px solid var(--border); border-radius: 12px; padding: 12px 14px; }
+dt { font-size: 13px; font-weight: 700; color: var(--muted); }
+dd { margin: 4px 0 0; font-weight: 600; }
+code { font-size: 13px; background: var(--accent-soft); color: var(--accent); padding: 1px 6px; border-radius: 6px; }
+footer { color: var(--muted); font-size: 13px; margin-top: 24px; }
+@media (max-width: 560px) { .bar { display: none; } }
 </style>
 </head>
 <body>
 <main>
+<header class="top"><span class="brand"><i></i>agent-services</span><span class="pill">${esc(s.org ?? 'your company')}</span></header>
+<div class="hero">
 <p class="eyebrow">agent-services for ${esc(s.org ?? 'your company')}</p>
 <h1>Saved last week: <b>${esc(money(total))}</b></h1>
 <p class="muted">The week of ${esc(week)}.</p>
-<p>${esc(changeLine(total, prev))}</p>
+<p class="change ${trend}">${esc(changeLine(total, prev))}</p>
+</div>
+<div class="kpis">
+<div class="kpi"><span>Saved last week</span><strong>${esc(money(total))}</strong></div>
+<div class="kpi"><span>The week before</span><strong>${esc(prev === null ? '-' : money(prev))}</strong></div>
+<div class="kpi"><span>People with figures</span><strong>${esc(`${measured} of ${people.length}`)}</strong></div>
+<div class="kpi"><span>Seats used</span><strong>${esc(paid === null ? `${used}` : `${used} / ${paid}`)}</strong></div>
+</div>
 <section>
 <h2>Saved by each person</h2>
+<div class="scroll">
 <table>
-<thead><tr><th>Person</th><th>Saved last week</th><th>Signed in on</th></tr></thead>
+<thead><tr><th>Person</th><th>Saved last week</th><th>Signed in on</th><th class="bar"></th></tr></thead>
 <tbody>
 ${rows}
 </tbody>
 </table>
+</div>
 <p class="note">A saving is what the same work would have cost without agent-services. "No data yet" means we have no usage figures from that person for the week: they may not have used Claude Code, or they may have chosen not to share their figures. Each person is told that you see their figure.</p>
 </section>
 <section>
 <h2>Your company's settings</h2>
 <dl>
-<div><dt>People set up</dt><dd>${esc(seatsText(Number(s.seats_used) || 0, typeof s.seats_paid === 'number' ? s.seats_paid : null))}</dd></div>
+<div><dt>People set up</dt><dd>${esc(seatsText(used, paid))}</dd></div>
 <div><dt>agent-services</dt><dd>${esc(paused)}</dd></div>
 <div><dt>Savings record</dt><dd>${esc(savings)}</dd></div>
 <div><dt>Weekly email summary</dt><dd>${esc(mailText(s))}</dd></div>
@@ -162,7 +200,6 @@ ${rows}
 `
 }
 
-/** Forget the cached summary, so the next render fetches it again (after a setting changed). */
 export async function forgetSummary(kv: KV): Promise<void> {
   await safeDelete(kv, BOSS_CACHE_KEY)
 }

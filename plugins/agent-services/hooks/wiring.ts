@@ -71,7 +71,7 @@ type Obj = Record<string, any>
 export type WiringFs = {
   read(path: string): Promise<string> // rejects when missing or unreadable ($.fs.read refuses files over 4 MiB)
   write(path: string, text: string): Promise<void>
-  list?(path: string): Promise<readonly { name: string; size?: number; dir?: boolean }[]>
+  list?(path: string): Promise<readonly { name: string; size?: number; dir?: boolean; mtime?: number }[]> // mtime: ms
 }
 
 export type WiringDeps = {
@@ -132,13 +132,22 @@ const result = (r: { ok: boolean; status: number | null; body: unknown; error: s
  * The transcript files under the projects root (every *.jsonl at any depth, as tools/diagnostic/facts.py globs),
  * in os.walk order. A file over READ_LIMIT, or one the file access refuses, is listed with text null (metrics.ts
  * leaves it out of the facts; estimate.ts scales it by size).
+ * `since` (ms): a file last changed before it is left out, as it holds no entry of a later moment (a listing without
+ * mtime keeps every file). `maxBytes`: reading more text than this throws, so a caller under a hook's time budget
+ * stops before parsing gigabytes (the parse is the hook's own time; the reads are not).
  */
-export async function loadTranscripts(fs: WiringFs, root: string | null | undefined, maxDepth = 6): Promise<TranscriptFile[]> {
+export async function loadTranscripts(
+  fs: WiringFs,
+  root: string | null | undefined,
+  maxDepth = 6,
+  bound: { since?: number; maxBytes?: number } = {},
+): Promise<TranscriptFile[]> {
   const out: TranscriptFile[] = []
   if (!root || typeof fs.list !== 'function') return out
   const base = root.replace(/[\\/]+$/, '')
+  let readBytes = 0
   const walk = async (dir: string, rel: string, depth: number): Promise<void> => {
-    let entries: readonly { name: string; size?: number; dir?: boolean }[]
+    let entries: readonly { name: string; size?: number; dir?: boolean; mtime?: number }[]
     try {
       entries = await fs.list!(dir)
     } catch {
@@ -148,6 +157,8 @@ export async function loadTranscripts(fs: WiringFs, root: string | null | undefi
       const path = `${dir}/${e.name}`
       const r = rel ? `${rel}/${e.name}` : e.name
       if (e.dir !== true && e.name.endsWith('.jsonl')) {
+        const mtime = num(e.mtime)
+        if (bound.since !== undefined && mtime !== null && mtime < bound.since) continue
         const size = num(e.size)
         let text: string | null = null
         if (size === null || size <= READ_LIMIT) {
@@ -157,8 +168,10 @@ export async function loadTranscripts(fs: WiringFs, root: string | null | undefi
             text = null
           }
         }
-        const got = text === null ? (size ?? 0) : utf8(text).length
-        out.push({ rel: r, size: size ?? got, text: text !== null && utf8(text).length > READ_LIMIT ? null : text })
+        const got = text === null ? (size ?? 0) : utf8(text).length // encoded once: it is the hook's own time
+        if (text !== null) readBytes += got
+        if (bound.maxBytes !== undefined && readBytes > bound.maxBytes) throw new Error('transcripts over the read bound')
+        out.push({ rel: r, size: size ?? got, text: text !== null && got > READ_LIMIT ? null : text })
       } else if (e.dir !== false && depth < maxDepth) {
         await walk(path, r, depth + 1)
       }
@@ -624,8 +637,17 @@ export class Wiring {
   }
 
   /** The transcript facts (tools/diagnostic/facts.py scan) of the projects root. */
-  async facts(): Promise<Facts> {
-    return scan(await loadTranscripts(this.d.fs, this.d.projectsRoot), this.d.prices ?? {})
+  async facts(bound: { since?: number; maxBytes?: number } = {}): Promise<Facts> {
+    return scan(await loadTranscripts(this.d.fs, this.d.projectsRoot, 6, bound), this.d.prices ?? {})
+  }
+
+  /** One day's body for a preview inside a hook (10 s of its own time, where parsing is counted and reads are not):
+   * only the transcripts changed since the day began (local time, as the day of an entry), and it throws past
+   * 384 MiB of text (about 4 s to encode and parse, measured 9.5 ms per MiB) rather than overrun the hook. The day's
+   * figures are those of a full scan: an entry of the day was written after the day began. */
+  async previewBody(day: string): Promise<Obj> {
+    const since = new Date(`${day}T00:00:00`).getTime()
+    return this.dailyBody(day, await this.facts({ since, maxBytes: 384 * 1024 * 1024 }))
   }
 
   /** The savings part of one day's body: the store counters, normalized. */
@@ -722,7 +744,8 @@ export class Wiring {
       const yesterday = plusDays(today, -1)
       const first = st.last_uploaded_day ? plusDays(st.last_uploaded_day, 1) : plusDays(st.enabled_day || today, -30)
       if (first > yesterday) return { sent: [], error: null }
-      const facts = await this.facts()
+      // only the transcripts changed since the first day to send began: the same figures, far less to parse
+      const facts = await this.facts({ since: new Date(`${first}T00:00:00`).getTime() })
       const withCounts = new Set<string>()
       for (const d of await counterDays(this.d.store)) if (!dayEmpty(await readDay(this.d.store, d))) withCounts.add(d)
       const active = (day: string): boolean => {

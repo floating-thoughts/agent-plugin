@@ -130,7 +130,7 @@ const engineFs = ($: EngineInterface) => ({
     await $.fs.write(p, text)
   },
   list: async (p: string) =>
-    ((await $.fs.list(p)) as any[]).map((e) => ({ name: String(e.name), size: typeof e.size === 'number' ? e.size : undefined, dir: e.kind === 'dir' })),
+    ((await $.fs.list(p)) as any[]).map((e) => ({ name: String(e.name), size: typeof e.size === 'number' ? e.size : undefined, dir: e.kind === 'dir', mtime: e.mtimeMs })),
 })
 
 // The status line after session_start and turn_end; once after a new sign-in, the old-sign-in line of the migration.
@@ -261,7 +261,7 @@ export const register: Register = (on) => {
       svc: r.svc,
       outbox: r.outbox,
       prices: PRICES,
-      dailyBody: (day) => r.wiring.dailyBody(day),
+      dailyBody: (day) => r.wiring.previewBody(day), // the preview's body, bounded to fit a hook
       marketplace: MARKETPLACE,
       selfUpdates: () => updates.selfUpdates,
     }

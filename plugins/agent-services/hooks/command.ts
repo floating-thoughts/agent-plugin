@@ -575,7 +575,10 @@ export class Command {
 
   /** What the savings record sends and shows; changes nothing. */
   private async sharingPreview(): Promise<string> {
-    let upload = 'The daily summary could not be built on this machine right now.'
+    let upload =
+      'A small daily summary of numbers is uploaded: token counts and costs per model, task types per hashed ' +
+      'project, session counts and savings; never prompts, file contents or paths. (Its exact text could not be ' +
+      'built in time on this machine.)'
     if (this.d.dailyBody) {
       const day = plusDays(localDay(this.d.now()), -1)
       try {
@@ -786,7 +789,9 @@ export class Command {
       } catch (e) {
         return e instanceof BodyTooLarge
           ? `The summary for ${day} is too large to upload.`
-          : 'The daily usage summary could not be built.'
+          : 'The daily usage summary could not be built in time on this machine. It holds numbers only: token ' +
+              'counts and costs per model, task types per hashed project, session counts and savings; never ' +
+              'prompts, file contents or paths.'
       }
       const text = svc.preview('POST', DAILY_ROUTE, body)
       if (text === null) return 'The daily usage summary could not be built.'
@@ -1073,7 +1078,12 @@ export function serveCommand(
     const text = await (await servedCommand($)).run(c)
     void Promise.resolve(after?.(c.split(' ')[0]!)).catch(() => undefined)
     return { result: text }
-  }).catch(() => ({ result: `the setup failed; try ${COMMAND} status.` }))
+  }).catch(($: EngineInterface, e: any, next: any) => ({
+    result:
+      next?.error?.kind === 'timeout'
+        ? `The setup took too long; try again, or run ${COMMAND} status.`
+        : `The setup failed; try ${COMMAND} status.`,
+  }))
   on('command.run', { command: COMMAND_NAME }, async ($: EngineInterface, e: { args?: string }) => {
     const args = String(e?.args ?? '')
     const text = await (await servedCommand($)).run(args)
