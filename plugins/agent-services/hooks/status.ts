@@ -6,7 +6,7 @@
 // (phase 2) calls $.ui.status with statusText(...) after session.start and turn.complete.
 //
 // statusText(input) takes:
-//   auth       'ok' | 'signed_out' | 'auth_failed' | 'locked' (the 3.9 state from $.store)
+//   auth       'ok' | 'signed_out' | 'auth_failed' | 'locked' | 'paused' (the 3.9 state from $.store; paused: O2)
 //   metricsOn  the daily metrics upload (on unless the user turned it off);  saved  the last good GET /metrics/savings body ({ usd, pct, first_day })
 //              or null (refresh it when savingsDue says so, keep the old one when a fetch fails)
 //   counts     today's counts { route, compact_start, index } (todayCounts builds them from savings events)
@@ -34,6 +34,7 @@ export const DEFAULT_ON_NOTICE =
 // The status line while signed out or after an auth fail (plan 3.9).
 export const SIGN_IN_LINE = `${NAME}${SEP}signed out: ${COMMAND} login <email>`
 export const LOCKED_LINE = `${NAME}${SEP}paused: this account is locked; contact support, then ${COMMAND} login <email>`
+export const ORG_PAUSED_STATUS = `${NAME}${SEP}paused by your company; ask your admin` // O2
 // today's counts: [event kind, one, many]
 export const COUNTED: [string, string, string][] = [
   ['route', 'job on a cheaper model', 'jobs on a cheaper model'],
@@ -42,7 +43,7 @@ export const COUNTED: [string, string, string][] = [
 const DAY_RX = /^[0-9]{4}-([0-9]{2})-([0-9]{2})\n?$/
 
 export type Counts = Record<string, number>
-export type Auth = 'ok' | 'signed_out' | 'auth_failed' | 'locked'
+export type Auth = 'ok' | 'signed_out' | 'auth_failed' | 'locked' | 'paused'
 export type StatusInput = { auth: Auth; metricsOn: boolean; saved: unknown; counts: Counts; update?: string | null }
 
 const isObj = (v: unknown): v is Record<string, any> => typeof v === 'object' && v !== null && !Array.isArray(v)
@@ -104,6 +105,7 @@ export function render(metricsOn: boolean, saved: unknown, counts: Counts): stri
 /** The whole line: the sign-in line unless signed in (3.9), the update command when due, else render(). */
 export function statusText(input: StatusInput): string {
   if (input.auth === 'locked') return LOCKED_LINE
+  if (input.auth === 'paused') return ORG_PAUSED_STATUS
   if (input.auth !== 'ok') return SIGN_IN_LINE
   if (typeof input.update === 'string' && input.update) return input.update
   return render(input.metricsOn === true, input.saved, input.counts ?? {})

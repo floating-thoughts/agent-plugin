@@ -8,6 +8,8 @@
 //   const core = new Core({ transport: svcTransport(svc), store, ..., ...w.coreOptions() })
 //                                              // coreOptions: status, dashboard, metrics, counters.isLong
 //   after a main-agent turn:  await w.publish(() => publishDashboard($))     // dashboard.ts, guarded and logged
+//   the band above the prompt (R9):  createWiring({ ..., setBand: bandSetter($) }) and installBand(on) (band.ts);
+//                                    every refreshStatus hands it w.bandFacts() (cached reads only)
 //   session.start (background):  w.metricsTick()
 //   slash command (P3):  w.metricsPreview(), w.metricsOn(), w.metricsOff(), w.estimatePreview(),
 //                        w.estimateSend({ consent: true })
@@ -37,10 +39,13 @@ import { SALT_KEY } from './records'
 import { collect, pageChanged, publishedUrlOk, render as renderPage, renderDue } from './render'
 import { DEFAULT_ON_NOTICE, savingsDue, statusText, updateCommand, updateHintDue, weeklyText } from './status'
 import { counterDays, countsOf, dayCountsFromStore, dayEmpty, normalizeDay } from './day_counts'
-import { boardData, readOutboxDay } from './board_facts'
+import { boardData, readOutboxDay, timelineOf, weeklyOf } from './board_facts'
+import { bandFacts, paused, type BandFacts } from './band'
+import { readOrg } from './org'
 
 export { counterDays, countsOf, dayCountsFromStore, normalizeDay } from './day_counts'
 export { hookFor, svcTransport } from './transport'
+export { bandSetter, installBand } from './band'
 
 // Store keys of this module (shared by every session; nothing secret: numbers and days only).
 export const SAVINGS_CACHE_KEY = 'savings_cache' // { tried_at, body }: the last good GET /metrics/savings body
@@ -75,6 +80,7 @@ export type WiringDeps = {
   prices: Prices // modules/usage/prices.json, parsed
   template: () => Promise<string | null> // <plugin>/dashboard/index.html text
   setStatus?: (text: string) => unknown // $.ui.status
+  setBand?: (facts: BandFacts | null) => unknown // band.ts bandSetter: the band above the prompt (R9)
   outbox?: Outbox | null
   clock?: () => number // ms since the epoch
   random?: (n: number) => Uint8Array
@@ -231,10 +237,10 @@ export class Wiring {
   }
 
   /** 3.9: signed in and not blocked (re-read from the store at most every 5 s by the channel). */
-  async authState(): Promise<'ok' | 'login' | 'locked'> {
+  async authState(): Promise<'ok' | 'login' | 'locked' | 'paused'> {
     try {
       const st = await this.d.svc.authState()
-      return st === 'ok' || st === 'locked' ? st : 'login'
+      return st === 'ok' || st === 'locked' || st === 'paused' ? st : 'login'
     } catch {
       return 'login'
     }
@@ -332,7 +338,7 @@ export class Wiring {
 
   private async line(saved: Obj | null, update: string | null): Promise<string> {
     const st = await this.authState()
-    if (st !== 'ok') return statusText({ auth: st === 'locked' ? 'locked' : 'signed_out', metricsOn: false, saved: null, counts: {} })
+    if (st !== 'ok') return statusText({ auth: st === 'locked' || st === 'paused' ? st : 'signed_out', metricsOn: false, saved: null, counts: {} })
     const on = await this.metricsOnNow()
     return statusText({ auth: 'ok', metricsOn: on, saved: on ? saved : null, counts: await this.todayCounts(), update })
   }
@@ -352,6 +358,7 @@ export class Wiring {
     if (!(await this.authOk())) {
       const text = await this.line(null, null)
       this.show(text)
+      await this.band()
       return text
     }
     let update: string | null = null
@@ -364,13 +371,46 @@ export class Wiring {
     let text = await this.line(before, update)
     this.show(text)
     const held = first ? await first().catch(() => false) : false
+    await this.band()
     if (update !== null) return text // the update line stays until the next refresh
     const after = await this.savingsBody(true)
     if (!held && JSON.stringify(after) !== JSON.stringify(before)) {
       text = await this.line(after, null)
       this.show(text)
+      await this.band()
     }
     return text
+  }
+
+  // ---------------- the band above the prompt (R9, band.ts)
+
+  /**
+   * The band's facts: board_facts.ts timelineOf and weeklyOf over cached reads only (the savings figure as the
+   * status line takes it: only while the upload is on), so the band says what the board and the status line say.
+   * Null while signed out or paused (band.ts paused: an org pause included) and when there is nothing to show.
+   */
+  async bandFacts(): Promise<BandFacts | null> {
+    try {
+      if (!(await this.authOk()) || paused(this.d.svc.gateState())) return null
+      const today = localDay(this.now())
+      const on = await this.metricsOnNow()
+      const timeline = timelineOf(await this.outboxToday(), await this.todayCounts(), today)
+      const report = await this.cached(REPORT_CACHE_KEY, '/report', REPORT_TTL_MS, false)
+      return bandFacts(timeline, weeklyOf(on ? await this.savingsBody(false) : null, report, today, { metricsOn: on }))
+    } catch {
+      return null
+    }
+  }
+
+  /** The band's state after a status-line refresh (nothing when no band is wired). */
+  private async band(): Promise<void> {
+    if (!this.d.setBand) return
+    const facts = await this.bandFacts()
+    try {
+      this.d.setBand(facts)
+    } catch {
+      // the band never breaks a hook
+    }
   }
 
   // ---------------- the one-time and weekly lines at session start (log line and toast)
@@ -464,7 +504,9 @@ export class Wiring {
       estimate: isObj(est) ? est : null,
       servedFetch: served,
     })
-    return boardData(base, { outboxLines: await this.outboxToday(), todayCounts: await this.todayCounts(), savings, report, status })
+    // O3: a person in an org (any savings choice, "each" included) is told on the board that the admin sees the figure
+    const org = await readOrg(this.d.store)
+    return boardData(base, { outboxLines: await this.outboxToday(), todayCounts: await this.todayCounts(), savings, report, status: { ...(status ?? {}), org } })
   }
 
   /** Today's outbox lines of every session, for the board's timeline (this session's held lines written first). */

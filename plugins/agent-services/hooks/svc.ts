@@ -41,6 +41,7 @@ import {
 import type { Random } from './e2e'
 import { Outbox } from './outbox'
 import type { RequestLine } from './outbox'
+import { keepOrg, ORG_PAUSED_LINE, validOrg } from './org'
 import { devicePublicKey, newDeviceSeed, signedHeaders, verifyResponse } from './sig'
 import {
   CREDENTIAL_KEYS,
@@ -117,7 +118,7 @@ export const HOOK_BUDGET_MS: Record<Hook, number> = { tool: 8000, spawn: 1000, p
 
 export const ROTATE_MARGIN_S = 7 * 86400
 export const MAX_ATTEMPTS = 3
-export const BLOCK_SECONDS = { locked_out: 900, account_locked: 3600 } as const
+export const BLOCK_SECONDS = { locked_out: 900, account_locked: 3600, org_paused: 60 } as const // org_paused: O2, short so an unpause is seen soon
 export const THROTTLE_MAX_SECONDS = 300 // the longest signed Retry-After honored
 export const THROTTLE_NOTICE_AFTER = 120
 export const NOTICE_EVERY_MS = 3600000
@@ -160,6 +161,7 @@ export const LOCKED_LINE =
 export const GATE_NOTICES: Record<string, string> = {
   login: PAUSED_LINE,
   locked: LOCKED_LINE,
+  paused: ORG_PAUSED_LINE,
   upgrade: 'agent-services is paused: this plugin version is no longer accepted; update the plugin (minimum {min_shell}).',
   offline: 'agent-services is paused: offline mode is on.',
   unavailable: 'agent-services is paused: the server could not be reached; it tries again at the next session.',
@@ -172,6 +174,7 @@ export const NOTICE_TEXT: Record<string, string> = {
   session_replaced: 'Your account signed in on another device; sign in again here with /agent-services login.',
   claude_account_mismatch: 'The Claude account changed since sign-in; sign in again to re-pair this device.',
   account_locked: 'Your agent-services account is locked; contact support.',
+  org_paused: ORG_PAUSED_LINE,
   locked_out: 'Too many failed requests; agent-services paused for 15 minutes.',
   rate_limited:
     'agent-services is busy and is slowing requests down; the plugin keeps working on its defaults and retries on its own.',
@@ -226,7 +229,7 @@ export type Result = {
 type Res = Result & { sent?: string }
 
 export type GateState = { open: boolean; reason: string | null; min_shell: string | null }
-export type AuthState = 'ok' | 'login' | 'locked'
+export type AuthState = 'ok' | 'login' | 'locked' | 'paused'
 type Block = { code: string; until: number | null; token_sha256: string | null }
 type Settings = {
   offline: boolean
@@ -445,6 +448,7 @@ export class Svc {
     else {
       const code = await this.blocked()
       if (code === 'account_locked' || code === 'locked_out') value = 'locked'
+      else if (code === 'org_paused') value = 'paused'
       else if (code) value = 'login'
     }
     this.authCache = { at: now, value }
@@ -454,7 +458,7 @@ export class Svc {
   /** The line tools answer in auth fail (3.9), or null while signed in. */
   async authLine(): Promise<string | null> {
     const st = await this.authState()
-    return st === 'ok' ? null : st === 'locked' ? LOCKED_LINE : PAUSED_LINE
+    return st === 'ok' ? null : st === 'locked' ? LOCKED_LINE : st === 'paused' ? ORG_PAUSED_LINE : PAUSED_LINE
   }
 
   async status(): Promise<Record<string, unknown>> {
@@ -714,9 +718,10 @@ export class Svc {
       }
       if (ist === 401 && o.signed) break // recovered (or not) by the caller: 3.3 item 4
       if (ist === 423) {
-        await this.setBlock(code, BLOCK_SECONDS.account_locked, o.token ?? null)
+        const paused = code === 'org_paused' // O2: the org's admin paused it; the sign-in stays
+        await this.setBlock(code, paused ? BLOCK_SECONDS.org_paused : BLOCK_SECONDS.account_locked, o.token ?? null)
         this.notice(code)
-        if (o.signed) this.setGate('locked')
+        if (o.signed) this.setGate(paused ? 'paused' : 'locked')
         break
       }
       if (ist === 429 && code === 'locked_out') {
@@ -934,7 +939,7 @@ export class Svc {
     if (await this.cooling()) return R(false, { error: 'rate_limited' }) // the gate stays as it is
     const err = await this.ensureFresh(d, rotate)
     if (err) {
-      this.setGate(err === 'account_locked' || err === 'locked_out' ? 'locked' : 'login')
+      this.setGate(err === 'account_locked' || err === 'locked_out' ? 'locked' : err === 'org_paused' ? 'paused' : 'login')
       return R(false, { error: err })
     }
     const res = await this.exchange('POST', PREFIX + HELLO_PATH, JSON.stringify({ shell: this.d.shellVersion, contract: API }), 'auth', d, {
@@ -946,13 +951,15 @@ export class Svc {
       if (
         res.status === 200 &&
         isObj(b) &&
-        Object.keys(b).sort().join(',') === 'accept,plan,routes' &&
+        ['accept,plan,routes', 'accept,org,plan,routes'].includes(Object.keys(b).sort().join(',')) &&
+        (b.org === undefined || validOrg(b.org)) &&
         b.accept === true &&
         PLAN_VALUES.includes(b.plan as string) &&
         Array.isArray(b.routes) &&
         b.routes.every((r) => typeof r === 'string' && ROUTE_KEY_RX.test(r))
       ) {
         await safeSet(this.kv, KEYS.plan, b.plan)
+        await keepOrg(this.kv, b.org, this.d.now(), (on) => this.setService('metrics', on)) // O3
         this.planRoutes = new Set(b.routes as string[])
         this.refused.clear()
         this.setGate(null)
@@ -964,6 +971,7 @@ export class Svc {
     if (res.status === 426 && res.error === 'upgrade_required') {
       // attempt() closed the gate with the minimum
     } else if (res.status === 401 || res.error === 'not_logged_in') this.setGate('login')
+    else if (res.status === 423 && res.error === 'org_paused') this.setGate('paused')
     else if (res.status === 423 || (res.status === 429 && res.error === 'locked_out')) this.setGate('locked')
     else if (throttled(res.status, res.error)) {
       // rate limited or busy: the server is up; the gate keeps its state
@@ -1008,7 +1016,7 @@ export class Svc {
    * first, inside the caller's deadline. */
   private async ensureOpen(d: Deadline, hook: Hook): Promise<boolean> {
     if (this.gs.open) return true
-    if (!['unknown', 'login', 'locked'].includes(this.gs.reason ?? '')) return false // unverified, unavailable, upgrade, offline
+    if (!['unknown', 'login', 'locked', 'paused'].includes(this.gs.reason ?? '')) return false // unverified, unavailable, upgrade, offline
     const hello = this.handshake(hook)
     const got = await this.within(hello, d.remaining())
     return got !== null && this.gs.open

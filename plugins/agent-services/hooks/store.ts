@@ -42,6 +42,7 @@ export const KEYS = {
   badEnvelope: 'bad_envelope', // { n, at }: bad_envelope answers in a row, shared, so the IP budget is spared
   settings: 'settings', // { offline, services, served, metrics_set }: the user's switches (port of settings.json)
   sharing: 'sharing', // { on, at }: the one savings-record choice (command.ts); its parts keep their own switches
+  org: 'org', // { savings, at, told }: the org admin's savings-record choice from the hello (org.ts, O3)
   savingsPrompt: 'savings_prompt', // { answer: 'not_now', at }: an earlier "Not now" to the savings question
   metricsState: 'metrics_state', // { previewed_day, enabled_day, last_uploaded_day } (command.ts, wiring.ts)
 } as const

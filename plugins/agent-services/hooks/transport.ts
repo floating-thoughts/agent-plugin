@@ -37,11 +37,11 @@ export function svcTransport(svc: Svc): Transport {
     async gateState(): Promise<GateState> {
       try {
         const a = await svc.authState()
-        if (a !== 'ok') return { open: false, reason: a === 'locked' ? 'locked' : 'login', minShell: null }
+        if (a !== 'ok') return { open: false, reason: a === 'locked' || a === 'paused' ? a : 'login', minShell: null }
         const g = svc.gateState()
         // Signed in (in the store) while this session's gate still says login or locked: another session signed in
         // since this one's 401 or 423 (3.9 item 5). Report unknown so the core handshakes again.
-        if (!g.open && (g.reason === 'login' || g.reason === 'locked')) return { open: false, reason: 'unknown', minShell: null }
+        if (!g.open && (g.reason === 'login' || g.reason === 'locked' || g.reason === 'paused')) return { open: false, reason: 'unknown', minShell: null }
         return { open: g.open, reason: g.reason, minShell: g.min_shell }
       } catch {
         return { open: false, reason: 'unavailable', minShell: null }

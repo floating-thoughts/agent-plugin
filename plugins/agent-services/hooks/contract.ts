@@ -7,7 +7,7 @@ export type ToolSpec = {
   input_schema: Record<string, unknown>
 }
 
-export const CONTRACT_SHA256 = "f30e46ef5c6691811bc17ef77199ad57010ccad5ff73e4dcb86b2e430e98137c"
+export const CONTRACT_SHA256 = "46307e1694abf110b612a3ca109a9140be8793508d9fd95443fddb4d3d52add4"
 
 export const API = "svc/1" as const
 export const PREFIX = "/svc/v1" as const
@@ -246,6 +246,9 @@ export const CONTRACT = {
   ],
   "422": [
    "bad_request"
+  ],
+  "423": [
+   "org_paused"
   ],
   "429": [
    "rate_limited"
@@ -691,6 +694,14 @@ export const CONTRACT = {
     "deliver",
     "checkpoint"
    ]
+  },
+  "OrgSavings": {
+   "enum": [
+    "each",
+    "on",
+    "off"
+   ],
+   "description": "O3: the org admin's savings-record choice (each = each person decides; on or off = for everyone). The POST /auth/hello answer carries it as {\"org\": {\"savings\": <this>}} for an account in an org, only to a shell release 0.3.0 or later (an older shell, and a dev shell, may refuse an unknown key). 423 org_paused (O2) answers every signed request and the sign-in while the org's admin has paused the org; sign-out still works"
   },
   "PackTarget": {
    "enum": [

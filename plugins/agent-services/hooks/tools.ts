@@ -27,6 +27,7 @@ import type { EngineInterface, Register } from 'claude-code'
 import { TOOLS as CONTRACT_TOOLS } from './contract'
 import { AUTH_FAIL_REASONS, checkArgs, gateNotice, LOCKED_LINE, openAnswer, SIGN_IN_LINE } from './core'
 import type { GateState } from './engine_types'
+import { ORG_PAUSED_LINE } from './org'
 
 export const PLUGIN = 'agent-services'
 export const TOOL_PREFIX = `mcp__${PLUGIN}__`
@@ -102,7 +103,8 @@ export function render(v: unknown): string {
 }
 
 /** The one line every tool answers in auth fail (3.9 item 1). */
-export const authFailLine = (reason: string | null): string => (reason === 'locked' ? LOCKED_LINE : SIGN_IN_LINE)
+export const authFailLine = (reason: string | null): string =>
+  reason === 'locked' ? LOCKED_LINE : reason === 'paused' ? ORG_PAUSED_LINE : SIGN_IN_LINE
 
 type Mark = { authOk: boolean }
 
@@ -255,7 +257,7 @@ export function installTools(on: On, o: InstallOptions): void {
 // The core's Transport over svc.ts is wiring.ts svcTransport; the tools only need the auth-fail line.
 
 /** ToolDeps.authLine over svc.ts Svc: the sign-in or locked line in auth fail, else null. */
-export function svcAuthLine(svc: { authState(fresh?: boolean): Promise<'ok' | 'login' | 'locked'> }): (fresh?: boolean) => Promise<string | null> {
+export function svcAuthLine(svc: { authState(fresh?: boolean): Promise<'ok' | 'login' | 'locked' | 'paused'> }): (fresh?: boolean) => Promise<string | null> {
   return async (fresh = false) => {
     const st = await svc.authState(fresh)
     return st === 'ok' ? null : authFailLine(st)

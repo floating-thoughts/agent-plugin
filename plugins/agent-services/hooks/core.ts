@@ -24,6 +24,7 @@ import { Records } from './records'
 import { SessionSummary } from './summary'
 import type { Clock, GateState, KV, Random, ReadText, SvcResult, Transport } from './engine_types'
 import { indexed, isAbsPath, joinPath, normpath, normPath } from './paths'
+import { ORG_PAUSED_LINE } from './org'
 
 export { indexed, normpath, normPath } from './paths'
 
@@ -35,7 +36,7 @@ export const GATE_RETRY_SECONDS = 300 // an unreachable server is tried again af
 export const ANSWER_KEYS = ['action', 'reason', 'set', 'context', 'notice', 'fallback'] as const
 export const TOOL_DEADLINE_MS = 8000 // a tool answer in all (plan 3.3 item 3)
 export const HELLO_DEADLINE_MS = 30000 // background
-export const AUTH_FAIL_REASONS = ['login', 'locked'] // plan 3.9
+export const AUTH_FAIL_REASONS = ['login', 'locked', 'paused'] // plan 3.9; paused: the org's admin paused it (O2)
 
 export const CHECKPOINT_MARK = 'Checkpoint reached:'
 export const CHECKPOINT_NOW = '[agent-services server note, not written by the user] The server suggests a checkpoint now: once this ' +
@@ -50,6 +51,7 @@ export const LOCKED_LINE = 'agent-services is paused: this account is locked; co
 export const GATE_NOTICES: Readonly<Record<string, string>> = {
   login: SIGN_IN_LINE,
   locked: LOCKED_LINE,
+  paused: ORG_PAUSED_LINE,
   upgrade: 'agent-services is paused: this plugin version is no longer accepted; update the plugin (minimum {min_shell}).',
   offline: 'agent-services is paused: offline mode is on.',
   unavailable: 'agent-services is paused: the server could not be reached; it tries again at the next session.',

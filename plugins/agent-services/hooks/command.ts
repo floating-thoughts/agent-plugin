@@ -40,6 +40,7 @@ import { gateNotice, LOCKED_LINE, NOTICE_TEXT, PAUSED_LINE, PLAN_NOTICE, SERVED_
 import type { Result, Svc } from './svc'
 import { askConsent, claimAsk, CONSENT_KEY, consentState, dashboardUrl, readConsent, sharingState } from './consent'
 import { dataDir, engineDirs, envOf, readTextOf } from './engine_env'
+import { ORG_PAUSED_LINE, ORG_SAVINGS_TEXT, ORG_SET_TEXT, orgChoice, orgNotice, sharingQuestion } from './org'
 
 export {
   askConsent,
@@ -161,6 +162,7 @@ export const ERROR_TEXT: Record<string, string> = {
   not_in_plan: "This account's plan does not include this service.",
   service_off: 'This service is switched off on this machine.',
   account_locked: NOTICE_TEXT.account_locked!,
+  org_paused: ORG_PAUSED_LINE,
   locked_out: NOTICE_TEXT.locked_out!,
   unsigned_response: UNVERIFIED,
   bad_signature: UNVERIFIED,
@@ -393,7 +395,8 @@ export class Command {
     if (!known.includes(sub)) return `Unknown subcommand "${sub.slice(0, 40)}". ${USAGE}`
     if (!AUTH_FAIL_COMMANDS.includes(sub)) {
       const st = await svc.authState(true)
-      if (st !== 'ok') return st === 'locked' ? LOCKED_LINE : PAUSED_LINE // 3.9: nothing else works, nothing is sent
+      // 3.9: nothing else works, nothing is sent
+      if (st !== 'ok') return st === 'locked' ? LOCKED_LINE : st === 'paused' ? ORG_PAUSED_LINE : PAUSED_LINE
     }
     switch (sub) {
       case 'status':
@@ -434,6 +437,7 @@ export class Command {
       st = await svc.status()
     }
     if (auth === 'locked') lines.push(LOCKED_LINE)
+    else if (auth === 'paused') lines.push(ORG_PAUSED_LINE)
     else if (auth !== 'ok') lines.push(`agent-services: signed out. Sign in with ${COMMAND} login.`)
     else {
       const until = num(st.expires_at)
@@ -450,6 +454,11 @@ export class Command {
         if (n) lines.push(n)
       }
       if (st.plan === 'guard') lines.push(PLAN_NOTICE)
+      const org = await orgChoice(this.d.store) // O3: the company's choice, shown instead of the question
+      if (org) {
+        lines.push(ORG_SAVINGS_TEXT[org]!)
+        await orgNotice(this.d.store) // said here, so the one-time line is not said again
+      }
     }
     if (st.offline) lines.push(`Offline mode is on: nothing is sent; ${COMMAND} offline off turns it off.`)
     const seen = new Set<string>(lines)
@@ -474,6 +483,7 @@ export class Command {
     const sub = (rest[0] ?? '').toLowerCase()
     if (rest.length === 0) return this.dashboardLine()
     if (rest.length !== 1 || (sub !== 'allow' && sub !== 'not_now')) return USAGE
+    if (await orgChoice(this.d.store)) return ORG_SET_TEXT
     await safeSet(this.d.store, CONSENT_KEY, { answer: sub, at: this.d.now() })
     return sub === 'allow'
       ? 'The dashboard is allowed: it is published as a private Artifact when Claude finishes this reply, and kept ' +
@@ -485,6 +495,7 @@ export class Command {
    * not allowed or snoozed on its own. An earlier board "allow" means the record is already set up. */
   private async sharingDue(): Promise<boolean> {
     const now = this.d.now()
+    if (await orgChoice(this.d.store)) return false // O3: the company chose for everyone
     if ((await sharingState(this.d.store, now)) !== 'ask') return false
     return consentState(await readConsent(this.d.store), now) === 'ask'
   }
@@ -493,13 +504,21 @@ export class Command {
    * the one question (the question tool), then apply the answer with the setup tool. null: nothing to ask. */
   async onboarding(): Promise<string | null> {
     if ((await this.d.svc.authState()) !== 'ok') return null
+    const told = await orgNotice(this.d.store) // O3: the company's choice, said once
+    if (told) {
+      return (
+        '[agent-services plugin note, not written by the user] Before working on the message, tell the user this ' +
+        `one line from the agent-services plugin, in these words: "${told}" Then go on with the message.`
+      )
+    }
     if (!(await this.sharingDue())) return null
     const tool = 'mcp__agent-services__setup'
+    const question = await sharingQuestion(this.d.store, SHARING_QUESTION)
     const [on, off, show] = SHARING_OPTIONS
     return (
       '[agent-services plugin note, not written by the user] The user has the agent-services plugin installed and ' +
       'its savings record is not set up yet. Before working on the message, ask the user this one question with ' +
-      `your question tool (AskUserQuestion), header "${SHARING_HEADER}", in these words: "${SHARING_QUESTION}" ` +
+      `your question tool (AskUserQuestion), header "${SHARING_HEADER}", in these words: "${question}" ` +
       `with the options, in this order, "${on}", "${off}" and "${show}". Then call ${tool} with command ` +
       `"sharing on", "sharing not_now" or "sharing preview" to match the answer; for "${show}" show the user the ` +
       'text it returns, and call it with "sharing on" only if the user then says yes. If the user dismisses the ' +
@@ -511,6 +530,7 @@ export class Command {
   private async sharing(rest: string[]): Promise<string> {
     const sub = (rest[0] ?? '').toLowerCase()
     if (rest.length !== 1) return USAGE
+    if (sub !== 'preview' && (await orgChoice(this.d.store))) return ORG_SET_TEXT
     if (sub === 'on') return this.setSharing(true)
     if (sub === 'not_now' || sub === 'off') return this.setSharing(false)
     if (sub === 'preview') return this.sharingPreview()
@@ -577,7 +597,8 @@ export class Command {
     if (!this.d.ask || !claimAsk()) return null
     let a: string
     try {
-      a = String(await this.d.ask(SHARING_QUESTION, { options: SHARING_OPTIONS, header: SHARING_HEADER })).trim()
+      const q = await sharingQuestion(this.d.store, SHARING_QUESTION)
+      a = String(await this.d.ask(q, { options: SHARING_OPTIONS, header: SHARING_HEADER })).trim()
     } catch {
       return null
     }
@@ -588,6 +609,7 @@ export class Command {
   }
 
   private async dashboardLine(): Promise<string> {
+    if ((await orgChoice(this.d.store)) === 'off') return 'Dashboard: off, set by your company.' // O3
     let state = consentState(await readConsent(this.d.store), this.d.now())
     let asked: string | null = null
     if (state === 'ask') {
@@ -730,6 +752,7 @@ export class Command {
     const svc = this.d.svc
     const sub = (rest[0] ?? 'show').toLowerCase()
     const on = Boolean((await svc.settings()).services.metrics)
+    if (['on', 'off', 'not_now', 'mail'].includes(sub) && (await orgChoice(this.d.store))) return ORG_SET_TEXT // O3
     if (sub === 'show' && rest.length <= 1) {
       if (!on) {
         return (

@@ -10,7 +10,7 @@
 //   timelineOf(lines, counts, today)          -> { items: [{ at, kind, count, text }], counts, summary }
 //   weeklyOf(savings, report, today, opts)    -> { this_week_usd, last_week_usd, ..., lines: [text] }
 //   readOutboxDay(fs, dir, nowMs)             -> today's outbox lines of every session (objects)
-//   inOrg(status)                             -> the org-membership hook point (null until the server says)
+//   inOrg(status)                             -> true for a person in an org (status.org: readOrg), else null
 //   boardData(collected, input)               -> render.ts collect()'s answer plus timeline and weekly (BOARD_FIELDS)
 //
 // collect() stays the port of host/dashboard.py (its parity tests); the page's data slot is BOARD_FIELDS.
@@ -52,7 +52,7 @@ export type OutboxReadFs = {
 
 const isObj = (v: unknown): v is Obj => typeof v === 'object' && v !== null && !Array.isArray(v)
 const num = (v: unknown): number | null => (typeof v === 'number' && Number.isFinite(v) ? v : null)
-const money = (v: number): string => `$${fixed(Math.abs(v), 2, true)}`
+export const money = (v: number): string => `$${fixed(Math.abs(v), 2, true)}`
 const parse = (text: unknown): Obj | null => {
   if (typeof text !== 'string' || !text) return null
   try {
@@ -214,9 +214,9 @@ export function weeklyLines(w: Obj, metricsOn?: boolean | null): string[] {
 
 /**
  * Hook point for org membership (owner decision 2026-10-31: an employee's own board says that the company admin
- * sees their savings figure). The plugin cannot know it yet: no service answer carries org membership (it arrives
- * with O1/O3 in /auth/hello). Until then this answers null and the line stays off; once the status carries
- * `org` (an object or true) or a non-empty `org_id`, it answers true.
+ * sees their savings figure). wiring.ts dashboardData passes `org` = org.ts readOrg (the hello answer's org, kept
+ * under KEYS.org by O3): an object for any savings choice ("each" included) answers true; null (no org) answers
+ * null and the line stays off. A non-empty `org_id` also answers true.
  */
 export function inOrg(status: unknown): boolean | null {
   if (!isObj(status)) return null

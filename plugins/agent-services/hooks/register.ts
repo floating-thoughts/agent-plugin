@@ -24,9 +24,9 @@ import { holdWrite, lessonHold, pushAgain, pushLessons, pushStart, surveyTool } 
 import { PRICES } from './prices'
 import { engineStore, safeDelete, safeGet, type KV } from './store'
 import { Svc, type HttpAnswer } from './svc'
-import { engineSleep, installTools, registerTools, SESSION_FALLBACK, svcAuthLine } from './tools'
+import { engineSleep, installTools, registerTools, SESSION_FALLBACK, svcAuthLine, toolInput } from './tools'
 import { probeProcess, selfUpdate, type Gate } from './update'
-import { createWiring, svcTransport, type Wiring } from './wiring'
+import { bandSetter, createWiring, installBand, svcTransport, type Wiring } from './wiring'
 
 type Ev = Record<string, any>
 type Usage = { input: number; output: number; cache_read: number; cache_write: number }
@@ -60,12 +60,6 @@ const usage = (u: Ev | null | undefined): Usage | null =>
         cache_write: u.cache_creation_input_tokens ?? 0,
       }
     : null
-
-// The tool input: the engine event without the engine's own fields.
-const rest = (e: Ev): Ev => {
-  const { tool: _tool, agentId: _agentId, tool_use_id: _call, ...input } = e
-  return input
-}
 
 // An engine lookup that may fail: null then.
 const maybe = async <T>(f: () => Promise<T> | T): Promise<T | null> => {
@@ -183,6 +177,7 @@ async function build($: EngineInterface): Promise<Rt | null> {
       prices: PRICES,
       template: async () => maybe(async () => String(await $.fs.read(`${$.plugin.root}/dashboard/index.html`))),
       setStatus,
+      setBand: bandSetter($), // band.ts: the band above the prompt (R9)
       outbox,
       clock: now,
       projectsRoot: `${dirs.configDir}/projects`,
@@ -272,6 +267,7 @@ export const register: Register = (on) => {
   }, () => {
     void runtime?.then((r) => r && refreshStatus(r.setStatus, r.wiring, r.store)).catch(() => undefined)
   })
+  installBand(on) // band.ts: the band above the prompt draws the facts setBand writes (R9)
 
   on('session.start', async ($, e: Ev, next) => {
     declare($)
@@ -324,9 +320,9 @@ export const register: Register = (on) => {
   })
 
   on('tool.call', async ($, e: Ev, next) => {
-    const held = await holdWrite(ready($), e.tool, rest(e), () => $.session.cwd()) // phase.ts, signed in only
+    const held = await holdWrite(ready($), e.tool, toolInput(e), () => $.session.cwd()) // phase.ts, signed in only
     if (held) return { deny: held }
-    const fields = { tool: e.tool, input: rest(e), call: e.tool_use_id ?? null }
+    const fields = { tool: e.tool, input: toolInput(e), call: e.tool_use_id ?? null }
     const agent = e.agentId ?? null
     const a = await send($, 'pre_tool', agent, fields)
     show($, a?.notice)
@@ -334,7 +330,7 @@ export const register: Register = (on) => {
       return { deny: a.reason }
     }
     const done: Ev = await next(a?.action === 'rewrite' && a.set ? { ...e, ...a.set } : e)
-    await surveyTool(ready($), e.tool, rest(e), done, () => $.session.cwd()) // phase.ts: R11 survey counts
+    await surveyTool(ready($), e.tool, toolInput(e), done, () => $.session.cwd()) // phase.ts: R11 survey counts
     show($, (await send($, 'post_tool', agent, { ...fields, ok: done?.deny === undefined && done?.isError !== true }))?.notice)
     return done
   }).catch(($, e, next) => next(e))
