@@ -10,14 +10,16 @@
 // - Long reports (agentResult for a foreground Agent call, notificationEvent for a background one): a subagent report
 //   longer than the table's cap is written whole to the report folder, and the conversation gets its opening and the
 //   file's path instead. Only reports of subagents the main conversation started; any failure keeps the report as is.
-// - Usage line (spawnGate): only where the table has a "redline" (never in the product table), a spawn is refused when
-//   the weekly plan window is past the line, read from the engine's own session usage.
+// - Usage line (spawnGate): where the table has a "redline", a spawn is refused when the weekly plan window is past
+//   the line, read from the engine's own session usage. The line can depend on the subscription plan (by_plan: the
+//   first entry whose pattern matches the plan words in .claude.json, else the table's own line); the engine's usage
+//   answer carries no plan. by_reset lines win over by_plan.
 // - Demand lock and commit check (ownerCheck, from flow.ts flowLock): only where the table has a "demand" or
 //   "coauthor" part (never in the product table). A requirements file the table names, whose opening lines say it is locked, takes only an
 //   amendment appended at its end, by the main conversation; a shell command never changes it. A commit whose
 //   Co-Authored-By trailer names another model than the one the agent runs on is refused with the right line.
 import type { EngineInterface } from 'claude-code'
-import { dataDir, engineDirs } from './engine_env'
+import { claudePlanOf, dataDir, engineDirs, readTextOf } from './engine_env'
 import { methodsLevel } from './methods_level'
 import { expired, heldPlan, planOf } from './panel'
 import { rulesLive, rulesTable } from './rules'
@@ -138,6 +140,7 @@ const writers = new Map<string, string>() // spelled path -> 'main' or the writi
 /** Tests only: forget the session's writers. */
 export function resetSubagentsForTest(): void {
   writers.clear()
+  planHeld = null
 }
 
 /** tool.call (from flow.ts flowLock): the deny reason for a subagent changing (or, with hide_reads, reading) a test
@@ -220,12 +223,38 @@ export function isModuleSpawn(description: unknown, parent: unknown): boolean {
   return rx(String(r.module_description ?? '(?!)'), 'i')?.test(String(description ?? '').trim()) === true
 }
 
-/** Why a spawn is refused at this weekly usage, or null (no redline in the table, no figure, under the line). */
-export function redlineRefusal(week: Week, isModule: boolean): string | null {
+let planHeld: { at: number; text: string } | null = null // the plan words, read at most every 10 minutes
+
+/** The plan words from .claude.json, or "" (no by_plan in the table: nothing is read). Never throws. */
+async function claudePlan($: EngineInterface): Promise<string> {
+  try {
+    if (!isObj(part('redline')?.by_plan)) return ''
+    if (planHeld && Date.now() - planHeld.at < 600_000) return planHeld.text
+    const d = await engineDirs($)
+    const text = await claudePlanOf(readTextOf($), d.configSet ? [d.configDir, d.home] : [d.home])
+    planHeld = { at: Date.now(), text }
+    return text
+  } catch {
+    return ''
+  }
+}
+
+/** The line for this plan: the first by_plan entry whose `match` pattern finds the plan words, else the table's own. */
+function planLine(r: Obj, plan: string | null): Obj {
+  if (!isObj(r.by_plan) || !plan) return r
+  for (const x of Object.values(r.by_plan)) {
+    if (isObj(x) && rx(String(x.match ?? '(?!)'), 'i')?.test(plan)) return { ...r, ...x }
+  }
+  return r
+}
+
+/** Why a spawn is refused at this weekly usage, or null (no redline in the table, no figure, under the line). The
+ * line: this week's by_reset entry, else the plan's by_plan entry, else the table's own; an unknown plan takes that. */
+export function redlineRefusal(week: Week, isModule: boolean, plan: string | null = null): string | null {
   const r = part('redline')
   if (!r || !week || typeof week.pct !== 'number') return null
   const by = isObj(r.by_reset) ? r.by_reset[(week.resets_at ?? '').slice(0, 10)] : undefined
-  const line = isObj(by) ? by : r
+  const line = isObj(by) ? by : planLine(r, plan)
   const values = { pct: String(Math.round(week.pct)), resets: week.resets_at ?? 'the weekly reset' }
   if (typeof line.agents === 'number' && week.pct >= line.agents) return fill(r.agents_reason, { ...values, line: String(line.agents) })
   if (isModule && typeof line.modules === 'number' && week.pct >= line.modules) {
@@ -242,7 +271,7 @@ export async function redlineOverride($: EngineInterface, text: unknown): Promis
     if (!r || typeof text !== 'string' || text.length > 2000 || !rx(String(r.override_rx ?? '(?!)'), 'i')?.test(text)) return
     const week = planOf(await $.session.usage()).week
     // only once the line is reached: the word before that grants nothing (no silent override for the rest of the week)
-    if (!week || !week.resets_at || redlineRefusal(week, true) === null) return
+    if (!week || !week.resets_at || redlineRefusal(week, true, await claudePlan($)) === null) return
     await engineStore($).set('redline_override', week.resets_at)
     try {
       $.ui.toast(fill(r.override_notice, { resets: week.resets_at }))
@@ -456,7 +485,7 @@ export async function spawnGate($: EngineInterface, e: Obj, rt?: Ready, redlineO
       const live = planOf(await Promise.resolve().then(() => $.session.usage()).catch(() => null)).week
       const held = heldPlan().week
       const week = live && !expired(live, Date.now()) ? live : held && !expired(held, Date.now()) ? held : null
-      let refusal = redlineRefusal(week, isModuleSpawn(e.description, e.parentAgentId))
+      let refusal = redlineRefusal(week, isModuleSpawn(e.description, e.parentAgentId), await claudePlan($))
       // the user said to go past the line: allowed until this weekly reset (redlineOverride)
       if (refusal && week?.resets_at && (await engineStore($).get('redline_override')) === week.resets_at) refusal = null
       if (refusal) {

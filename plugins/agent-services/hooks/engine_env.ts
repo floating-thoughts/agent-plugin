@@ -27,6 +27,26 @@ export async function claudeHashOf(readText: (path: string) => Promise<string | 
   return ''
 }
 
+/** The subscription plan words in .claude.json's oauthAccount: the rate-limit tiers, the plan's display name and
+ * the organization type, joined by spaces ("" when none). Only these four fields are read; nothing is sent. */
+export function planTextOf(data: unknown): string {
+  const a = isObj(data) && isObj(data.oauthAccount) ? data.oauthAccount : {}
+  const keys = ['userRateLimitTier', 'organizationRateLimitTier', 'planDisplayName', 'organizationType']
+  return keys.map((k) => a[k]).filter((v): v is string => typeof v === 'string' && v.trim() !== '').join(' ')
+}
+
+/** planTextOf the first readable .claude.json in `dirs` (as claudeHashOf); "" when there is none. */
+export async function claudePlanOf(readText: (path: string) => Promise<string | null>, dirs: readonly string[]): Promise<string> {
+  for (const d of dirs) {
+    if (!d) continue
+    try {
+      const t = await readText(`${d.replace(/[\\/]+$/, '')}/.claude.json`)
+      if (t !== null) return planTextOf(JSON.parse(t))
+    } catch {}
+  }
+  return ''
+}
+
 // ------------------------------------------------------------------ the engine environment
 
 export async function envOf($: EngineInterface, name: string): Promise<string | undefined> {
