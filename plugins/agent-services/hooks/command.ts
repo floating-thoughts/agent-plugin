@@ -285,6 +285,16 @@ export const validEmail = (s: unknown): s is string =>
 
 /** The code as typed in the dialog: spaces and dashes people add between digits are dropped. */
 export const cleanCode = (s: string): string => s.replace(/[\s-]+/g, '')
+// The mailed sign-in code is 8 digits (6 to 8 taken). Owner 2026-11-01: after login the person pastes
+// it as their next message (the dialog put typing last, under Other); prompt.submit catches it before the model.
+export const PASTED_CODE_RX = /^[0-9]{6,8}$/
+// prompt.submit has a time budget and forwards the message when a hook runs past it: the pasted path answers by then
+export const PASTED_WAIT_MS = 6_000
+export const PASTED_SLOW = `The sign-in is still being checked. Run ${COMMAND} status in a moment to see whether it finished.`
+export const PASTED_FAILED = `The sign-in did not finish. Enter the code with ${COMMAND} code.`
+export const PASTE_CODE_LINE =
+  'Paste the 8-digit code from that email here as your next message. It goes to agent-services only, not to ' +
+  `Claude, and works for 10 minutes. (Or run ${COMMAND} code.)`
 
 // ------------------------------------------------------------------ auto-update (host/auto_update.py, read only)
 
@@ -765,8 +775,7 @@ export class Command {
     if (!r.ok) {
       return `No code was mailed: ${errorText(r.error)}`
     }
-    const mailed = `A sign-in code was mailed to ${email} if it belongs to an agent-services account.`
-    return this.finish(email, mailed)
+    return `A sign-in code was mailed to ${email} if it belongs to an agent-services account.\n${PASTE_CODE_LINE}`
   }
 
   private async code(rest: string[]): Promise<string> {
@@ -793,6 +802,29 @@ export class Command {
     }
     const code = cleanCode(typed)
     if (code.length < 1 || code.length > 32) return head + `That is not a sign-in code. Try again with ${COMMAND} code.`
+    return this.complete(email, code, head)
+  }
+
+  /** A message that is only a sign-in code while a sign-in waits for one: finish it (the answer), else null. */
+  async pasted(text: string): Promise<string | null> {
+    const code = cleanCode(String(text ?? ''))
+    if (!PASTED_CODE_RX.test(code)) return null
+    const email = await this.safe(() => this.d.svc.pendingEmail(), null)
+    if (!email) return null
+    // no dialog here: a question inside prompt.submit could run past its budget (any command asks it later)
+    const done = this.complete(email, code, '', false).catch(() => PASTED_FAILED)
+    let slow: Promise<string> | null = null
+    try {
+      // a timer that cannot start (or fails) never decides the answer: the sign-in's own answer does
+      if (this.d.sleep) slow = Promise.resolve(this.d.sleep(PASTED_WAIT_MS)).then(() => PASTED_SLOW, () => done)
+    } catch {
+      slow = null
+    }
+    return slow ? Promise.race([done, slow]) : done
+  }
+
+  /** Send the code and, once signed in, the after-sign-in lines and the one setup question. */
+  private async complete(email: string, code: string, head: string, ask = true): Promise<string> {
     const r = await this.d.svc.loginFinish(email, code)
     if (!r.ok) return head + `Sign-in failed: ${errorText(r.error)}`
     const st = await this.d.svc.status()
@@ -804,7 +836,9 @@ export class Command {
     }
     lines.push(`To see what this plugin can save you, run ${COMMAND} estimate (it shows what it would send first).`)
     // the one savings-record question (or the board alone), while not answered yet (or "Not now" has run out)
-    if (await this.sharingDue()) {
+    if (!ask) {
+      if (await this.safe(() => this.sharingDue(), false)) lines.push(`Run ${COMMAND} status to answer the one setup question.`)
+    } else if (await this.sharingDue()) {
       const asked = await this.safe(() => this.askSharing(), null)
       if (asked) lines.push(asked)
     } else if (consentState(await readConsent(this.d.store), this.d.now()) === 'ask') {
@@ -1173,6 +1207,7 @@ export function serveCommand(
   after?: (sub: string) => unknown,
 ): void {
   servedOptions = options
+  servedAfter = after ?? null
   servedCmd = null // a new registration (a reload) builds its own
   // the setup tool: the model applies the user's answers to the onboarding question (no other subcommand)
   on('tool.describe', { tool: `mcp__${COMMAND_NAME}__${SETUP_SPEC.name}` }, async ($: EngineInterface, e: any, next: any) => ({
@@ -1208,12 +1243,33 @@ export function serveCommand(
 // takes `on`, and lets `$` go only to functions declared at the top of a file
 let servedOptions: (() => EngineOptions | Promise<EngineOptions>) | null = null
 let servedCmd: Command | null = null
+let servedAfter: ((sub: string) => unknown) | null = null
 let onboarded: string | null = null // the session the onboarding note went to
 
 async function servedCommand($: EngineInterface): Promise<Command> {
   if (!servedOptions) throw new Error('the command is not served')
   if (!servedCmd) servedCmd = new Command(engineDeps($, await servedOptions()))
   return servedCmd
+}
+
+/** prompt.submit: the answer when the message is a pasted sign-in code (Command.pasted), else null. */
+export async function pastedCode(
+  $: EngineInterface,
+  e: { text?: unknown; agentId?: unknown; origin?: { kind?: unknown } | null; attachments?: unknown },
+): Promise<string | null> {
+  // only what the person typed in the main conversation, with nothing attached; read here and never sent
+  if (e?.agentId || e?.origin?.kind !== 'composer' || (Array.isArray(e?.attachments) && e.attachments.length)) return null
+  const text = e?.text
+  if (!servedOptions || typeof text !== 'string' || text.length > 40) return null
+  if (!PASTED_CODE_RX.test(cleanCode(text))) return null // most messages: nothing is built or read
+  try {
+    const answer = await (await servedCommand($)).pasted(text)
+    if (answer === null) return null // no sign-in waits: an ordinary message
+    if (answer.startsWith('Signed in')) void Promise.resolve(servedAfter?.('login')).catch(() => undefined)
+    return answer.replace(/^agent-services: /, '')
+  } catch {
+    return PASTED_FAILED // a code-shaped message is never forwarded once the sign-in path started
+  }
 }
 
 /** The first prompt's onboarding note (Command.onboarding), once per session; null when there is none. */

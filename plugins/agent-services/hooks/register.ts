@@ -14,7 +14,7 @@
 //   background; it never starts or kills a process.
 // - Nothing here writes the user's settings or permission rules ($.settings is read only).
 import type { EngineInterface, Register } from 'claude-code'
-import { dataDir, declareCommand, engineClaudeHash, engineDirs, MARKETPLACE, onboardingNote, serveCommand } from './command'
+import { dataDir, declareCommand, engineClaudeHash, engineDirs, MARKETPLACE, onboardingNote, pastedCode, serveCommand } from './command'
 import { Core, type Answer } from './core'
 import { dashboardGrant, GRANT_REASON, PUBLISH_START_WAIT_MS } from './dashboard'
 import { publishBoards } from './boss' // O5: the person's board, then the company admin's
@@ -370,6 +370,7 @@ export const register: Register = (on) => {
   }).catch(($, e, next) => next(e))
 
   on('prompt.submit', async ($, e: Ev, next) => {
+    const signedIn = await pastedCode($, e); if (signedIn !== null) return { drop: signedIn } // a pasted sign-in code
     const a = await send($, 'prompt', e.agentId ?? null, { origin: e.origin?.kind ?? null })
     show($, a?.notice)
     // The server's advice and the first prompt's setup note: their own labelled context blocks (text untouched)
