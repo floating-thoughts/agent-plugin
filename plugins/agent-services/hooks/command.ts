@@ -7,9 +7,9 @@
 //   spellings (data, hooks, outbox, trust, savings <part>, dashboard) still work for one version: they answer as the
 //   new word does, plus one line that names it (renameOf).
 // - The sign-in code is never taken from the command line: typed command arguments are written to prompt history.
-//   `login` asks for the email (unless given; an email is not a secret) and mails the code, which the person pastes
-//   as the next message (pastedCode) or types in the dialog of `code`; an argument that is not an email is refused,
-//   never used.
+//   `login` asks for the email (unless given; an email is not a secret), mails the code and opens the code dialog; the
+//   person types the code there or pastes it as the next message (pastedCode), and `code` reopens the dialog. An
+//   argument that is not an email is refused, never used.
 // - While signed out only status, login, code, logout, update, info, remove and `methods off` work; every other
 //   subcommand answers the one sign-in line and sends nothing.
 // - The shipped build has no staging subcommand to set an endpoint: the endpoint and keys are the svc channel's
@@ -105,7 +105,7 @@ export const AUTH_FAIL_COMMANDS = ['status', 'login', 'code', 'logout', 'update'
 export const ASK_HEADER = 'Sign-in'
 export const EMAIL_QUESTION = "What's the email address of your agent-services account? We'll email a sign-in code to it."
 export const EMAIL_CANCEL = ['Cancel sign-in', 'Not now'] // the engine's dialog needs 2-4 options
-export const CODE_CANCEL = ['Enter it later', 'Cancel sign-in']
+export const CODE_OPTIONS = ['Enter the code', 'Enter it later'] // the mailed-code dialog; a code typed under Other is a third answer
 export const ESTIMATE_PREVIEW_MS = 30 * 60000 // a preview stays sendable this long, in this session only
 export const STATUS_HELLO_MS = 4000 // status waits this long at most for a hello
 export const OUTBOX_SHOW = 10 // outbox lines shown
@@ -472,9 +472,10 @@ export const validEmail = (s: unknown): s is string =>
 
 /** The code as typed in the dialog: spaces and dashes people add between digits are dropped. */
 export const cleanCode = (s: string): string => s.replace(/[\s-]+/g, '')
-// The mailed sign-in code is 8 digits. After login the person pastes it as their next message (the dialog put typing
-// last, under Other); prompt.submit catches it before the model. Only a message that is nothing but those 8 digits
-// (spaces between them allowed) counts: a date such as 2026-11-09 or a shorter number goes to the model.
+// The mailed sign-in code is 8 digits. The code dialog takes it under Other. "Enter the code", "Enter it later" and a
+// dismissed dialog leave it to the person's next message, which prompt.submit catches before the model. Only a message
+// that is nothing but those 8 digits (spaces between them allowed) counts: a date such as 2026-11-09 or a shorter
+// number goes to the model.
 export const PASTED_CODE_RX = /^[0-9]{8}$/
 /** A pasted message as the code it may be: only the spaces dropped (never dashes or other characters). */
 export const pastedForm = (s: string): string => s.trim().replace(/ +/g, '')
@@ -1440,7 +1441,10 @@ export class Command {
       termsLine = a === yes ? '' : '\nThe terms were not accepted, so the service may refuse the sign-in; run ' +
         `${COMMAND} login again to accept them.`
     }
-    return `A sign-in code was mailed to ${email} if it belongs to an agent-services account.\n${PASTE_CODE_LINE}${termsLine}`
+    const mailed = `A sign-in code was mailed to ${email} if it belongs to an agent-services account.`
+    // the terms declined: no code dialog here (the line says to run login again to accept them)
+    if (termsLine) return `${mailed}\n${PASTE_CODE_LINE}${termsLine}`
+    return this.loginCode(email, mailed)
   }
 
   private async code(rest: string[]): Promise<string> {
@@ -1458,30 +1462,40 @@ export class Command {
     return this.finish(email, note)
   }
 
-  /** Ask for the mailed code in the dialog and finish the sign-in. */
+  /** The mailed-code dialog, shared by `login` (right after the mail) and `code`. `typed` is the text given under Other
+   * (null when none); `pick` is the label chosen, or null when the dialog was dismissed or nobody can be asked. */
+  private async codeDialog(email: string): Promise<{ typed: string | null; pick: string | null }> {
+    let pick: string | null = null
+    try {
+      pick = this.d.ask ? String(await this.d.ask(`Enter the sign-in code mailed to ${email}?`,
+        { options: CODE_OPTIONS, header: ASK_HEADER })).trim() : null
+    } catch {
+      pick = null // dismissed, or nobody can be asked
+    }
+    return { typed: pick && !CODE_OPTIONS.includes(pick) ? pick : null, pick }
+  }
+
+  /** `login`: the code dialog right after the mail. A code typed under Other finishes the sign-in; otherwise (Enter the
+   * code, Enter it later, dismissed, no dialog) the line says how to enter it. */
+  private async loginCode(email: string, mailed: string): Promise<string> {
+    const { typed } = await this.codeDialog(email)
+    const code = typed === null ? '' : cleanCode(typed)
+    // only the 8 digits go to the service: any other text under Other would spend a wrong-code attempt
+    if (!PASTED_CODE_RX.test(code)) return `${mailed}\n${PASTE_CODE_LINE}`
+    return this.complete(email, code, '')
+  }
+
+  /** `code`: the code dialog, then the sign-in with the code typed under Other. */
   private async finish(email: string, before: string): Promise<string> {
     const head = before ? before + '\n' : ''
-    let picked: string | null = null
-    try {
-      picked = this.d.ask ? String(await this.d.ask(`Type the sign-in code mailed to ${email} (under Other)?`,
-        { options: CODE_CANCEL, header: ASK_HEADER })).trim() : null
-    } catch {
-      picked = null // dismissed, or nobody can be asked
-    }
-    if (picked === CODE_CANCEL[1]) {
-      // "Cancel sign-in": no later message is taken as its code, in any session
-      const gone = await this.safe(async () => (await this.d.svc.cancelLogin(), true), false)
-      return head + (gone
-        ? `Sign-in cancelled; no message is taken as its code any more. Run ${COMMAND} login to start again.`
-        : 'Sign-in not finished, and the waiting sign-in could not be cleared: for up to 10 minutes a message that is ' +
-          `only an 8-digit number is still taken as its code. Run ${COMMAND} login to start again.`)
-    }
-    const typed = picked && !CODE_CANCEL.includes(picked) ? picked : null
+    const { typed, pick } = await this.codeDialog(email)
     if (typed === null) {
-      return head + `Sign-in not finished. Enter the code with ${COMMAND} code within 10 minutes (any session).`
+      return head + (pick === CODE_OPTIONS[0]
+        ? PASTE_CODE_LINE
+        : `Sign-in not finished. Enter the code with ${COMMAND} code within 10 minutes (any session).`)
     }
     const code = cleanCode(typed)
-    if (code.length < 1 || code.length > 32) return head + `That is not a sign-in code. Try again with ${COMMAND} code.`
+    if (!PASTED_CODE_RX.test(code)) return head + `That is not a sign-in code. Try again with ${COMMAND} code.`
     return this.complete(email, code, head)
   }
 
