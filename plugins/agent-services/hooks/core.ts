@@ -263,6 +263,10 @@ export function checkArgs(tool: string, args: unknown): void {
     if (typeof args.role !== 'string' || !SERVED_ROLES.includes(args.role)) bad('role')
     if (typeof args.phase !== 'string' || !SERVED_PHASES.includes(args.phase)) bad('phase')
     if (has(args, 'event') && !((schema.properties.event as { enum: unknown[] }).enum).includes(args.event)) bad('event')
+  } else if (tool === 'toolbox') {
+    const rx = /^[a-z][a-z0-9-]{1,39}$/
+    if (typeof args.key !== 'string' || !rx.test(args.key)) bad('key')
+    if (has(args, 'topic') && (typeof args.topic !== 'string' || !rx.test(args.topic))) bad('topic')
   } else if (tool === 'checkpoint_advice') {
     const p = args.context_pct
     if (!isNum(p) || p < 0 || p > 100) bad('context_pct')
@@ -295,6 +299,7 @@ export function openAnswer(tool: string, args: unknown): Record<string, unknown>
   }
   if (tool === 'savings') return { saved: null, fallback: 'local_only', reason: 'core_down' }
   if (tool === 'checkpoint_advice') return { now: false, keep_lines: [], fallback: 'no_suggestion' }
+  if (tool === 'toolbox') return { key: a.key ?? null, topic: a.topic ?? null, items: [], fallback: 'no_toolbox' }
   throw new ValidationError('unknown tool')
 }
 
@@ -342,6 +347,8 @@ export interface Guard {
   open(role: string): Promise<{ session_token: string; rule: unknown }>
   fetch(token: string, phase: string): Promise<{ version?: unknown; catalog?: unknown; items?: { id: unknown; text: unknown }[] }>
   close(token: string): unknown
+  // the toolbox index (key 'index') or one pack (guard.ts fetchToolbox); absent: the toolbox tool answers no_toolbox
+  fetchToolbox?(token: string, key: string, topic?: string): Promise<Record<string, unknown>>
 }
 
 export type CoreOptions = {
@@ -937,6 +944,11 @@ export class Core {
   }
 
   // ---------------- tools
+  /** The toolbox index for this session (phase.ts pushes it once per session): the toolbox tool's answer. */
+  toolboxIndex(session: string): Promise<Record<string, unknown>> {
+    return this.ask('toolbox', { key: 'index' }, { session, harness: 'claude-code' })
+  }
+
   async ask(tool: string, args: unknown, o: { session: unknown; harness?: unknown; cwd?: unknown }): Promise<Record<string, unknown>> {
     checkArgs(tool, args)
     const session = o.session
@@ -995,6 +1007,12 @@ export class Core {
       if (!res || !res.ok || !isObj(res.body)) return openAnswer(tool, args)
       const b = res.body
       return { role, phase, version: b.version ?? null, catalog: has(b, 'catalog') ? b.catalog : '', items: items(b), fallback: null }
+    }
+    if (tool === 'toolbox') { // through the guard only (role auto, as the server binds a customer session)
+      if (!this.guard || typeof this.guard.fetchToolbox !== 'function') return openAnswer(tool, args)
+      const g = await this.guardSession(session, 'auto')
+      const b = await this.guard.fetchToolbox(g.session_token, args.key as string, has(args, 'topic') ? args.topic as string : undefined)
+      return { ...b, fallback: null } // any error (404 no_such_pack, an older server) answers openAnswer: no_toolbox
     }
     if (tool === 'savings') {
       const res = this.metrics ? await this.metrics.savings() : OFF

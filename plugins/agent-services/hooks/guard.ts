@@ -12,9 +12,9 @@
 // every item a phase needs), so MAX_ITEMS x phases per session, and at most MAX_BYTES bytes of item text (UTF-8,
 // before wrap() and without invisible characters), a runaway bound that a full kit set stays well under.
 import { CONTRACT } from './contract'
-import { b64Encode, hex } from './e2e'
+import { b64Encode, hex, sha256Hex, utf8 } from './e2e'
 import type { Random, SvcResult, Transport } from './engine_types'
-import { checkSchema } from './svc_wire'
+import { checkSchema, TOOLBOX_ROUTE } from './svc_wire'
 
 // Open since 2026-11-01: served methods are plain text, shown, quoted and discussed whenever the user asks.
 export const REFUSAL_EN =
@@ -31,6 +31,7 @@ const API = CONTRACT as unknown as {
 }
 const route = (path: string) => API.routes.find((r) => r.method === 'POST' && r.path === path)!
 const SESSION_SCHEMA = route(SESSION_ROUTE).responses['200']
+const TOOLBOX_SCHEMA = route(TOOLBOX_ROUTE).responses['200']
 export const MAX_ITEMS: number = route(FETCH_ROUTE).responses['200'].properties.items.maxItems
 export const MAX_BYTES = 4194304
 export const MAX_SESSIONS = 64
@@ -58,11 +59,21 @@ export class GuardError extends Error {
 }
 
 export function wrap(role: string, phase: string, version: string, itemId: string, text: string): string {
-  const plain = text.replace(NBSP_RX, ' ').replace(MARK_RX, '') // no invisible character reaches the model
+  const plain = clean(text) // no invisible character reaches the model
   return `<agent-method id="${role}/${phase}/${itemId}@${version}">\n${plain}\n</agent-method>`
 }
 
 /** UTF-8 bytes of an item text, without invisible characters. */
+/** A toolbox item for the model: plain text in an <agent-pack> wrapper naming its pack, item id and version. */
+export function wrapPack(key: string, version: string, itemId: string, text: string): string {
+  return `<agent-pack key="${key}" id="${itemId}" version="${version}">\n${clean(text)}\n</agent-pack>`
+}
+
+/** A served text without invisible characters (no-break spaces become spaces). */
+export function clean(text: string): string {
+  return text.replace(NBSP_RX, ' ').replace(MARK_RX, '')
+}
+
 export function unmarkedBytes(text: string): number {
   return enc.encode(text.replace(NBSP_RX, ' ').replace(MARK_RX, '')).length
 }
@@ -76,6 +87,12 @@ export type GuardAnswer = {
   catalog: string
   items: GuardItem[]
 }
+// One toolbox answer (POST /toolbox/fetch), texts cleaned: the index as a dict key -> when line (the server's order),
+// or one pack with each item wrapped in <agent-pack>. Cached per key and topic for the guard session.
+export type ToolboxAnswer =
+  | { kind: 'index'; version: string; note: string; entries: Record<string, string> }
+  | { kind: 'pack'; key: string; title: string; version: string; topic: string | null; items: GuardItem[]; branched: number }
+
 export type GuardOpened = {
   session_token: string
   session_ref: string
@@ -89,6 +106,7 @@ type Session = {
   ref: string
   role: string
   cache: Map<string, GuardAnswer>
+  toolbox: Map<string, ToolboxAnswer>
   items: Set<string>
   bytes: number
 }
@@ -146,6 +164,7 @@ export class Guard {
         ref,
         role,
         cache: new Map(),
+        toolbox: new Map(),
         items: new Set(),
         bytes: 0,
       })
@@ -159,6 +178,7 @@ export class Guard {
     const s = this.get(token)
     this.sessions.delete(s.token)
     s.cache.clear()
+    s.toolbox.clear()
     s.items.clear()
     this.transport.endServedSession(s.ref)
   }
@@ -229,6 +249,67 @@ export class Guard {
     s.items = merged
     s.bytes += size
     s.cache.set(key, answer)
+    return answer
+  }
+  // ---------------- toolbox
+  /** The toolbox index (key 'index') or one pack (POST /toolbox/fetch through this guard session's ref), cached per
+   * key and topic for the session and charged against the session's MAX_BYTES (UTF-8 of the texts, cleaned). A
+   * session the server no longer knows (409 session_required) is opened again once. Errors: 400 bad_request, 404
+   * no_such_pack (also a server without the route), 403 with the server's code, 429 quota_bytes, 503 otherwise. */
+  async fetchToolbox(token: string, key: string, topic?: string): Promise<ToolboxAnswer> {
+    const s = this.get(token)
+    const rx = /^[a-z][a-z0-9-]{1,39}$/
+    if (typeof key !== 'string' || !rx.test(key)) throw new GuardError(400, 'bad_request')
+    if (topic !== undefined && (typeof topic !== 'string' || !rx.test(topic) || key === 'index')) throw new GuardError(400, 'bad_request')
+    const ck = `${key}\n${topic ?? ''}`
+    const cached = s.toolbox.get(ck)
+    if (cached) return cached
+    const opts = { kind: 'served', deadlineMs: this.deadlineMs }
+    let res: SvcResult
+    try {
+      res = await this.transport.fetchToolbox(s.ref, key, topic, opts)
+      if (res && !res.ok && res.status === 409 && res.error === 'session_required') {
+        const opened = await this.transport.call('POST', SESSION_ROUTE, { session_ref: s.ref, role: s.role }, opts)
+        if (opened && opened.ok) res = await this.transport.fetchToolbox(s.ref, key, topic, opts)
+      }
+    } catch {
+      throw new GuardError(503, 'failed')
+    }
+    if (!res || !res.ok) {
+      if (res && res.status === 404) throw new GuardError(404, 'no_such_pack') // also a server without the route
+      throw new GuardError(res && res.status === 403 ? 403 : 503, (res && res.error) || 'failed')
+    }
+    const b = res.body
+    if (!isObj(b) || checkSchema(b, TOOLBOX_SCHEMA).length || (b.kind === 'index') !== (key === 'index')) {
+      throw new GuardError(503, 'bad_response')
+    }
+    let answer: ToolboxAnswer
+    let size = 0
+    if (b.kind === 'index') {
+      const entries: Record<string, string> = {}
+      for (const e of b.entries as { key: string; when: string }[]) {
+        entries[e.key] = clean(e.when)
+        size += unmarkedBytes(e.when) + e.key.length
+      }
+      size += unmarkedBytes(b.note as string)
+      answer = { kind: 'index', version: b.version as string, note: clean(b.note as string), entries }
+    } else {
+      const list = b.items as { id: string; text: string; sha256: string }[]
+      if (b.key !== key || list.some((i) => sha256Hex(utf8(i.text)) !== i.sha256)) throw new GuardError(503, 'bad_response')
+      const version = b.version as string
+      size += unmarkedBytes(b.title as string)
+      const items = list.map((i) => {
+        size += unmarkedBytes(i.text)
+        return { id: i.id, text: wrapPack(key, version, i.id, i.text) }
+      })
+      answer = { kind: 'pack', key, title: clean(b.title as string), version, topic: topic ?? null, items, branched: b.branched as number }
+    }
+    if (!this.sessions.has(s.token)) throw new GuardError(401, 'session_token_required') // closed meanwhile
+    const again = s.toolbox.get(ck) // another call for the same key and topic finished first
+    if (again) return again
+    if (s.bytes + size > MAX_BYTES) throw new GuardError(429, 'quota_bytes')
+    s.bytes += size
+    s.toolbox.set(ck, answer)
     return answer
   }
 }

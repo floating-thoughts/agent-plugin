@@ -157,6 +157,7 @@ async function build($: EngineInterface): Promise<Rt | null> {
       sleep: async (ms) => void (await sleep(ms)),
       session,
       outbox,
+      durable: { fs, dir },
       claudeHash: engineClaudeHash($),
       shellVersion: await shellVersion($),
       harness: HARNESS,

@@ -6,7 +6,7 @@ export type ToolSpec = {
   input_schema: Record<string, unknown>
 }
 
-export const CONTRACT_SHA256 = "6a6a582ab19bed47496d89828f730567ebbb66695bef931d95636a33b3a38e20"
+export const CONTRACT_SHA256 = "bde6aa11728251f64eae8c1c4c05c063b0bc2e13224fac70cf1f87786e07fd17"
 
 export const API = "svc/1" as const
 export const PREFIX = "/svc/v1" as const
@@ -21,7 +21,7 @@ export const E2E_B64_BODY_LIMIT = 87384 as const
 export const OUTBOX_FOLDER = "<data dir>/services/outbox/" as const
 export const OUTBOX_PATH = "<data dir>/services/outbox/<day>-<session 8 hex>.jsonl" as const
 export const OUTBOX_KEEP_DAYS = 90 as const
-export const TOOL_NAMES = ["router_advice", "lesson_lookup", "savings", "checkpoint_advice", "status"] as const
+export const TOOL_NAMES = ["router_advice", "lesson_lookup", "savings", "checkpoint_advice", "toolbox", "status"] as const
 
 // x-tools: the tools the hooks module registers (schemas and descriptions, in order)
 export const TOOLS: readonly ToolSpec[] = [
@@ -199,6 +199,29 @@ export const TOOLS: readonly ToolSpec[] = [
       },
       "required": [
         "context_pct"
+      ],
+      "additionalProperties": false
+    }
+  },
+  {
+    "name": "toolbox",
+    "description": "Fetch one agent-services toolbox pack by its key from the toolbox index (an agent-services suggestion: know-how for one tool or tool family, fetched only when the work needs it). Key \"index\" lists the index again (each key with one line saying when to fetch it). For branched-problems, pass topic (a pack key) to get only that topic's problem and fix pairs. Only the random session ref, the key and the topic are sent. Returns the pack's items wrapped in <agent-pack>, or no_toolbox when the service has no toolbox for this account.",
+    "input_schema": {
+      "type": "object",
+      "properties": {
+        "key": {
+          "type": "string",
+          "pattern": "^[a-z][a-z0-9-]{1,39}$",
+          "maxLength": 40
+        },
+        "topic": {
+          "type": "string",
+          "pattern": "^[a-z][a-z0-9-]{1,39}$",
+          "maxLength": 40
+        }
+      },
+      "required": [
+        "key"
       ],
       "additionalProperties": false
     }
@@ -737,6 +760,29 @@ export const CONTRACT = {
     },
     "required": [
      "context_pct"
+    ],
+    "additionalProperties": false
+   }
+  },
+  {
+   "name": "toolbox",
+   "description": "Fetch one agent-services toolbox pack by its key from the toolbox index (an agent-services suggestion: know-how for one tool or tool family, fetched only when the work needs it). Key \"index\" lists the index again (each key with one line saying when to fetch it). For branched-problems, pass topic (a pack key) to get only that topic's problem and fix pairs. Only the random session ref, the key and the topic are sent. Returns the pack's items wrapped in <agent-pack>, or no_toolbox when the service has no toolbox for this account.",
+   "input_schema": {
+    "type": "object",
+    "properties": {
+     "key": {
+      "type": "string",
+      "pattern": "^[a-z][a-z0-9-]{1,39}$",
+      "maxLength": 40
+     },
+     "topic": {
+      "type": "string",
+      "pattern": "^[a-z][a-z0-9-]{1,39}$",
+      "maxLength": 40
+     }
+    },
+    "required": [
+     "key"
     ],
     "additionalProperties": false
    }
@@ -1806,6 +1852,65 @@ export const CONTRACT = {
       "method"
      ],
      "additionalProperties": false
+    },
+    "usage_by_day": {
+     "type": "array",
+     "maxItems": 400,
+     "description": "optional (added 2026-11-09): the account's usage per day, summed over all its computers (the server keeps one row per computer and day). tokens = input + output + cache write + cache read tokens, the usage panel's count; api_usd = API list price. mine = whether the requesting computer stored that day, with mine_tokens and mine_api_usd what it stored (0 when not). legacy_tokens and legacy_api_usd: the part of the sum held by rows stored before computers were kept apart (0 when not). Absent while the account's usage figures are hidden (the savings record off for the company, or the upload consent withdrawn)",
+     "items": {
+      "type": "object",
+      "properties": {
+       "day": {
+        "type": "string",
+        "pattern": "^\\d{4}-\\d{2}-\\d{2}$",
+        "maxLength": 10
+       },
+       "tokens": {
+        "type": "integer",
+        "minimum": 0,
+        "maximum": 1000000000000000
+       },
+       "api_usd": {
+        "type": "number",
+        "minimum": 0,
+        "maximum": 1000000000
+       },
+       "mine": {
+        "type": "boolean"
+       },
+       "mine_tokens": {
+        "type": "integer",
+        "minimum": 0,
+        "maximum": 1000000000000000
+       },
+       "mine_api_usd": {
+        "type": "number",
+        "minimum": 0,
+        "maximum": 1000000000
+       },
+       "legacy_tokens": {
+        "type": "integer",
+        "minimum": 0,
+        "maximum": 1000000000000000
+       },
+       "legacy_api_usd": {
+        "type": "number",
+        "minimum": 0,
+        "maximum": 1000000000
+       }
+      },
+      "required": [
+       "day",
+       "tokens",
+       "api_usd",
+       "mine",
+       "mine_tokens",
+       "mine_api_usd",
+       "legacy_tokens",
+       "legacy_api_usd"
+      ],
+      "additionalProperties": false
+     }
     }
    },
    "required": [
@@ -2783,6 +2888,184 @@ export const CONTRACT = {
     "purpose": "fetch the content the service serves for each phase; sends only the random session id, role, phase, pinned version and channel, whether the client takes just-in-time items, the name of a just-in-time event (resume, module_start, ui, index_request, delivery) when one comes, and for the planning gate flags and one count about the project's agent-state.md (no text or path)",
     "default": "on",
     "retention": "request content not stored; access log kept 30 days",
+    "sent_to": [
+     "our_service"
+    ]
+   }
+  },
+  {
+   "method": "POST",
+   "path": "/toolbox/fetch",
+   "request": {
+    "type": "object",
+    "properties": {
+     "session_ref": {
+      "$ref": "#/definitions/SessionRef"
+     },
+     "pack": {
+      "type": "string",
+      "pattern": "^[a-z][a-z0-9-]{1,39}$",
+      "maxLength": 40,
+      "description": "the toolbox tool's key: a pack key from the toolbox index, or index for the index itself (named pack on the wire because key is a forbidden request field name)"
+     },
+     "topic": {
+      "type": "string",
+      "pattern": "^[a-z][a-z0-9-]{1,39}$",
+      "maxLength": 40,
+      "description": "optional: for branched-problems, the pack key (or industry id) whose problem and fix pairs to return; without it branched-problems answers its topic list"
+     }
+    },
+    "required": [
+     "session_ref",
+     "pack"
+    ],
+    "additionalProperties": false
+   },
+   "responses": {
+    "200": {
+     "description": "kind index for pack index, otherwise kind pack",
+     "anyOf": [
+      {
+       "type": "object",
+       "properties": {
+        "kind": {
+         "const": "index"
+        },
+        "version": {
+         "type": "string",
+         "pattern": "^[0-9a-f]{12}$",
+         "maxLength": 12,
+         "description": "12 hex of the hash of the index; changes when a pack is published or withdrawn"
+        },
+        "note": {
+         "type": "string",
+         "maxLength": 1500,
+         "x-served": true,
+         "description": "the label and handling note for the index block, written as an agent-services suggestion (never as the user's or the owner's instruction), for example: agent-services toolbox index (an agent-services suggestion): each key names a pack of know-how for one tool or tool family; before work with that tool, call the toolbox tool with the key; branched-problems takes a topic"
+        },
+        "entries": {
+         "type": "array",
+         "maxItems": 64,
+         "description": "one entry per live toolbox pack, branched-problems included; empty without a valid license, for a non-org account and for owners",
+         "items": {
+          "type": "object",
+          "properties": {
+           "key": {
+            "type": "string",
+            "pattern": "^[a-z][a-z0-9-]{1,39}$",
+            "maxLength": 40
+           },
+           "when": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 2000,
+            "x-served": true,
+            "description": "one line: the tool name and when to fetch the pack; for branched-problems also Topics: <key> (<count>), ..."
+           }
+          },
+          "required": [
+           "key",
+           "when"
+          ],
+          "additionalProperties": false
+         }
+        }
+       },
+       "required": [
+        "kind",
+        "version",
+        "note",
+        "entries"
+       ],
+       "additionalProperties": false
+      },
+      {
+       "type": "object",
+       "properties": {
+        "kind": {
+         "const": "pack"
+        },
+        "key": {
+         "type": "string",
+         "pattern": "^[a-z][a-z0-9-]{1,39}$",
+         "maxLength": 40
+        },
+        "title": {
+         "type": "string",
+         "minLength": 1,
+         "maxLength": 60,
+         "x-served": true
+        },
+        "version": {
+         "$ref": "#/definitions/Version"
+        },
+        "items": {
+         "type": "array",
+         "maxItems": 500,
+         "description": "the pack's items; for branched-problems with a topic, only that topic's items",
+         "items": {
+          "type": "object",
+          "properties": {
+           "id": {
+            "type": "string",
+            "pattern": "^[a-z0-9][a-z0-9-]{0,63}$",
+            "maxLength": 64
+           },
+           "text": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 20000,
+            "x-served": true
+           },
+           "sha256": {
+            "$ref": "#/definitions/Sha256"
+           }
+          },
+          "required": [
+           "id",
+           "text",
+           "sha256"
+          ],
+          "additionalProperties": false
+         }
+        },
+        "branched": {
+         "type": "integer",
+         "minimum": 0,
+         "maximum": 100000,
+         "description": "how many branched-problems items have this key as topic (0 for branched-problems itself)"
+        }
+       },
+       "required": [
+        "kind",
+        "key",
+        "title",
+        "version",
+        "items",
+        "branched"
+       ],
+       "additionalProperties": false
+      }
+     ]
+    }
+   },
+   "errors": {
+    "404": [
+     "no_such_pack"
+    ],
+    "409": [
+     "session_required"
+    ],
+    "403": [
+     "no_license",
+     "not_in_plan"
+    ]
+   },
+   "x-inventory": {
+    "service": "updates",
+    "purpose": "fetch the toolbox index or one toolbox pack on demand; sends only the random session id, the pack key and the optional topic (no prompt, file or path)",
+    "default": "on (the index once per session and after a compaction; a pack only when the model asks for it)",
+    "retention": "one delivery record per item and session (account, session id, pack id, version, topic, item id, time; no content); access log kept 30 days",
     "sent_to": [
      "our_service"
     ]
