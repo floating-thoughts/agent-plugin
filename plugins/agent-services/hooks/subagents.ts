@@ -234,6 +234,21 @@ export function redlineRefusal(week: Week, isModule: boolean): string | null {
   return null
 }
 
+/** A person's own prompt that matches the table's override words: spawns past the usage line are allowed until the
+ * current weekly reset, and the user is told so. Fails quietly. */
+export async function redlineOverride($: EngineInterface, text: unknown): Promise<void> {
+  try {
+    const r = part('redline')
+    if (!r || typeof text !== 'string' || !rx(String(r.override_rx ?? '(?!)'), 'i')?.test(text.slice(0, 2000))) return
+    const week = planOf(await $.session.usage()).week
+    if (!week || !week.resets_at) return
+    await engineStore($).set('redline_override', week.resets_at)
+    try {
+      $.ui.toast(fill(r.override_notice, { resets: week.resets_at }))
+    } catch {}
+  } catch {}
+}
+
 // ------------------------------------------------------------------ demand lock and commit co-author (pure)
 
 /** The demand file an edit tool call writes, spelled one way, or null (no demand part, not an edit, another file). */
@@ -437,7 +452,9 @@ export async function spawnGate($: EngineInterface, e: Obj, rt?: Ready): Promise
     if (!table() || !isObj(e) || e.fork === true || e.isTeammate === true || !(await signedIn(rt))) return null
     if (part('redline')) {
       const week = planOf(await $.session.usage()).week
-      const refusal = redlineRefusal(week, isModuleSpawn(e.description, e.parentAgentId))
+      let refusal = redlineRefusal(week, isModuleSpawn(e.description, e.parentAgentId))
+      // the user said to go past the line: allowed until this weekly reset (redlineOverride)
+      if (refusal && week?.resets_at && (await engineStore($).get('redline_override')) === week.resets_at) refusal = null
       if (refusal) {
         try {
           $.ui.toast(refusal)

@@ -13,6 +13,7 @@
 import type { EngineInterface } from 'claude-code'
 import { dataDir, engineDirs } from './engine_env'
 import { updateCommand } from './status'
+import type { ProcessRun } from './usage_tool'
 import { isRemoved, markRemoved, removedMarker } from './remove'
 
 export const START_DELAY_MS = 30_000 // the first check waits this long: nothing is spawned while a session starts
@@ -317,6 +318,16 @@ export async function probeProcess($: EngineInterface): Promise<boolean> {
   }
   if (!present) processMissing = true
   return present
+}
+
+/** The process runner for the local usage scan tool (usage_tool.ts): argv only, no shell; null where `$.process`
+ * is missing (`present` false, from probeProcess), so nothing is ever run there. */
+export function processRunner($: EngineInterface, present: boolean): ProcessRun | null {
+  if (!present || processMissing) return null
+  return async (argv, opts) => {
+    const r: any = await $.process.run(argv, { timeoutMs: opts.timeoutMs, stdin: opts.stdin })
+    return { exitCode: typeof r?.exitCode === 'number' ? r.exitCode : null, stdout: String(r?.stdout ?? ''), stderr: String(r?.stderr ?? '') }
+  }
 }
 
 // From session.start: schedules the checks once per loaded copy. Never throws, never waits. `gateFrom` (optional)

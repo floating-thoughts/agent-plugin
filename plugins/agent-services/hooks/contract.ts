@@ -6,7 +6,7 @@ export type ToolSpec = {
   input_schema: Record<string, unknown>
 }
 
-export const CONTRACT_SHA256 = "b1f0d3cf40d75f71cfd86fb988e7bdd6b001fdef03cb1d81ab5c46fdfed3638b"
+export const CONTRACT_SHA256 = "d3f0b27c3ff19152cb78eb8b1ca375a09ece698824a97088eaacd4d0a1dfaa73"
 
 export const API = "svc/1" as const
 export const PREFIX = "/svc/v1" as const
@@ -3512,6 +3512,12 @@ export const CONTRACT = {
       "type": "integer",
       "minimum": 0,
       "maximum": 1000000
+     },
+     "context_tokens": {
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 10000000,
+      "description": "0.7.6, optional: tokens in the context now"
      }
     },
     "required": [

@@ -27,7 +27,7 @@ import { PRICES } from './prices'
 import { engineStore, safeDelete, safeGet, type KV } from './store'
 import { Svc, type HttpAnswer } from './svc'
 import { engineSleep, installTools, registerTools, SESSION_FALLBACK, svcAuthLine, toolInput } from './tools'
-import { probeProcess, updateCheck, type Gate } from './update'
+import { probeProcess, processRunner, updateCheck, type Gate } from './update'
 import { bandSetter, createWiring, installBand, notePlan, svcTransport, type Wiring } from './wiring'
 import { canAskNow } from './choice'
 import { appendRow, installEngines, mailGate, promptIn, rulesStart, spawnGated, stopCheck, toolRun } from './engines'; import { spawnGate } from './subagents'; import { watchPrompt } from './watch' // rule-table engines
@@ -176,7 +176,7 @@ async function build($: EngineInterface): Promise<Rt | null> {
       outbox,
       clock: now,
       projectsRoot: `${dirs.configDir}/projects`,
-      holder: session,
+      holder: session, run: processRunner($, updates.selfUpdates !== false), // usage_tool.ts: the local scan tool
       clientVersion: await shellVersion($), // the release version in every body (was the fixed 0.1.0)
       update: updates,
     })
@@ -368,7 +368,7 @@ export const register: Register = (on) => {
     const signedIn = await pastedCode($, e); if (signedIn !== null) return { drop: signedIn } // a pasted sign-in code
     e = await promptIn($, e, ready($)) // engines.ts: a long report shortened, secrets masked
     const a = await send($, 'prompt', e.agentId ?? null, { origin: e.origin?.kind ?? null })
-    show($, a?.notice)
+    show($, a?.notice, a?.action === 'inject') // inject: the checkpoint advice, also shown to the user
     // The server's advice and the first prompt's setup note: their own labelled context blocks (text untouched)
     const blocks = a?.action === 'inject' && a.context && a.context.length ? [a.context.join('\n')] : []
     blocks.push(...(await pushLessons(ready($), e.agentId, () => $.session.cwd())), ...(await flowPrompt($, e, ready($))), ...(await watchPrompt($, e))) // phase.ts: served items by phase; flow.ts: notes

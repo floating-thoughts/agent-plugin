@@ -1159,6 +1159,12 @@ export class Svc {
     return strip(res)
   }
 
+  /** 0.7.6: the terms version the person accepted at sign-in (with "business use, 18 or older"); sent with the code. */
+  async noteTerms(version: string | null): Promise<void> {
+    if (version === null) await safeDelete(this.kv, 'terms_accepted')
+    else await safeSet(this.kv, 'terms_accepted', version.slice(0, 32))
+  }
+
   /** The pending email of a sign-in started in any session, or null. */
   async pendingEmail(): Promise<string | null> {
     const p = await safeGet(this.kv, KEYS.loginPending)
@@ -1206,8 +1212,11 @@ export class Svc {
     const ch = await this.d.claudeHash().catch(() => '')
     if (ch) body.claude_hash = ch
     body.harness = this.d.harness
+    const terms = await safeGet(this.kv, 'terms_accepted')
+    if (typeof terms === 'string' && terms) { body.accept_terms = terms; body.business_18 = 'true' }
     const d = this.deadline('auth', hook)
-    const res = await this.exchange('POST', PREFIX + '/auth/login/finish', JSON.stringify(body), 'auth', d, { signed: false, retry: true })
+    const res = await this.exchange('POST', PREFIX + '/auth/login/finish',
+      JSON.stringify(body.business_18 ? { ...body, business_18: true } : body), 'auth', d, { signed: false, retry: true })
     if (res.ok && isObj(res.body)) {
       const b = res.body
       if (!(await safeSet(this.kv, KEYS.token, token))) return R(false, { error: 'store_unavailable' })

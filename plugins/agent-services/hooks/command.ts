@@ -1165,7 +1165,17 @@ export class Command {
         : await writeEntry(this.d.store, { record: undefined, at: undefined, backfill: undefined, page: undefined, page_at: undefined })
     if (!kept) return errorText('store_unavailable')
     if (sub === 'not_now') await this.stampAsked()
-    if (on) mailError = await this.mail(true)
+    // 0.7.6: the weekly email is its own choice, asked separately (never turned on with the upload)
+    let mailAsk = ''
+    if (on && this.canAsk()) {
+      const yes = 'Send the weekly email'
+      const a = await this.dialog('Also send you a weekly email that sums up your estimated savings? You can stop it ' +
+        'from any email with one click.', [yes, 'No email'], 'Weekly email')
+      if (a === yes) mailError = await this.mail(true)
+      mailAsk = a === yes && !mailError ? ' The weekly email is on.' : ` No weekly email is sent (${COMMAND} sharing mail on turns it on).`
+    } else if (on) {
+      mailAsk = ` No weekly email is sent unless you turn it on: ${COMMAND} sharing mail on.`
+    }
     const mailLine = mailError
       ? `\nThe weekly email setting was not changed: ${mailError} Run ${COMMAND} sharing mail ${on ? 'on' : 'off'} ` +
         'later to change it.'
@@ -1175,8 +1185,8 @@ export class Command {
         ? 'including the past 30 days: the first upload also sends the summaries of up to 30 earlier days'
         : `from now on only: the first upload sends only the days after ${localDay(at)}, nothing from before`
       return `Savings record is on (upload, ${how}). Your private savings page is published to your claude.ai ` +
-        'account when Claude finishes this reply, a weekly email sums up the savings, and a small daily usage summary ' +
-        `is uploaded. To turn one part off: ${COMMAND} sharing page off (the page), ${COMMAND} sharing mail off (the ` +
+        'account when Claude finishes this reply, and a small daily usage summary is uploaded.' + mailAsk +
+        ` To turn one part off: ${COMMAND} sharing page off (the page), ${COMMAND} sharing mail off (the ` +
         `email); ${COMMAND} sharing off turns it all off.` + mailLine
     }
     if (sub === 'off') {
@@ -1274,7 +1284,20 @@ export class Command {
     if (!r.ok) {
       return `No code was mailed: ${errorText(r.error)}`
     }
-    return `A sign-in code was mailed to ${email} if it belongs to an agent-services account.\n${PASTE_CODE_LINE}`
+    // 0.7.6: when the service offers its terms, the person accepts them (business use, 18 or older) before the code
+    const tb = isObj(r.body) ? r.body : {}
+    let termsLine = ''
+    if (typeof tb.terms_version === 'string' && typeof tb.terms_url === 'string' && tb.terms_version && tb.terms_url) {
+      const yes = 'I accept'
+      const a = this.canAsk()
+        ? await this.dialog('agent-services is for business use only. I use it for my work, I am 18 or older, and I ' +
+          `accept the customer terms (version ${tb.terms_version.slice(0, 32)}): ${tb.terms_url.slice(0, 200)}`, [yes, 'I do not accept'], 'Terms')
+        : null
+      await this.d.svc.noteTerms(a === yes ? tb.terms_version : null)
+      termsLine = a === yes ? '' : '\nThe terms were not accepted, so the service may refuse the sign-in; run ' +
+        `${COMMAND} login again to accept them.`
+    }
+    return `A sign-in code was mailed to ${email} if it belongs to an agent-services account.\n${PASTE_CODE_LINE}${termsLine}`
   }
 
   private async code(rest: string[]): Promise<string> {

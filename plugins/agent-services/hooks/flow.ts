@@ -25,7 +25,7 @@ import { methodsLevel } from './methods_level'
 import { setBandPending } from './band'
 import { SEP } from './status'
 import { engineStore } from './store'
-import { authorCheck, ownerCheck, signedIn } from './subagents'
+import { authorCheck, ownerCheck, redlineOverride, signedIn } from './subagents'
 import { toolInput } from './tools'
 import { servedInt, servedText } from './workflow_table'
 
@@ -303,6 +303,7 @@ export async function flowPrompt($: EngineInterface, e: Obj, rt?: Ready): Promis
     if (PERSON_ORIGINS.includes(e.origin?.kind)) {
       notePersonPrompt(e.text)
       checkpointPersonPrompt()
+      await redlineOverride($, e.text) // the user's own words only: allows spawns past the usage line until the reset
     }
     dispatchedThisTurn = 0
     void recheckCheckpoint($)
