@@ -184,6 +184,8 @@ export function topParts(state: unknown): { key: string; text: string; bold?: tr
   ].filter((p): p is { key: string; text: string; bold?: true } => typeof p.text === 'string' && p.text !== '')
 }
 
+export const EXPLAIN_TIP = 'use /agent-services explain on/off to toggle'
+
 let explainShown: boolean | null = null
 
 async function explainNow($: EngineInterface): Promise<boolean> {
@@ -264,15 +266,15 @@ export function installBand(on: any): void {
       const t = topParts(online).map((p) => p.text).join(SEP)
       return t ? [t] : []
     }
-    const topRow = (online: unknown): Obj[] => {
+    const topRow = (online: unknown, tip = false): Obj[] => {
       const parts = topParts(online)
-      if (!parts.length) return []
+      if (!parts.length && !tip) return []
+      const texts = parts.map((p) => Text({ key: p.key, bold: p.key === 'pending' || p.bold === true, dimColor: p.key !== 'pending' && p.bold !== true, children: p.text }))
       return [Box({
         key: 'top', flexDirection: 'row', justifyContent: 'space-between',
-        children: [
-          ...parts.map((p) => Text({ key: p.key, bold: p.key === 'pending' || p.bold === true, dimColor: p.key !== 'pending' && p.bold !== true, children: p.text })),
-          ...card('band-top', below),
-        ],
+        children: tip
+          ? [Box({ key: 'news', flexDirection: 'row', columnGap: 2, children: texts }), Text({ key: 'tip', dimColor: true, children: EXPLAIN_TIP }), ...(parts.length ? card('band-top', below) : [])]
+          : [...texts, ...card('band-top', below)],
       })]
     }
     if (!panel) {
@@ -308,7 +310,7 @@ export function installBand(on: any): void {
     return Box({
       flexDirection: 'column',
       children: [
-        ...topRow(true),
+        ...topRow(true, e.surface === 'desktop'),
         ...(setupOpen ? [setupRow] : []),
         Box({ key: 'cols', flexDirection: 'row', columnGap: 2, flexWrap: 'nowrap', children: panel.columns.map(column) }),
       ],
