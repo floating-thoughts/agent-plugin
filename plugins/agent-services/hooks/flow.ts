@@ -21,6 +21,8 @@ import { watchEnsureTick } from './watch'
 import { NOTE_LABEL } from './review'
 import { readPlan } from './plan_file'
 import { globMatch } from './glob'
+import { nudgeCompacted, nudgeLoad, nudgeNotes, nudgePrompt, nudgeSave, nudgeTurnEnd } from './checkpoint_nudge'
+import { recallStart } from './recall'
 
 type Obj = Record<string, any>
 
@@ -259,6 +261,7 @@ async function lockCheck($: EngineInterface, e: Obj, rt?: Ready): Promise<string
 async function turnEnd($: EngineInterface, e: Obj): Promise<void> {
   stallTurnEnd(e)
   await checkpointTurnEnd($, e.reason)
+  if (e.reason === 'answer') await nudgeTurn($)
   await refreshPending($)
   const stepsText = (await readPlan($, [STEPS_FILE]))?.text ?? null
   const ready = readyTogether(stepsText).steps
@@ -268,6 +271,26 @@ async function turnEnd($: EngineInterface, e: Obj): Promise<void> {
   setTurnFacts(changed ? ready.length : 0, await notesOn($))
   await captureTurnEnd($, { ...stepCounts(stepsText), ready }, jitDeliveryTaken())
   watchEnsureTick($)
+}
+
+async function nudgeTurn($: EngineInterface): Promise<void> {
+  await nudgeLoad($)
+  let tokens: number | null = null
+  try {
+    const t = ((await $.session.usage()) as Obj)?.context?.tokens
+    tokens = typeof t === 'number' ? t : null
+  } catch {}
+  nudgeTurnEnd(Date.now(), tokens)
+}
+
+export async function flowSessionStart($: EngineInterface, e: Obj, next: (e: Obj) => Promise<Obj>): Promise<Obj> {
+  const done = await next(e)
+  if (!isObj(e) || e.agent_id) return done
+  if (e.source === 'compact' || e.source === 'clear') {
+    nudgeCompacted(Date.now())
+    await nudgeSave($)
+  }
+  return recallStart($, e, done)
 }
 
 
@@ -290,7 +313,10 @@ export async function flowPrompt($: EngineInterface, e: Obj, rt?: Ready): Promis
       checkpointSetUp = true
       await setupCheckpoint($)
     }
+    await nudgeLoad($)
     if (PERSON_ORIGINS.includes(e.origin?.kind)) {
+      nudgePrompt()
+      void nudgeSave($)
       notePersonPrompt(e.text)
       checkpointPersonPrompt()
       await redlineOverride($, e.text)
@@ -299,6 +325,7 @@ export async function flowPrompt($: EngineInterface, e: Obj, rt?: Ready): Promis
     void recheckCheckpoint($)
     const advice = takeAdvice()
     const out = advice && (await notesOn($)) ? [advice] : []
+    out.push(...nudgeNotes())
     const hint = routeHintNote('') !== null ? takeRouteHint() : null
     const hintNote = hint ? routeHintNote(hint) : null
     if (hintNote) out.push(hintNote)

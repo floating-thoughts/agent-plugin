@@ -9,6 +9,7 @@ import { vaultMask } from './vault'
 import { NOTE_PREFIX } from './review'
 import { continueVia } from './stall'
 import { isFinished } from './quiet'
+import { hwHint, hwHintResetForTest } from './hw_hint'
 
 type Obj = Record<string, any>
 type Rule = { pattern?: string; tool?: string; first_alert_minutes?: number; repeat_minutes?: number; never?: boolean; foreground?: boolean; until?: string; reason?: string }
@@ -156,7 +157,7 @@ function callText(e: Obj): string {
 export async function watchBash($: EngineInterface, e: Obj, next: (e: Obj) => Promise<Obj>): Promise<Obj> {
   await rulesLive()
   const t = table()
-  if (!t) return next(e)
+  if (!t) return withHwHint(e, await next(e))
   const startedAt = await $.clock.now()
   const auto = e.run_in_background !== true ? autoBackgroundMs({ tool: String(e.tool), text: callText(e) }, startedAt) : null
   const ran = await next(e)
@@ -196,7 +197,17 @@ export async function watchBash($: EngineInterface, e: Obj, next: (e: Obj) => Pr
     if (e.agentId && (e.tool === 'Monitor' || e.run_in_background === true)) {
       for (const id of shellIdsIn(done.result)) shellOwner[id] = e.agentId
     }
-    return done
+    return withHwHint(e, done)
+  } catch {
+    return ran
+  }
+}
+
+function withHwHint(e: Obj, ran: Obj): Obj {
+  try {
+    if (!ran || ran.deny !== undefined) return ran
+    const hint = hwHint(e)
+    return hint ? { ...ran, context: [...(ran.context ?? []), `${NOTE_PREFIX}: ${hint}`] } : ran
   } catch {
     return ran
   }
@@ -475,4 +486,5 @@ export function watchResetForTest(since = 0): void {
   listedAt = -Infinity
   shellsQueued = false
   shellsPrompt = ''
+  hwHintResetForTest()
 }

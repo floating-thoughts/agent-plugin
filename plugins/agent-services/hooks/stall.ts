@@ -88,7 +88,7 @@ export type ContinueState = {
 }
 export type ContinueWhy = 'aborted' | 'error' | 'cap'
 export type ContinueDecision = { ok: boolean; why: ContinueWhy | null; say: string | null; state: ContinueState }
-export type ContinueKind = 'promise' | 'self_check' | 'wall' | 'checkpoint_next' | 'to_main' | 'keep_going' | 'report'
+export type ContinueKind = 'promise' | 'self_check' | 'wall' | 'checkpoint_next' | 'to_main' | 'keep_going' | 'report' | 'checkpoint_hold'
 
 export const emptyContinue = (): ContinueState => ({ auto: 0, aborted: false, lastEnd: null })
 

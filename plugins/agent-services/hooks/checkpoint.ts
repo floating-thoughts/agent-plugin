@@ -6,6 +6,7 @@ import { resumeCheckpoint } from './resume'
 import { handoverReceipts } from './evidence'
 import { servedInt, servedText } from './workflow_table'
 import { continueVia } from './stall'
+import { nudgeAnswered } from './checkpoint_nudge'
 
 export const CHECKPOINT_TOOL = 'mcp__agent-services__checkpoint'
 export const CHECKPOINT_DESCRIPTION =
@@ -66,6 +67,7 @@ export async function recheckCheckpoint($: EngineInterface): Promise<void> {
 
 export async function checkpointCall($: EngineInterface, e: Obj): Promise<{ result: string }> {
   if (e.agentId) return { result: 'Only the main conversation can mark a checkpoint; carry on with your task.' }
+  nudgeAnswered()
   const other = checkpointToolName()
   if (other && other !== CHECKPOINT_TOOL) return { result: `This session has another checkpoint tool, ${other}: use that one. Nothing was marked.` }
   if (compacting) return { result: 'A checkpoint is already being compacted; this one adds nothing. Finish your reply now.' }

@@ -13,6 +13,7 @@ import { filesAnswer, install, KIT_WAIT_MS, KitFilesError, kitJob, onDisk, type 
 import { GATE_NOTICES, LOCKED_LINE, PAUSED_LINE as SIGN_IN_LINE, PLAN_NOTICE } from './svc'
 import { checkpointToolName, explicitFor, noteCallBrief, noteCallExplicit, noteCallRoute, noteRouteHint, setTableAsk, userAskedOverride, userAskedReview } from './flow_state'
 import { ADVICE_LABEL, adviceIn, takeTurn } from './delegate'
+import { nudgeShown } from './checkpoint_nudge'
 import { RX_INPUT_MAX, servedRegex } from './rules'
 import { companyIndex, companyKey } from './sealed_wire'
 
@@ -603,6 +604,7 @@ export class Core {
     s.pendingContext = null
     if (ctx && ctx.length) {
       s.advised = true
+      nudgeShown()
       return answer('inject', { context: [...ctx], notice: CHECKPOINT_SHOWN })
     }
     return null

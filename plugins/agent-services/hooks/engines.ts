@@ -14,6 +14,7 @@ import { budgetAfter, budgetPrompt, budgetTurn, gateRefusal } from './budget'
 import { routeNoteFor } from './flow_state'
 import { resumeNotification, resumeStart } from './resume'
 import { continueVia } from './stall'
+import { nudgeStop } from './checkpoint_nudge'
 import { reportHasOpen, reportPrompt, reportStop, turnTexts } from './failure_report'
 import { recentRows } from './session_rows'
 import { installCacheBreak } from './cache_break'
@@ -209,10 +210,17 @@ export async function stopCheck($: EngineInterface, e: Obj, next: Next): Promise
     const last = String(e?.last_assistant_message ?? '')
     const recent: unknown = done?.block === undefined && reportHasOpen('') ? await recentRows($, 60) : []
     const block = done?.block === undefined ? reportStop('', last, turnTexts(recent, last)) : null
-    if (!block) return out
+    if (!block) return nudgeHeld($, e, out)
     return (await continueVia($, 'report', 'stop')).ok ? { ...done, block } : done
   }
   return (await continueVia($, 'promise', 'stop')).ok ? out : done
+}
+
+async function nudgeHeld($: EngineInterface, e: Obj, out: Obj): Promise<Obj> {
+  if (e?.agent_id || out?.block !== undefined) return out
+  const hold = nudgeStop(e?.last_assistant_message, Date.now())
+  if (!hold) return out
+  return (await continueVia($, 'checkpoint_hold', 'stop')).ok ? { ...out, block: hold } : out
 }
 
 export async function mailGate(e: Obj): Promise<string | null> {

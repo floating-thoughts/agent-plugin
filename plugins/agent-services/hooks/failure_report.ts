@@ -1,5 +1,6 @@
 import { rulesTable } from './rules'
 import { exitOf, stagesOf } from './evidence'
+import { BRIEF_LABEL } from './flow'
 
 type Obj = Record<string, any>
 type Texts = Record<string, string>
@@ -9,7 +10,7 @@ export type Entry = {
   denied: boolean; sideEffect: boolean; expensive: boolean
   rounds: number; asked: number; state: 'open' | 'fixed' | 'skipped' | 'needs_user' | 'expected' | 'exhausted' | 'carried'; notified: boolean
 }
-type Call = { seq: number; agent: string; tool: string; ok: boolean; match: string; test: boolean; cmd: string; testWrite: string }
+type Call = { seq: number; agent: string; tool: string; ok: boolean; match: string; alt: string; test: boolean; cmd: string; testWrite: string }
 export type ReportBlock = { kind: 'report' | 'expected'; text: string; step: string; cause: string; evidence: string; fix: string; fixed: string; skipped: string; needsUser: string }
 
 export const SUB_BLOCK_CAP = 4
@@ -79,9 +80,22 @@ export function stepKey(tool: string, input: Obj): string {
   }
   const mcp = /^mcp__(.+?)__/.exec(tool)
   if (mcp) return `mcp:${mcp[1]!.toLowerCase()}`
-  if (tool === 'Agent' || tool === 'Task') return `agent:${String(i.description ?? i.subagent_type ?? '').toLowerCase()}`
+  if (tool === 'Agent' || tool === 'Task') {
+    const brief = String(i.prompt ?? '').split(BRIEF_LABEL)[0]!.replace(/\s+/g, ' ').trim().toLowerCase()
+    if (brief) return `agent:${String(i.subagent_type ?? '').toLowerCase()}:${hashOf(brief)}`
+    return `agent:${String(i.description ?? i.subagent_type ?? '').toLowerCase()}`
+  }
   return `${tool}:${stepOf({ tool, input: i })}`
 }
+
+const hashOf = (t: string): string => {
+  let h = 0x811c9dc5
+  for (let k = 0; k < t.length; k++) h = Math.imul(h ^ t.charCodeAt(k), 0x01000193) >>> 0
+  return h.toString(16).padStart(8, '0')
+}
+
+const nameKey = (tool: string, input: Obj): string =>
+  tool === 'Agent' || tool === 'Task' ? `agent:${String(input.description ?? input.subagent_type ?? '').toLowerCase()}` : ''
 
 export function sigOf(text: string): string {
   const line = text.split(/\r?\n/).map((l) => l.trim()).find((l) => l && !/^exit code:? -?\d+$/i.test(l)) ?? (/exit code:? (-?\d+)/i.exec(text)?.[0] ?? '')
@@ -233,7 +247,8 @@ export function reportToolEnd(e: Obj, done: Obj): Obj {
     const match = stepKey(tool, input)
     const isTest = isShell(tool) && stagesOf(cmd, tool).some((h) => h.kind === 'test')
     const firstRun = isTest && failed && firstRunOfWrittenTest(agent, cmd)
-    calls.push({ seq, agent, tool, ok: !failed, match, test: isTest, cmd: cmd.slice(0, 300), testWrite: failed ? '' : testWrite })
+    const alt = nameKey(tool, input)
+    calls.push({ seq, agent, tool, ok: !failed, match, alt, test: isTest, cmd: cmd.slice(0, 300), testWrite: failed ? '' : testWrite })
     calls = calls.slice(-300)
     let out = done
     if (failed && !(!denied && expectedFailure({ ...e, input }, done, firstRun))) {
@@ -251,7 +266,7 @@ export function reportToolEnd(e: Obj, done: Obj): Obj {
       }
       if (had) [had.seq, had.prompt] = [seq, promptNo]
     } else if (!failed) {
-      for (const x of entries) if (x.agent === agent && x.match === match && x.seq < seq && (x.state === 'open' || x.state === 'exhausted')) x.state = 'fixed'
+      for (const x of entries) if (x.agent === agent && (x.match === match || x.match === alt && x.tool === 'background') && x.seq < seq && (x.state === 'open' || x.state === 'exhausted')) x.state = 'fixed'
     }
     if (!agent && (tool === 'Agent' || tool === 'Task')) {
       const id = [done.agentId, isObj(done.result) ? done.result.agentId : null, /agentId:\s*([\w-]+)/.exec(text)?.[1]].find((x) => typeof x === 'string' && x)
@@ -285,7 +300,7 @@ export function reportNotices(notices: readonly { id: string | null; call: strin
       const key = `|${step}|${sig}|${task}`
       if (!task || entries.some((x) => x.key === key)) continue
       seq += 1
-      entries.push({ key, agent: '', tool: 'background', step, sig, seq, match: sub ? stepKey('Agent', { description: named }) : stepKey('Bash', { command: named }),
+      entries.push({ key, agent: '', tool: 'background', step, sig, seq, match: sub ? nameKey('Agent', { description: named }) : stepKey('Bash', { command: named }),
         prompt: promptNo, denied: false, sideEffect: !sub && sideEffectOf(named), expensive: expensiveStep(named), rounds: 0, asked: 0, state: 'open', notified: false })
       entries = entries.slice(-100)
     }
@@ -326,7 +341,7 @@ export function reportStop(agent: string, message: string, earlier: readonly str
     if (!f || !t) return null
     const open = () => entries.filter((x) => x.agent === agent && x.state === 'open')
     const later = (x: Entry, ok?: boolean, match?: string) =>
-      calls.some((c) => c.agent === agent && c.seq > x.seq && (ok === undefined || c.ok === ok) && (match === undefined || c.match === match))
+      calls.some((c) => c.agent === agent && c.seq > x.seq && (ok === undefined || c.ok === ok) && (match === undefined || c.match === match || c.alt === match && x.tool === 'background'))
     const guess = /\b(?:maybe|probably|perhaps|might be|i guess|possibly|likely|seems? to be)\b|\u53ef\u80fd|\u4e5f\u8bb8|\u5927\u6982|\u5e94\u8be5\u662f/i
     const notes: string[] = []
     const own = reportBlocks(message)

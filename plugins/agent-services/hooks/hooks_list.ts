@@ -202,7 +202,10 @@ export const HOOKS: readonly HookRow[] = [
       'their session ended. Signed in: notes when you last wrote (in the plugin store, key reach_gate) so no alert ' +
       'interrupts you while you are here. After you were away for 20 minutes or more, adds one note listing what waits ' +
       'for you (decisions, results to confirm, failures, finished work), the same list as /agent-services inbox. The ' +
-      'main conversation\'s change-budget notes (tool.call) that have not reached it yet come with its next prompt.',
+      'main conversation\'s change-budget notes (tool.call) that have not reached it yet come with its next prompt. ' +
+      'With the served rule tables: a checkpoint suggestion when more than 40 of your messages or 12 hours have passed ' +
+      'since the last compaction, and a reminder when a checkpoint suggestion went unanswered for 3 main turns (your ' +
+      'messages are counted, never their text).',
     shown: 'A dropped code: a toast and the sign-in answer in its place. A new served methods version: a line and ' +
       'a toast, once. The context blocks are not shown.',
   },
@@ -244,6 +247,17 @@ export const HOOKS: readonly HookRow[] = [
     shown: 'The tool call, a dim line after the compaction, and the plugin\'s message with the next step.',
   },
   {
+    event: 'classic.SessionStart', matcher: '', file: 'register.ts', does: ['context', 'count'],
+    what: 'After a compaction or /clear of the main conversation, starts the checkpoint span over (the count of your ' +
+      'messages and the start time, in the plugin store under checkpoint_span). After a compaction it reads the ' +
+      'session transcript on this computer, backwards from its end to the compaction before, and gives the model the ' +
+      'messages you typed in the stretch the summary replaced, with their times (at most about 12 KB, the newest ' +
+      'kept), so rules you set there are not lost. Tool output, automated notices, hook and command output and ' +
+      'Claude\'s own text are left out, long pasted content becomes a placeholder, and anything like a key or token ' +
+      'is masked. Nothing is sent, written or logged.',
+    shown: 'Nothing; the model gets the text with the compaction.',
+  },
+  {
     event: 'tool.call', matcher: 'tool: Agent, Task, SendMessage', file: 'concurrency.ts', does: ['deny'],
     what: 'Before the main conversation dispatches a subagent (or sends new work to a running one), looks for a ' +
       'concurrency plan in its recent replies or agent-state.md (Task | Depends on | Owns | How it runs). Without ' +
@@ -254,7 +268,10 @@ export const HOOKS: readonly HookRow[] = [
   {
     event: 'classic.Stop', matcher: '', file: 'register.ts', does: ['deny'],
     what: 'With the served rule tables (signed in): when a main turn ends on a promise of more of its own work and ' +
-      'nothing is running in the background to wake it, it is sent back once to do that work. Runs locally; sends nothing.',
+      'nothing is running in the background to wake it, it is sent back once to do that work. When two checkpoint ' +
+      'suggestions in a row were ignored (no checkpoint call within 3 main turns of each), the next stop is held once ' +
+      'with a note saying why and how to answer: call the checkpoint tool, or write a line starting with ' +
+      '"no checkpoint:" and the reason; it never holds twice for the same escalation. Runs locally; sends nothing.',
     shown: 'The reason the turn was sent back, as the model\'s next instruction.',
   },
   {
@@ -265,7 +282,13 @@ export const HOOKS: readonly HookRow[] = [
   },
   {
     event: 'tool.call', matcher: 'tool: Bash, PowerShell', file: 'cmdguard.ts', does: ['deny', 'file'],
-    what: 'With the served rule tables (signed in): a find, grep -r, rg or ls -R, or a PowerShell Get-ChildItem ' +
+    what: 'Signed in or not, the secret dump guard (envguard.ts) first denies a command that would print every ' +
+      'environment variable or a whole secret store into the transcript: env or printenv with no name, a bare set, ' +
+      'export -p, declare -x, Get-ChildItem env:, [Environment]::GetEnvironmentVariables(), reg query of the user or ' +
+      'system Environment key without /v, reading .env files, .agent_secrets or a private SSH key, cmdkey /list, also ' +
+      'inside ssh, wsl, cmd /c, bash -c and powershell -Command or -EncodedCommand. Reading one named variable and ' +
+      'listing names only pass; a description or a command comment that starts with "env dump ok: <reason>" skips it. ' +
+      'Then, with the served rule tables (signed in): a find, grep -r, rg or ls -R, or a PowerShell Get-ChildItem ' +
       '-Recurse (gci, dir, ls), whose path argument is a whole drive or the home folder, and a `cat >` with no input ' +
       'are denied (a drive reached through an earlier cd is not seen), and a git command that takes every changed file is denied ' +
       'while other agents are running; each denial says how to write the command instead, and is appended to the ' +
@@ -321,8 +344,13 @@ export const HOOKS: readonly HookRow[] = [
       'A Bash or PowerShell command the agent starts ' +
       'with run_in_background is remembered too: when its output file has stood still for the served time, the model gets ' +
       'one reminder naming the task id and output file (repeated on the same schedule as for a moved command); it is never ' +
-      'stopped. Sends nothing.',
-    shown: 'A note to the model with the task id; for a command started with run_in_background, a reminder later.',
+      'stopped. Hardware hint (served workflow table, section hw_hint): a Bash or PowerShell command that looks ' +
+      'compute-heavy (a script, a test suite, a build, a render; not one already run with -n, -j or workers) gets one ' +
+      'note after it runs, telling the model to check cores, GPU and free RAM and, when one process would leave most ' +
+      'of the machine idle, to split the work into parallel parts aiming at about 80% use (the served target). Once per ' +
+      'command kind per conversation (main and each subagent); a call whose description starts with ' +
+      '"single process: <reason>" is skipped. The call is never changed or held. Sends nothing.',
+    shown: 'A note to the model with the task id; for a command started with run_in_background, a reminder later; the hardware hint once per command kind.',
   },
   {
     event: 'classic.Stop', matcher: 'stop_hook_active: [true, false]', file: 'watch.ts', does: ['deny', 'context', 'file', 'ui'],

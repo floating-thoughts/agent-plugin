@@ -2,6 +2,7 @@ import type { EngineInterface } from 'claude-code'
 import { onRulesClear, RX_INPUT_MAX, RX_SOURCE_MAX, rulesLive, rulesTable } from './rules'
 import { vaultMask } from './vault'
 import { auditRecord } from './audit_log'
+import { envguardDeny } from './envguard'
 
 type Obj = Record<string, any>
 type CommandRule = { id: string; scope?: 'command' | 'stage'; unquote?: boolean; pattern: string; flags?: string; when?: string; reason: string }
@@ -144,6 +145,11 @@ export function commandRule(command: string): { id: string; command: string; whe
 }
 
 export async function cmdguardBash($: EngineInterface, e: Obj, next: (e: Obj) => Promise<any>): Promise<any> {
+  const env = envguardDeny(e)
+  if (env !== null) {
+    await cmdguardAudit($, e)
+    return { deny: env }
+  }
   await rulesLive()
   const command = String(e?.command ?? '')
   let others: boolean | null = null

@@ -3,7 +3,7 @@ import { dataDir, declareCommand, denyReason, engineClaudeHash, engineDirs, isRe
 import { Core, type Answer } from './core'
 import { dashboardGrant, GRANT_REASON, PUBLISH_START_WAIT_MS } from './dashboard'
 import { publishBoards } from './boss'
-import { briefed, flowAfter, flowLock, flowPrompt, flowStart, flowTurnEnd, installFlow, withPending } from './flow'; import { installConcurrency, stepWatch } from './concurrency'
+import { briefed, flowAfter, flowLock, flowPrompt, flowSessionStart, flowStart, flowTurnEnd, installFlow, withPending } from './flow'; import { installConcurrency, stepWatch } from './concurrency'
 import { Guard } from './guard'
 import { FLUSH_EVERY_MS, Outbox } from './outbox'; import { PANEL_EVERY_MS } from './panel'
 import { gatePlaces, holdWrite, methodsStart, planExit, planModeSeen, pushAgain, pushLessons, pushStart } from './phase'
@@ -331,6 +331,7 @@ export const register: Register = (on) => {
   }).catch(($, e, next) => next(e))
 
   on('classic.Stop', async ($, e: Ev, next) => stopCheck($, e, next)).catch(($, e, next) => next(e))
+  on('classic.SessionStart', async ($, e: Ev, next) => flowSessionStart($, e, next)).catch(($, e, next) => next(e))
   on('session.append', async ($, e: Ev, next) => next(await appendRow($, e, ready($)))).catch(($, e, next) => next(e))
 
   on('session.compact', async ($, e: Ev, next) => {
