@@ -3,10 +3,10 @@ import { dataDir, declareCommand, denyReason, engineClaudeHash, engineDirs, isRe
 import { Core, type Answer } from './core'
 import { dashboardGrant, GRANT_REASON, PUBLISH_START_WAIT_MS } from './dashboard'
 import { publishBoards } from './boss'
-import { briefed, flowAfter, flowLock, flowPrompt, flowStart, flowTurnEnd, installFlow, withPending } from './flow'
+import { briefed, flowAfter, flowLock, flowPrompt, flowStart, flowTurnEnd, installFlow, withPending } from './flow'; import { installConcurrency } from './concurrency'
 import { Guard } from './guard'
 import { FLUSH_EVERY_MS, Outbox } from './outbox'; import { PANEL_EVERY_MS } from './panel'
-import { gatePlaces, holdWrite, methodsStart, pushAgain, pushLessons, pushStart } from './phase'
+import { gatePlaces, holdWrite, methodsStart, planExit, planModeSeen, pushAgain, pushLessons, pushStart } from './phase'
 import { PRICES } from './prices'
 import { engineStore, type KV } from './store'
 import { Svc, type HttpAnswer } from './svc'
@@ -15,7 +15,9 @@ import { probeProcess, processRunner, updateCheck, type Gate } from './update'
 import { bandSetter, createWiring, engineChunks, installBand, notePlan, svcTransport, type Wiring } from './wiring'
 import { canAskNow } from './choice'
 import { appendRow, denied, installEngines, mailGate, toolsStart, promptIn, cacheStep, cacheStepStart, cacheTurnEnd, rulesStart, spawnDenied, spawnGated, stopCheck, toolRun } from './engines'; import { budgetCheck, budgetSpawnCheck, budgetTurn } from './budget'; import { snapPromptStart, snapSessionEnd, snapSpawnStart, snapTurnEnd } from './snapshot'; import { spawnGate } from './subagents'; import { watchPrompt } from './watch'; import { spawnCap, spawnCutLine, spawnRun } from './spawn_run'; import { jobsClaim, jobsClaimScope } from './jobs_view'; import { handoverReceipts } from './evidence'; import { dispatchFacts } from './delegate'; import { resumeCompact, resumeSessionEnd } from './resume'
+import { mcpCheckStart, mcpPromptNote } from './mcp_check'
 import { noToolsDeny } from './ownership'
+import { sealedEnd, sealedGate, sealedStart, sealedTurnEnd } from './sealed_wire'
 
 type Ev = Record<string, any>
 type Usage = { input: number; output: number; cache_read: number; cache_write: number }
@@ -183,8 +185,8 @@ async function send($: EngineInterface, kind: string, agent: string | null, fiel
 }
 
 function background($: EngineInterface, r: Rt, interactive: boolean): void {
-  void r.wiring.metricsTick().catch(() => undefined)
-  void r.outbox.sweep().catch(() => undefined); void rulesStart($, r.svc, ready($)).catch(() => undefined)
+  void r.wiring.metricsTick().catch(() => undefined); mcpCheckStart($)
+  void r.outbox.sweep().catch(() => undefined); void rulesStart($, r.svc, ready($)).catch(() => undefined); void sealedStart($, r)
   void pushStart(r).then(() => methodsStart($, r, interactive)).catch(() => undefined)
   const gate = async (): Promise<Gate> => {
     if ((await r.svc.authState()) !== 'ok') return 'closed'
@@ -216,7 +218,7 @@ export const register: Register = (on) => {
   }, () => {
     void runtime?.then((r) => r && r.wiring.refreshStatus()).catch(() => undefined)
   })
-  installBand(on); installFlow(on); installEngines(on)
+  installBand(on); installFlow(on); installEngines(on); installConcurrency(on)
 
   on('session.start', async ($, e: Ev, next) => {
     declare($)
@@ -234,7 +236,7 @@ export const register: Register = (on) => {
     return out
   }).catch(($, e, next) => next(e))
 
-  on('agent.spawn', async ($, e: Ev, next) => jobsClaimScope(e, async () => { const c = spawnCap(); try {
+  on('agent.spawn', async ($, e: Ev, next) => jobsClaimScope(e, async () => { const c = spawnCap(); try { planModeSeen(e)
     const off = await c.stage('routing switch', routingOff($), true); const gate = off ? null : await c.stage('steps gate', spawnGate($, e, ready($)), null) ?? await c.stage('job claim', jobsClaim($, e, ready($)), null) ?? await c.stage('change budget', budgetSpawnCheck($, e, ready($)), null); if (gate) return c.stage('refusal record', spawnDenied($, e, gate, 'steps_gate', ready($)), { deny: gate }); await c.stage('snapshot', snapSpawnStart($, e, ready($)), undefined)
     const call = e.tool_use_id ?? null
     if (off) return spawnRun($, e, e, next, ready($), false, c); const agent = e.parentAgentId ?? null
@@ -272,23 +274,24 @@ export const register: Register = (on) => {
   })
 
   on('tool.call', async ($, e: Ev, next) => {
-    let rule = 'webmail'; const held = (await mailGate(e)) ?? ((rule = 'no_tools'), noToolsDeny(e)) ?? ((rule = 'plan_hold'), await holdWrite(ready($), e.tool, toolInput(e), () => $.session.cwd(), e.agentId, () => gatePlaces($))) ?? ((rule = 'project_lock'), await flowLock($, e, ready($))) ?? (await budgetCheck($, e, ready($)))
-    if (held) return denied($, e, held, rule, ready($))
+    let rule = 'sealed_key'; const held = sealedGate(e) ?? ((rule = 'webmail'), await mailGate(e)) ?? ((rule = 'no_tools'), noToolsDeny(e)) ?? ((rule = 'plan_hold'), await holdWrite(ready($), e.tool, toolInput(e), () => $.session.cwd(), e.agentId, () => gatePlaces($))) ?? ((rule = 'project_lock'), await flowLock($, e, ready($))) ?? (await budgetCheck($, e, ready($)))
+    if (held) return (planExit(e, { deny: held }), denied($, e, held, rule, ready($)))
     const fields = { tool: e.tool, input: toolInput(e), call: e.tool_use_id ?? null }
     const agent = e.agentId ?? null
     const a = await send($, 'pre_tool', agent, fields)
     show($, a?.notice)
     if (a?.action === 'deny') {
-      return denied($, e, denyReason(a.reason, 'tool check'), 'service_check', ready($))
+      return (planExit(e, { deny: a.reason ?? 'tool check' }), denied($, e, denyReason(a.reason, 'tool check'), 'service_check', ready($)))
     }
     const done: Ev = await toolRun($, e, next, ready($))
+    planExit(e, done)
     await flowAfter($, e, ready($))
     show($, (await send($, 'post_tool', agent, { ...fields, ok: done?.deny === undefined && done?.isError !== true }))?.notice)
     return done
   }).catch(($, e, next) => next(e))
 
   on('turn.complete', async ($, e: Ev, next) => {
-    const done = await next(e); budgetTurn(e); void snapTurnEnd($, e, ready($)); await flowTurnEnd($, e, ready($)); await cacheTurnEnd($, e, ready($))
+    const done = await next(e); budgetTurn(e); void snapTurnEnd($, e, ready($)); void sealedTurnEnd($, e); await flowTurnEnd($, e, ready($)); await cacheTurnEnd($, e, ready($))
     const u: Ev | null = await maybe(() => $.session.usage()); notePlan(u)
     const a = await send($, 'turn_end', e.agentId ?? null, {
       reason: e.reason ?? null,
@@ -321,7 +324,7 @@ export const register: Register = (on) => {
     const a = await send($, 'prompt', e.agentId ?? null, { origin: e.origin?.kind ?? null })
     show($, a?.notice, a?.action === 'inject')
     const blocks = a?.action === 'inject' && a.context && a.context.length ? [a.context.join('\n')] : []
-    blocks.push(...(await pushLessons(ready($), e.agentId, () => $.session.cwd())), ...(await flowPrompt($, e, ready($))), ...(await watchPrompt($, e)))
+    blocks.push(...(await pushLessons(ready($), e.agentId, () => $.session.cwd())), ...(await flowPrompt($, e, ready($))), ...(await watchPrompt($, e)), ...mcpPromptNote(e))
     const note = !e.agentId && (await ready($)) ? await onboardingNote($) : null
     if (note) blocks.push(note)
     return blocks.length ? next({ ...e, context: [...(e.context ?? []), ...blocks] }) : next(e)
@@ -361,7 +364,7 @@ export const register: Register = (on) => {
     show($, a?.notice, true)
     const r = await ready($)
     if (r) {
-      await capped(Promise.all([r.core.idle(), r.wiring.idle()]).then(() => undefined), r.sleep, END_WAIT_MS, undefined)
+      await capped(Promise.all([r.core.idle(), r.wiring.idle(), sealedEnd()]).then(() => undefined), r.sleep, END_WAIT_MS, undefined)
       await capped(r.outbox.flush(), r.sleep, END_WAIT_MS, undefined)
     }
     return next(e)

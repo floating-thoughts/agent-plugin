@@ -1,4 +1,5 @@
 import type { EngineInterface } from 'claude-code'
+import { reportToolEnd } from './failure_report'
 import { redact } from './redact'
 import { relNum, relText } from './reliability'
 import { routingLevel } from './routing_level'
@@ -145,6 +146,7 @@ export function structuredDeny(e: Obj, done: Obj): boolean {
 
 export async function failureHint($: EngineInterface, e: Obj, done: Obj, rt?: Ready): Promise<Obj> {
   try {
+    done = reportToolEnd(e, done)
     if (!isObj(e) || !isObj(done) || structuredDeny(e, done)) return done
     const tool = String(e.tool ?? '')
     const error = resultText(done.result)
@@ -166,7 +168,8 @@ export async function failureHint($: EngineInterface, e: Obj, done: Obj, rt?: Re
     } catch {}
     const line = hintFor(error, lessons)
     if (!line) return withNote
-    return { ...withNote, context: [...(Array.isArray(withNote.context) ? withNote.context : []), line] }
+    const tail = relText('failure_hint.text.hint_tail') ?? ''
+    return { ...withNote, context: [...(Array.isArray(withNote.context) ? withNote.context : []), line + tail] }
   } catch {
     return done
   }

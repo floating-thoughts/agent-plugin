@@ -35,6 +35,8 @@ import { engineCommand, registerSignedIn } from './engines'
 import { jobsCommand } from './jobs_view'
 import { inboxCommand } from './inbox'
 import { auditCommand } from './audit_log'
+import { mcpCommand } from './mcp_check'
+import { sealedCommand } from './sealed_wire'
 import { clearRules, supportContact } from './rules'
 
 export { denyReason, spawnLine } from './hooks_list'
@@ -367,6 +369,8 @@ export type CommandDeps = {
   jobs?: (rest: string[]) => Promise<string>
   inbox?: (rest: string[]) => Promise<string>
   audit?: () => Promise<string>
+  mcp?: (rest: string[]) => Promise<string>
+  sealed?: (sub: string, rest: string[]) => Promise<string>
   store: KV
   now: () => number
   ask?: Ask | null
@@ -565,15 +569,21 @@ export class Command {
     const rest = words.slice(1)
     const svc = this.d.svc
     if (!byTool && Object.hasOwn(MOVED, sub)) return MOVED[sub]!
-    if (!KNOWN_COMMANDS.includes(sub) && !(byTool && TOOL_WORDS.includes(sub))) {
+    if (!byTool && sub === 'mcp' && this.d.mcp) return this.d.mcp(rest)
+    const sealedWord = (sub === 'brain' || sub === 'ledger' || sub === 'kit') && !byTool && !!this.d.sealed
+    if (!sealedWord && !KNOWN_COMMANDS.includes(sub) && !(byTool && TOOL_WORDS.includes(sub))) {
       return `Unknown subcommand "${sub.slice(0, 40)}". ${this.usage}`
     }
     const signedOutOk = AUTH_FAIL_COMMANDS.includes(sub) || sub === 'routing' || sub === 'models' ||
-      (sub === 'methods' && (rest.length === 0 || (rest.length === 1 && rest[0]!.toLowerCase() === 'off')))
+      (sub === 'methods' && (rest.length === 0 || (rest.length === 1 && rest[0]!.toLowerCase() === 'off'))) ||
+      (sealedWord && sub === 'ledger' && rest[0]?.toLowerCase() === 'verify')
     if (!signedOutOk) {
       const st = await svc.authState(true)
-      if (st !== 'ok') return st === 'locked' ? LOCKED_LINE : st === 'paused' ? pausedOf(svc) : PAUSED_LINE
+      const grace = st === 'paused' && sealedWord && sub === 'kit' && ['export', 'status'].includes(rest[0]?.toLowerCase() ?? '') &&
+        typeof svc.graceUntil === 'function' && (await svc.graceUntil()) !== null
+      if (st !== 'ok' && !grace) return st === 'locked' ? LOCKED_LINE : st === 'paused' ? pausedOf(svc) : PAUSED_LINE
     }
+    if (sealedWord) return this.d.sealed!(sub, rest)
     switch (sub) {
       case 'status':
         return rest.length ? this.usage : this.status()
@@ -1772,6 +1782,8 @@ export function engineDeps($: EngineInterface, o: EngineOptions): CommandDeps {
     jobs: (rest) => jobsCommand($, rest),
     inbox: (rest) => inboxCommand($, rest),
     audit: () => auditCommand($),
+    mcp: (rest) => mcpCommand($, rest),
+    sealed: (sub, rest) => sealedCommand($, o.svc, sub, rest),
     store: {
       get: (k) => $.store.get(k),
       set: (k, v) => $.store.set(k, v as any),
@@ -1807,7 +1819,10 @@ export function engineDeps($: EngineInterface, o: EngineOptions): CommandDeps {
     },
     bossUrl: async () => dashboardUrl(readText, await dataDir($), 'boss.json'),
     trustFile,
-    dataText: async () => String(await $.fs.read(`${$.plugin.root}/DATA.md`)),
+    dataText: async () => {
+      const note = String(await $.fs.read(`${$.plugin.root}/DATA.md`))
+      try { return `${note.trimEnd()}\n\n${String(await $.fs.read(`${$.plugin.root}/DATA-sealed.md`)).trim()}\n` } catch { return note }
+    },
     removeDeps: {
       fs: {
         list: async (p) => (await $.fs.list(p)).map((e: any) => ({ name: String(e.name), kind: e.kind })),

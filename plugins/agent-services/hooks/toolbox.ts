@@ -1,4 +1,7 @@
 
+import { mergeIndex } from './brain_serve'
+import type { CompanyEntry } from './brain_serve'
+
 type Obj = Record<string, unknown>
 
 const isObj = (v: unknown): v is Obj => !!v && typeof v === 'object' && !Array.isArray(v)
@@ -17,6 +20,7 @@ export type ToolboxDeps = {
   index(): Promise<unknown>
   sleep: (ms: number) => Promise<unknown>
   waitMs: number
+  company?(): Promise<CompanyEntry[] | null>
 }
 
 export class ToolboxPush {
@@ -31,7 +35,10 @@ export class ToolboxPush {
   }
 
   private fetch(): Promise<unknown> {
-    return Promise.resolve().then(() => this.d.index()).catch(() => null)
+    const index = Promise.resolve().then(() => this.d.index()).catch(() => null)
+    if (!this.d.company) return index
+    const company = Promise.resolve().then(() => this.d.company?.()).catch(() => null)
+    return Promise.all([index, company]).then(([a, c]) => mergeIndex(a, c), () => index)
   }
 
   again(): void {

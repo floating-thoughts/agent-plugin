@@ -5,7 +5,7 @@ export type ToolSpec = {
   input_schema: Record<string, unknown>
 }
 
-export const CONTRACT_SHA256 = "c399e3d921ac91ac58fd7fffa16e206e2451eeef11cbb1270d8fc39ca0f1b2c5"
+export const CONTRACT_SHA256 = "44dd5dd391d50863f4ee7a9654f413fa13388e6994f0f947bf5c5df7fdbfe7c6"
 
 export const API = "svc/1" as const
 export const PREFIX = "/svc/v1" as const
@@ -17,6 +17,9 @@ export const E2E_CONTENT_TYPE_B64 = "application/x-agent-e2e-b64" as const
 export const E2E_ENCODING_HEADER = "X-Agent-E2E-Encoding" as const
 export const E2E_ENCODING_B64 = "b64" as const
 export const E2E_B64_BODY_LIMIT = 87384 as const
+export const SEALED_ANCHOR_KEYS = ["EPdOQofeddG7Y7f7eIF/CqZNr+q04jr0wOIL/9h7y44="] as const
+export const SEALED_PUT_BODY_LIMIT = 1048576 as const
+export const COMPANY_KIT_KEYS = {"6731557107c38a41": "frV88h1bDPsSyWyldelvN2nM6t6j7x+zYX6Hx1U0Sag="} as const
 export const OUTBOX_FOLDER = "<data dir>/services/outbox/" as const
 export const OUTBOX_PATH = "<data dir>/services/outbox/<day>-<session 8 hex>.jsonl" as const
 export const OUTBOX_KEEP_DAYS = 90 as const
@@ -1571,6 +1574,448 @@ export const CONTRACT = {
     "reference"
    ],
    "additionalProperties": false
+  },
+  "SealedOrg": {
+   "type": "string",
+   "pattern": "^[A-Za-z0-9_-]{1,64}$",
+   "maxLength": 64
+  },
+  "SealedHex16": {
+   "type": "string",
+   "pattern": "^[0-9a-f]{16}$",
+   "maxLength": 16
+  },
+  "SealedHex32": {
+   "type": "string",
+   "pattern": "^[0-9a-f]{32}$",
+   "maxLength": 32
+  },
+  "SealedPub": {
+   "type": "string",
+   "pattern": "^[A-Za-z0-9+/]{43}=$",
+   "maxLength": 44
+  },
+  "SealedSig": {
+   "type": "string",
+   "pattern": "^[A-Za-z0-9+/]{86}==$",
+   "maxLength": 88
+  },
+  "SealedAge": {
+   "type": "string",
+   "pattern": "^age1[02-9ac-hj-np-z]{58}$",
+   "maxLength": 62
+  },
+  "SealedTime": {
+   "type": "integer",
+   "minimum": 0,
+   "maximum": 9007199254740991
+  },
+  "SealedKind": {
+   "enum": [
+    "keywrap",
+    "brain",
+    "config",
+    "inbox",
+    "ledger"
+   ]
+  },
+  "SealedBlob": {
+   "type": "string",
+   "pattern": "^[A-Za-z0-9+/]*={0,2}$",
+   "maxLength": 1044480
+  },
+  "SealedBatchBlob": {
+   "type": "string",
+   "pattern": "^[A-Za-z0-9+/]*={0,2}$",
+   "maxLength": 60000
+  },
+  "SealedEnroll": {
+   "type": "object",
+   "properties": {
+    "v": {
+     "const": 1
+    },
+    "org": {
+     "$ref": "#/definitions/SealedOrg"
+    },
+    "acc": {
+     "$ref": "#/definitions/SealedOrg"
+    },
+    "dev": {
+     "$ref": "#/definitions/SealedOrg"
+    },
+    "enc": {
+     "$ref": "#/definitions/SealedAge"
+    },
+    "sig_pk": {
+     "$ref": "#/definitions/SealedPub"
+    },
+    "t": {
+     "$ref": "#/definitions/SealedTime"
+    },
+    "sig": {
+     "$ref": "#/definitions/SealedSig"
+    }
+   },
+   "required": [
+    "v",
+    "org",
+    "acc",
+    "dev",
+    "enc",
+    "sig_pk",
+    "t",
+    "sig"
+   ],
+   "additionalProperties": false
+  },
+  "SealedRoster": {
+   "type": "object",
+   "properties": {
+    "v": {
+     "const": 1
+    },
+    "org": {
+     "$ref": "#/definitions/SealedOrg"
+    },
+    "seq": {
+     "type": "integer",
+     "minimum": 1,
+     "maximum": 9007199254740991
+    },
+    "prev": {
+     "$ref": "#/definitions/Sha256"
+    },
+    "t": {
+     "$ref": "#/definitions/SealedTime"
+    },
+    "root": {
+     "$ref": "#/definitions/SealedPub"
+    },
+    "members": {
+     "type": "array",
+     "maxItems": 500,
+     "items": {
+      "type": "object",
+      "properties": {
+       "acc": {
+        "$ref": "#/definitions/SealedOrg"
+       },
+       "role": {
+        "enum": [
+         "admin",
+         "curator",
+         "member",
+         "auditor"
+        ]
+       },
+       "vaults": {
+        "type": "array",
+        "maxItems": 64,
+        "uniqueItems": true,
+        "items": {
+         "$ref": "#/definitions/SealedHex32"
+        }
+       },
+       "devices": {
+        "type": "array",
+        "maxItems": 8,
+        "items": {
+         "type": "object",
+         "properties": {
+          "dev": {
+           "$ref": "#/definitions/SealedOrg"
+          },
+          "enc": {
+           "$ref": "#/definitions/SealedAge"
+          },
+          "sig_pk": {
+           "$ref": "#/definitions/SealedPub"
+          },
+          "added": {
+           "$ref": "#/definitions/SealedTime"
+          },
+          "verified": {
+           "type": "boolean"
+          }
+         },
+         "required": [
+          "dev",
+          "enc",
+          "sig_pk",
+          "added",
+          "verified"
+         ],
+         "additionalProperties": false
+        }
+       }
+      },
+      "required": [
+       "acc",
+       "role",
+       "vaults",
+       "devices"
+      ],
+      "additionalProperties": false
+     }
+    },
+    "vaults": {
+     "type": "array",
+     "maxItems": 64,
+     "items": {
+      "type": "object",
+      "properties": {
+       "id": {
+        "$ref": "#/definitions/SealedHex32"
+       },
+       "kind": {
+        "enum": [
+         "brain",
+         "ledger"
+        ]
+       },
+       "epoch": {
+        "type": "integer",
+        "minimum": 1,
+        "maximum": 9007199254740991
+       }
+      },
+      "required": [
+       "id",
+       "kind",
+       "epoch"
+      ],
+      "additionalProperties": false
+     }
+    },
+    "recovery": {
+     "type": "object",
+     "properties": {
+      "enc": {
+       "$ref": "#/definitions/SealedAge"
+      },
+      "sig_pk": {
+       "$ref": "#/definitions/SealedPub"
+      }
+     },
+     "required": [
+      "enc",
+      "sig_pk"
+     ],
+     "additionalProperties": false
+    },
+    "names": {
+     "type": "string",
+     "pattern": "^[A-Za-z0-9+/]*={0,2}$",
+     "maxLength": 32768
+    },
+    "signer": {
+     "type": "object",
+     "properties": {
+      "kind": {
+       "enum": [
+        "device",
+        "recovery",
+        "root"
+       ]
+      },
+      "kid": {
+       "$ref": "#/definitions/SealedHex16"
+      }
+     },
+     "required": [
+      "kind",
+      "kid"
+     ],
+     "additionalProperties": false
+    },
+    "sig": {
+     "$ref": "#/definitions/SealedSig"
+    }
+   },
+   "required": [
+    "v",
+    "org",
+    "seq",
+    "prev",
+    "t",
+    "root",
+    "members",
+    "vaults",
+    "recovery",
+    "names",
+    "signer",
+    "sig"
+   ],
+   "additionalProperties": false
+  },
+  "SealedCheckpoint": {
+   "type": "object",
+   "properties": {
+    "v": {
+     "const": 1
+    },
+    "org": {
+     "$ref": "#/definitions/SealedOrg"
+    },
+    "acc": {
+     "$ref": "#/definitions/SealedOrg"
+    },
+    "dev": {
+     "$ref": "#/definitions/SealedOrg"
+    },
+    "by": {
+     "$ref": "#/definitions/SealedHex16"
+    },
+    "seg": {
+     "type": "string",
+     "pattern": "^s-[0-9a-f]{32}$",
+     "maxLength": 34
+    },
+    "seq_from": {
+     "type": "integer",
+     "minimum": 1,
+     "maximum": 9007199254740991
+    },
+    "seq_to": {
+     "type": "integer",
+     "minimum": 1,
+     "maximum": 9007199254740991
+    },
+    "head": {
+     "$ref": "#/definitions/Sha256"
+    },
+    "batch": {
+     "$ref": "#/definitions/Sha256"
+    },
+    "t": {
+     "$ref": "#/definitions/SealedTime"
+    },
+    "sig": {
+     "$ref": "#/definitions/SealedSig"
+    }
+   },
+   "required": [
+    "v",
+    "org",
+    "acc",
+    "dev",
+    "by",
+    "seg",
+    "seq_from",
+    "seq_to",
+    "head",
+    "batch",
+    "t",
+    "sig"
+   ],
+   "additionalProperties": false
+  },
+  "SealedReceipt": {
+   "type": "object",
+   "properties": {
+    "v": {
+     "const": 1
+    },
+    "org": {
+     "$ref": "#/definitions/SealedOrg"
+    },
+    "n": {
+     "type": "integer",
+     "minimum": 1,
+     "maximum": 9007199254740991
+    },
+    "at": {
+     "$ref": "#/definitions/SealedTime"
+    },
+    "of": {
+     "enum": [
+      "checkpoint",
+      "roster"
+     ]
+    },
+    "ref": {
+     "$ref": "#/definitions/Sha256"
+    },
+    "roster_seq": {
+     "type": "integer",
+     "minimum": 1,
+     "maximum": 9007199254740991
+    },
+    "prev": {
+     "$ref": "#/definitions/Sha256"
+    },
+    "kid": {
+     "$ref": "#/definitions/SealedHex16"
+    },
+    "sig": {
+     "$ref": "#/definitions/SealedSig"
+    }
+   },
+   "required": [
+    "v",
+    "org",
+    "n",
+    "at",
+    "of",
+    "ref",
+    "roster_seq",
+    "prev",
+    "kid",
+    "sig"
+   ],
+   "additionalProperties": false
+  },
+  "SealedConfig": {
+   "type": "object",
+   "properties": {
+    "retention_days": {
+     "type": "integer",
+     "minimum": 1,
+     "maximum": 3650
+    },
+    "brain_versions": {
+     "type": "integer",
+     "minimum": 1,
+     "maximum": 1000
+    },
+    "daily_batch": {
+     "type": "boolean"
+    },
+    "storage": {
+     "enum": [
+      "server",
+      "own"
+     ]
+    }
+   },
+   "required": [
+    "retention_days",
+    "brain_versions",
+    "daily_batch",
+    "storage"
+   ],
+   "additionalProperties": false
+  },
+  "CkitKit": {
+   "type": "string",
+   "pattern": "^[a-z][a-z0-9-]{1,21}$",
+   "maxLength": 22
+  },
+  "CkitVersion": {
+   "type": "string",
+   "pattern": "^(0|[1-9][0-9]{0,5})\\.(0|[1-9][0-9]{0,5})\\.(0|[1-9][0-9]{0,5})$",
+   "maxLength": 20
+  },
+  "CkitPart": {
+   "type": "integer",
+   "minimum": 1,
+   "maximum": 9
+  },
+  "CkitHash": {
+   "type": "string",
+   "pattern": "^[0-9a-f]{64}$",
+   "maxLength": 64
   }
  },
  "routes": [
@@ -4159,6 +4604,1210 @@ export const CONTRACT = {
    "x-inventory": {
     "service": "limits",
     "default": "on (on by default while Services is on)",
+    "sent_to": [
+     "our_service"
+    ]
+   }
+  },
+  {
+   "method": "POST",
+   "path": "/sealed/enroll",
+   "request": {
+    "type": "object",
+    "properties": {
+     "enroll": {
+      "$ref": "#/definitions/SealedEnroll"
+     }
+    },
+    "required": [
+     "enroll"
+    ],
+    "additionalProperties": false
+   },
+   "responses": {
+    "200": {
+     "type": "object",
+     "properties": {
+      "root": {
+       "anyOf": [
+        {
+         "$ref": "#/definitions/SealedPub"
+        },
+        {
+         "type": "null"
+        }
+       ]
+      },
+      "roster_seq": {
+       "type": "integer",
+       "minimum": 0,
+       "maximum": 9007199254740991
+      }
+     },
+     "required": [
+      "root",
+      "roster_seq"
+     ],
+     "additionalProperties": false
+    }
+   },
+   "errors": {
+    "400": [
+     "bad_json",
+     "bad_record",
+     "bad_signature"
+    ],
+    "403": [
+     "not_in_plan",
+     "no_license",
+     "sealed_off",
+     "not_yours"
+    ],
+    "409": [
+     "already_enrolled"
+    ],
+    "413": [
+     "too_large"
+    ],
+    "422": [
+     "bad_request"
+    ],
+    "429": [
+     "rate_limited",
+     "day_limit"
+    ]
+   },
+   "x-inventory": {
+    "service": "metrics",
+    "default": "only for an account with a valid licence in a company with sealed on (the owner switch, else the server default); used only when the company sets up its brain or ledger",
+    "sent_to": [
+     "our_service"
+    ]
+   }
+  },
+  {
+   "method": "POST",
+   "path": "/sealed/roster",
+   "request": {
+    "type": "object",
+    "properties": {
+     "since_seq": {
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 9007199254740991
+     }
+    },
+    "required": [],
+    "additionalProperties": false
+   },
+   "responses": {
+    "200": {
+     "type": "object",
+     "properties": {
+      "rosters": {
+       "type": "array",
+       "maxItems": 1000,
+       "items": {
+        "$ref": "#/definitions/SealedRoster"
+       }
+      }
+     },
+     "required": [
+      "rosters"
+     ],
+     "additionalProperties": false
+    }
+   },
+   "errors": {
+    "400": [
+     "bad_json",
+     "bad_record"
+    ],
+    "403": [
+     "not_in_plan",
+     "no_license",
+     "sealed_off"
+    ],
+    "404": [
+     "not_found"
+    ],
+    "413": [
+     "too_large"
+    ],
+    "422": [
+     "bad_request"
+    ],
+    "429": [
+     "rate_limited",
+     "day_limit"
+    ]
+   },
+   "x-inventory": {
+    "service": "metrics",
+    "default": "only for an account with a valid licence in a company with sealed on (the owner switch, else the server default); used only when the company sets up its brain or ledger",
+    "sent_to": [
+     "our_service"
+    ]
+   }
+  },
+  {
+   "method": "POST",
+   "path": "/sealed/roster/put",
+   "request": {
+    "type": "object",
+    "properties": {
+     "roster": {
+      "$ref": "#/definitions/SealedRoster"
+     }
+    },
+    "required": [
+     "roster"
+    ],
+    "additionalProperties": false
+   },
+   "responses": {
+    "200": {
+     "type": "object",
+     "properties": {
+      "receipt": {
+       "$ref": "#/definitions/SealedReceipt"
+      }
+     },
+     "required": [
+      "receipt"
+     ],
+     "additionalProperties": false
+    }
+   },
+   "errors": {
+    "400": [
+     "bad_json",
+     "bad_record",
+     "bad_signature"
+    ],
+    "403": [
+     "not_in_plan",
+     "no_license",
+     "sealed_off",
+     "sealed_role"
+    ],
+    "409": [
+     "seq_conflict"
+    ],
+    "413": [
+     "too_large"
+    ],
+    "422": [
+     "bad_request"
+    ],
+    "429": [
+     "rate_limited",
+     "day_limit"
+    ],
+    "503": [
+     "not_configured"
+    ]
+   },
+   "x-inventory": {
+    "service": "metrics",
+    "default": "only for an account with a valid licence in a company with sealed on (the owner switch, else the server default); used only when the company sets up its brain or ledger",
+    "sent_to": [
+     "our_service"
+    ]
+   }
+  },
+  {
+   "method": "POST",
+   "path": "/sealed/pending",
+   "request": {
+    "type": "object",
+    "properties": {
+     "reject": {
+      "type": "array",
+      "maxItems": 50,
+      "uniqueItems": true,
+      "items": {
+       "$ref": "#/definitions/SealedOrg"
+      }
+     }
+    },
+    "required": [],
+    "additionalProperties": false
+   },
+   "responses": {
+    "200": {
+     "type": "object",
+     "properties": {
+      "pending": {
+       "type": "array",
+       "maxItems": 500,
+       "items": {
+        "$ref": "#/definitions/SealedEnroll"
+       }
+      }
+     },
+     "required": [
+      "pending"
+     ],
+     "additionalProperties": false
+    }
+   },
+   "errors": {
+    "400": [
+     "bad_json",
+     "bad_record"
+    ],
+    "403": [
+     "not_in_plan",
+     "no_license",
+     "sealed_off",
+     "sealed_role"
+    ],
+    "413": [
+     "too_large"
+    ],
+    "422": [
+     "bad_request"
+    ],
+    "429": [
+     "rate_limited",
+     "day_limit"
+    ]
+   },
+   "x-inventory": {
+    "service": "metrics",
+    "default": "only for an account with a valid licence in a company with sealed on (the owner switch, else the server default); used only when the company sets up its brain or ledger",
+    "sent_to": [
+     "our_service"
+    ]
+   }
+  },
+  {
+   "method": "POST",
+   "path": "/sealed/put",
+   "request": {
+    "type": "object",
+    "properties": {
+     "vault": {
+      "$ref": "#/definitions/SealedHex32"
+     },
+     "kind": {
+      "$ref": "#/definitions/SealedKind"
+     },
+     "object": {
+      "$ref": "#/definitions/SealedHex32"
+     },
+     "epoch": {
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 9007199254740991
+     },
+     "version": {
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 9007199254740991
+     },
+     "sha256": {
+      "$ref": "#/definitions/Sha256"
+     },
+     "size": {
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 783360
+     },
+     "data_b64": {
+      "$ref": "#/definitions/SealedBlob"
+     },
+     "sig": {
+      "$ref": "#/definitions/SealedSig"
+     }
+    },
+    "required": [
+     "vault",
+     "kind",
+     "object",
+     "epoch",
+     "version",
+     "sha256",
+     "size",
+     "data_b64",
+     "sig"
+    ],
+    "additionalProperties": false
+   },
+   "responses": {
+    "200": {
+     "type": "object",
+     "properties": {
+      "roster_seq": {
+       "type": "integer",
+       "minimum": 1,
+       "maximum": 9007199254740991
+      },
+      "accepted_at": {
+       "$ref": "#/definitions/SealedTime"
+      }
+     },
+     "required": [
+      "roster_seq",
+      "accepted_at"
+     ],
+     "additionalProperties": false
+    }
+   },
+   "errors": {
+    "400": [
+     "bad_json",
+     "bad_record",
+     "bad_signature",
+     "header_mismatch",
+     "bad_size"
+    ],
+    "403": [
+     "not_in_plan",
+     "no_license",
+     "sealed_off",
+     "sealed_role",
+     "not_enrolled"
+    ],
+    "404": [
+     "not_found"
+    ],
+    "409": [
+     "version_conflict"
+    ],
+    "413": [
+     "too_large"
+    ],
+    "422": [
+     "bad_request"
+    ],
+    "429": [
+     "rate_limited",
+     "day_limit"
+    ]
+   },
+   "x-inventory": {
+    "service": "metrics",
+    "default": "only for an account with a valid licence in a company with sealed on (the owner switch, else the server default); used only when the company sets up its brain or ledger",
+    "sent_to": [
+     "our_service"
+    ]
+   }
+  },
+  {
+   "method": "POST",
+   "path": "/sealed/list",
+   "request": {
+    "type": "object",
+    "properties": {
+     "vault": {
+      "$ref": "#/definitions/SealedHex32"
+     },
+     "cursor": {
+      "type": "string",
+      "pattern": "^[A-Za-z0-9_-]*$",
+      "maxLength": 128
+     },
+     "kinds": {
+      "type": "array",
+      "maxItems": 5,
+      "uniqueItems": true,
+      "items": {
+       "$ref": "#/definitions/SealedKind"
+      }
+     }
+    },
+    "required": [
+     "vault"
+    ],
+    "additionalProperties": false
+   },
+   "responses": {
+    "200": {
+     "type": "object",
+     "properties": {
+      "items": {
+       "type": "array",
+       "maxItems": 1000,
+       "items": {
+        "type": "object",
+        "properties": {
+         "object": {
+          "$ref": "#/definitions/SealedHex32"
+         },
+         "kind": {
+          "$ref": "#/definitions/SealedKind"
+         },
+         "epoch": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 9007199254740991
+         },
+         "version": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 9007199254740991
+         },
+         "size": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 783360
+         },
+         "by": {
+          "$ref": "#/definitions/SealedHex16"
+         },
+         "roster_seq": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 9007199254740991
+         },
+         "accepted_at": {
+          "$ref": "#/definitions/SealedTime"
+         }
+        },
+        "required": [
+         "object",
+         "kind",
+         "epoch",
+         "version",
+         "size",
+         "by",
+         "roster_seq",
+         "accepted_at"
+        ],
+        "additionalProperties": false
+       }
+      },
+      "cursor": {
+       "anyOf": [
+        {
+         "type": "string",
+         "pattern": "^[A-Za-z0-9_-]*$",
+         "maxLength": 128
+        },
+        {
+         "type": "null"
+        }
+       ]
+      }
+     },
+     "required": [
+      "items",
+      "cursor"
+     ],
+     "additionalProperties": false
+    }
+   },
+   "errors": {
+    "400": [
+     "bad_json",
+     "bad_record"
+    ],
+    "403": [
+     "not_in_plan",
+     "no_license",
+     "sealed_off"
+    ],
+    "404": [
+     "not_found"
+    ],
+    "413": [
+     "too_large"
+    ],
+    "422": [
+     "bad_request"
+    ],
+    "429": [
+     "rate_limited",
+     "day_limit"
+    ]
+   },
+   "x-inventory": {
+    "service": "metrics",
+    "default": "only for an account with a valid licence in a company with sealed on (the owner switch, else the server default); used only when the company sets up its brain or ledger",
+    "sent_to": [
+     "our_service"
+    ]
+   }
+  },
+  {
+   "method": "POST",
+   "path": "/sealed/get",
+   "request": {
+    "type": "object",
+    "properties": {
+     "vault": {
+      "$ref": "#/definitions/SealedHex32"
+     },
+     "object": {
+      "$ref": "#/definitions/SealedHex32"
+     },
+     "version": {
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 9007199254740991
+     }
+    },
+    "required": [
+     "vault",
+     "object"
+    ],
+    "additionalProperties": false
+   },
+   "responses": {
+    "200": {
+     "type": "object",
+     "properties": {
+      "data_b64": {
+       "$ref": "#/definitions/SealedBlob"
+      },
+      "sig": {
+       "$ref": "#/definitions/SealedSig"
+      },
+      "by": {
+       "$ref": "#/definitions/SealedHex16"
+      },
+      "roster_seq": {
+       "type": "integer",
+       "minimum": 1,
+       "maximum": 9007199254740991
+      },
+      "accepted_at": {
+       "$ref": "#/definitions/SealedTime"
+      }
+     },
+     "required": [
+      "data_b64",
+      "sig",
+      "by",
+      "roster_seq",
+      "accepted_at"
+     ],
+     "additionalProperties": false
+    }
+   },
+   "errors": {
+    "400": [
+     "bad_json",
+     "bad_record"
+    ],
+    "403": [
+     "not_in_plan",
+     "no_license",
+     "sealed_off"
+    ],
+    "404": [
+     "not_found"
+    ],
+    "413": [
+     "too_large"
+    ],
+    "422": [
+     "bad_request"
+    ],
+    "429": [
+     "rate_limited",
+     "day_limit"
+    ]
+   },
+   "x-inventory": {
+    "service": "metrics",
+    "default": "only for an account with a valid licence in a company with sealed on (the owner switch, else the server default); used only when the company sets up its brain or ledger",
+    "sent_to": [
+     "our_service"
+    ]
+   }
+  },
+  {
+   "method": "POST",
+   "path": "/sealed/ledger/checkpoint",
+   "request": {
+    "type": "object",
+    "properties": {
+     "checkpoint": {
+      "$ref": "#/definitions/SealedCheckpoint"
+     },
+     "batch": {
+      "type": "object",
+      "properties": {
+       "vault": {
+        "$ref": "#/definitions/SealedHex32"
+       },
+       "object": {
+        "$ref": "#/definitions/SealedHex32"
+       },
+       "sha256": {
+        "$ref": "#/definitions/Sha256"
+       },
+       "size": {
+        "type": "integer",
+        "minimum": 1,
+        "maximum": 45000
+       },
+       "data_b64": {
+        "$ref": "#/definitions/SealedBatchBlob"
+       },
+       "sig": {
+        "$ref": "#/definitions/SealedSig"
+       }
+      },
+      "required": [
+       "vault",
+       "object",
+       "sha256",
+       "size",
+       "data_b64",
+       "sig"
+      ],
+      "additionalProperties": false
+     }
+    },
+    "required": [
+     "checkpoint",
+     "batch"
+    ],
+    "additionalProperties": false
+   },
+   "responses": {
+    "200": {
+     "type": "object",
+     "properties": {
+      "receipt": {
+       "$ref": "#/definitions/SealedReceipt"
+      }
+     },
+     "required": [
+      "receipt"
+     ],
+     "additionalProperties": false
+    }
+   },
+   "errors": {
+    "400": [
+     "bad_json",
+     "bad_record",
+     "bad_signature",
+     "header_mismatch",
+     "bad_size"
+    ],
+    "403": [
+     "not_in_plan",
+     "no_license",
+     "sealed_off",
+     "sealed_role",
+     "not_enrolled"
+    ],
+    "404": [
+     "not_found"
+    ],
+    "409": [
+     "checkpoint_gap",
+     "version_conflict"
+    ],
+    "413": [
+     "too_large"
+    ],
+    "422": [
+     "bad_request"
+    ],
+    "429": [
+     "rate_limited",
+     "day_limit"
+    ],
+    "503": [
+     "not_configured"
+    ]
+   },
+   "x-inventory": {
+    "service": "metrics",
+    "default": "only for an account with a valid licence in a company with sealed on (the owner switch, else the server default); used only when the company sets up its brain or ledger",
+    "sent_to": [
+     "our_service"
+    ]
+   }
+  },
+  {
+   "method": "POST",
+   "path": "/sealed/ledger/receipts",
+   "request": {
+    "type": "object",
+    "properties": {
+     "from": {
+      "$ref": "#/definitions/SealedTime"
+     },
+     "to": {
+      "$ref": "#/definitions/SealedTime"
+     },
+     "after_n": {
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 9007199254740991
+     }
+    },
+    "required": [
+     "from",
+     "to"
+    ],
+    "additionalProperties": false
+   },
+   "responses": {
+    "200": {
+     "type": "object",
+     "properties": {
+      "receipts": {
+       "type": "array",
+       "maxItems": 10000,
+       "items": {
+        "$ref": "#/definitions/SealedReceipt"
+       }
+      },
+      "checkpoints": {
+       "type": "array",
+       "maxItems": 10000,
+       "items": {
+        "$ref": "#/definitions/SealedCheckpoint"
+       }
+      },
+      "rosters": {
+       "type": "array",
+       "maxItems": 1000,
+       "items": {
+        "$ref": "#/definitions/SealedRoster"
+       }
+      },
+      "more": {
+       "type": "boolean"
+      }
+     },
+     "required": [
+      "receipts",
+      "checkpoints",
+      "rosters"
+     ],
+     "additionalProperties": false
+    }
+   },
+   "errors": {
+    "400": [
+     "bad_json",
+     "bad_record"
+    ],
+    "403": [
+     "not_in_plan",
+     "no_license",
+     "sealed_off",
+     "sealed_role"
+    ],
+    "413": [
+     "too_large"
+    ],
+    "422": [
+     "bad_request"
+    ],
+    "429": [
+     "rate_limited",
+     "day_limit"
+    ]
+   },
+   "x-inventory": {
+    "service": "metrics",
+    "default": "only for an account with a valid licence in a company with sealed on (the owner switch, else the server default); used only when the company sets up its brain or ledger",
+    "sent_to": [
+     "our_service"
+    ]
+   }
+  },
+  {
+   "method": "POST",
+   "path": "/sealed/config",
+   "request": {
+    "type": "object",
+    "properties": {
+     "retention_days": {
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 3650
+     },
+     "brain_versions": {
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 1000
+     },
+     "daily_batch": {
+      "type": "boolean"
+     },
+     "storage": {
+      "enum": [
+       "server",
+       "own"
+      ]
+     }
+    },
+    "required": [],
+    "additionalProperties": false
+   },
+   "responses": {
+    "200": {
+     "type": "object",
+     "properties": {
+      "config": {
+       "$ref": "#/definitions/SealedConfig"
+      },
+      "org": {
+       "$ref": "#/definitions/SealedOrg"
+      }
+     },
+     "required": [
+      "config"
+     ],
+     "additionalProperties": false
+    }
+   },
+   "errors": {
+    "400": [
+     "bad_json",
+     "bad_record"
+    ],
+    "403": [
+     "not_in_plan",
+     "no_license",
+     "sealed_off",
+     "sealed_role"
+    ],
+    "413": [
+     "too_large"
+    ],
+    "422": [
+     "bad_request"
+    ],
+    "429": [
+     "rate_limited",
+     "day_limit"
+    ]
+   },
+   "x-inventory": {
+    "service": "metrics",
+    "default": "only for an account with a valid licence in a company with sealed on (the owner switch, else the server default); used only when the company sets up its brain or ledger",
+    "sent_to": [
+     "our_service"
+    ]
+   }
+  },
+  {
+   "method": "POST",
+   "path": "/sealed/kit/list",
+   "request": {
+    "type": "object",
+    "properties": {},
+    "required": [],
+    "additionalProperties": false
+   },
+   "responses": {
+    "200": {
+     "type": "object",
+     "properties": {
+      "kits": {
+       "type": "array",
+       "maxItems": 100,
+       "items": {
+        "type": "object",
+        "properties": {
+         "kit": {
+          "$ref": "#/definitions/CkitKit"
+         },
+         "version": {
+          "$ref": "#/definitions/CkitVersion"
+         },
+         "part": {
+          "$ref": "#/definitions/CkitPart"
+         },
+         "parts": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 9
+         },
+         "state": {
+          "enum": [
+           "sealed",
+           "reseal"
+          ]
+         },
+         "created": {
+          "$ref": "#/definitions/SealedTime"
+         }
+        },
+        "required": [
+         "kit",
+         "version",
+         "part",
+         "parts",
+         "state",
+         "created"
+        ],
+        "additionalProperties": false
+       }
+      }
+     },
+     "required": [
+      "kits"
+     ],
+     "additionalProperties": false
+    }
+   },
+   "errors": {
+    "400": [
+     "bad_json",
+     "bad_record"
+    ],
+    "403": [
+     "not_in_plan",
+     "no_license",
+     "sealed_off"
+    ],
+    "404": [
+     "not_found"
+    ],
+    "413": [
+     "too_large"
+    ],
+    "422": [
+     "bad_request"
+    ],
+    "429": [
+     "rate_limited",
+     "day_limit"
+    ]
+   },
+   "x-inventory": {
+    "service": "metrics",
+    "default": "only for an account with a valid licence in a company with sealed on (the owner switch, else the server default); used only by a company admin when the owner has handed the company a kit made for it",
+    "sent_to": [
+     "our_service"
+    ]
+   }
+  },
+  {
+   "method": "POST",
+   "path": "/sealed/kit/get",
+   "request": {
+    "type": "object",
+    "properties": {
+     "kit": {
+      "$ref": "#/definitions/CkitKit"
+     },
+     "version": {
+      "$ref": "#/definitions/CkitVersion"
+     },
+     "part": {
+      "$ref": "#/definitions/CkitPart"
+     }
+    },
+    "required": [
+     "kit",
+     "version",
+     "part"
+    ],
+    "additionalProperties": false
+   },
+   "responses": {
+    "200": {
+     "type": "object",
+     "properties": {
+      "handoff_b64": {
+       "type": "string",
+       "pattern": "^[A-Za-z0-9+/]*={0,2}$",
+       "maxLength": 1398104
+      },
+      "outer_sig": {
+       "$ref": "#/definitions/SealedSig"
+      }
+     },
+     "required": [
+      "handoff_b64",
+      "outer_sig"
+     ],
+     "additionalProperties": false
+    }
+   },
+   "errors": {
+    "400": [
+     "bad_json",
+     "bad_record"
+    ],
+    "403": [
+     "not_in_plan",
+     "no_license",
+     "sealed_off"
+    ],
+    "404": [
+     "not_found"
+    ],
+    "413": [
+     "too_large"
+    ],
+    "422": [
+     "bad_request"
+    ],
+    "429": [
+     "rate_limited",
+     "day_limit"
+    ]
+   },
+   "x-inventory": {
+    "service": "metrics",
+    "default": "only for an account with a valid licence in a company with sealed on (the owner switch, else the server default); used only by a company admin when the owner has handed the company a kit made for it",
+    "sent_to": [
+     "our_service"
+    ]
+   }
+  },
+  {
+   "method": "POST",
+   "path": "/sealed/kit/ack",
+   "request": {
+    "type": "object",
+    "properties": {
+     "kit": {
+      "$ref": "#/definitions/CkitKit"
+     },
+     "version": {
+      "$ref": "#/definitions/CkitVersion"
+     },
+     "part": {
+      "$ref": "#/definitions/CkitPart"
+     },
+     "vault": {
+      "$ref": "#/definitions/SealedHex32"
+     },
+     "plain": {
+      "$ref": "#/definitions/CkitHash"
+     },
+     "reseal": {
+      "type": "boolean"
+     }
+    },
+    "required": [
+     "kit",
+     "version",
+     "part",
+     "plain"
+    ],
+    "additionalProperties": false
+   },
+   "responses": {
+    "200": {
+     "type": "object",
+     "properties": {
+      "state": {
+       "enum": [
+        "accepted",
+        "reseal"
+       ]
+      }
+     },
+     "required": [
+      "state"
+     ],
+     "additionalProperties": false
+    }
+   },
+   "errors": {
+    "400": [
+     "bad_json",
+     "bad_record"
+    ],
+    "403": [
+     "not_in_plan",
+     "no_license",
+     "sealed_off"
+    ],
+    "404": [
+     "not_found"
+    ],
+    "413": [
+     "too_large"
+    ],
+    "422": [
+     "bad_request"
+    ],
+    "429": [
+     "rate_limited",
+     "day_limit"
+    ]
+   },
+   "x-inventory": {
+    "service": "metrics",
+    "default": "only for an account with a valid licence in a company with sealed on (the owner switch, else the server default); used only by a company admin when the owner has handed the company a kit made for it",
+    "sent_to": [
+     "our_service"
+    ]
+   }
+  },
+  {
+   "method": "POST",
+   "path": "/sealed/kit/exported",
+   "request": {
+    "type": "object",
+    "properties": {
+     "kit": {
+      "$ref": "#/definitions/CkitKit"
+     },
+     "version": {
+      "$ref": "#/definitions/CkitVersion"
+     },
+     "plain": {
+      "$ref": "#/definitions/CkitHash"
+     }
+    },
+    "required": [
+     "kit",
+     "version",
+     "plain"
+    ],
+    "additionalProperties": false
+   },
+   "responses": {
+    "200": {
+     "type": "object",
+     "properties": {
+      "exported_at": {
+       "$ref": "#/definitions/SealedTime"
+      }
+     },
+     "required": [
+      "exported_at"
+     ],
+     "additionalProperties": false
+    }
+   },
+   "errors": {
+    "400": [
+     "bad_json",
+     "bad_record"
+    ],
+    "403": [
+     "not_in_plan",
+     "no_license",
+     "sealed_off"
+    ],
+    "404": [
+     "not_found"
+    ],
+    "413": [
+     "too_large"
+    ],
+    "422": [
+     "bad_request"
+    ],
+    "429": [
+     "rate_limited",
+     "day_limit"
+    ]
+   },
+   "x-inventory": {
+    "service": "metrics",
+    "default": "only for an account with a valid licence in a company with sealed on (the owner switch, else the server default); used only by a company admin when the owner has handed the company a kit made for it",
     "sent_to": [
      "our_service"
     ]

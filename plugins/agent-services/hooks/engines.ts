@@ -14,6 +14,8 @@ import { budgetAfter, budgetPrompt, budgetTurn, gateRefusal } from './budget'
 import { routeNoteFor } from './flow_state'
 import { resumeNotification, resumeStart } from './resume'
 import { continueVia } from './stall'
+import { reportHasOpen, reportPrompt, reportStop, turnTexts } from './failure_report'
+import { recentRows } from './session_rows'
 import { installCacheBreak } from './cache_break'
 export { cacheStep, cacheStepStart, cacheTurnEnd } from './cache_break'
 import { jobPermission, jobsToolEnd } from './jobs'
@@ -40,7 +42,7 @@ export function installEngines(on: any): void {
   installWatch(on)
   installCacheBreak(on)
   on('tool.call', { tool: 'mcp__agent-services__task_state' }, async ($: EngineInterface, e: Obj) => failureHint($, e, await taskStateTool($, e)))
-    .catch(() => ({ result: 'task_state failed inside the agent-services plugin (an unexpected error in its hooks, not in your request); the cause is in task_wire.ts (taskStateTool) and task_state_io.ts in the installed plugin folder\'s hooks/. Read them to find the cause, and meanwhile continue with what does not need the task state.' }))
+    .catch(() => ({ result: 'task_state failed inside the agent-services plugin (an unexpected error in the plugin, not in your request), so nothing was recorded. What to do: retry the same call once; if it fails again, continue with what does not need the task state and tell the user that the plugin\'s task_state tool failed (they can run /agent-services info log to see the plugin log). This answer is advice only and does not hold your turn; you may skip the task-state step for now.' }))
   on('tool.call', { tool: 'mcp__agent-services__undo' }, async ($: EngineInterface, e: Obj) => failureHint($, e, await undoTool($, e)))
     .catch(($: EngineInterface, e: Obj) => failureHint($, e, { result: 'Undo: it failed; nothing more was changed.' }))
   on('tool.describe', { tool: 'mcp__agent-services__undo' }, async ($: EngineInterface, e: Obj, next: any) => ({ ...(await next(e)), isDeferred: true }))
@@ -171,6 +173,7 @@ export async function promptIn($: EngineInterface, e: Obj, rt: Ready): Promise<O
   await bindPrompt($)
   if (!e.agentId) await carryNow($, true)
   delegateTurn(e)
+  const carried = reportPrompt(e)
   const masked = vaultPrompt($, e) ?? e
   const shortened = await notificationEvent($, masked, rt as any)
   await resumeNotification($, shortened)
@@ -182,7 +185,8 @@ export async function promptIn($: EngineInterface, e: Obj, rt: Ready): Promise<O
   }
   const base: unknown[] = Array.isArray(shortened?.context) ? [...shortened.context] : []
   const out = inboxPrompt($, budgetPrompt(await ownershipPrompt($, await jobsPrompt($, await taskPromptIn($, await jitPrompt(shortened, rt as any, async () => $.session.cwd()), rt), rt), rt as any)), rt)
-  return gatePrompt(await out, base, !!e.agentId)
+  const o = await out
+  return gatePrompt(carried ? { ...o, context: [...(Array.isArray(o.context) ? o.context : []), carried] } : o, base, !!e.agentId)
 }
 
 export async function appendRow($: EngineInterface, e: Obj, rt?: Ready): Promise<Obj> {
@@ -201,7 +205,13 @@ export async function stopCheck($: EngineInterface, e: Obj, next: Next): Promise
   const done = await next(e)
   await rulesLive()
   const out = stopSendBack(e, done)
-  if (out === done || out?.block === undefined) return out
+  if (out === done || out?.block === undefined) {
+    const last = String(e?.last_assistant_message ?? '')
+    const recent: unknown = done?.block === undefined && reportHasOpen('') ? await recentRows($, 60) : []
+    const block = done?.block === undefined ? reportStop('', last, turnTexts(recent, last)) : null
+    if (!block) return out
+    return (await continueVia($, 'report', 'stop')).ok ? { ...done, block } : done
+  }
   return (await continueVia($, 'promise', 'stop')).ok ? out : done
 }
 

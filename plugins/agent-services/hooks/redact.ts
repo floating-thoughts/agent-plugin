@@ -17,6 +17,7 @@ export const SECRET_RES: readonly (readonly [RegExp, boolean])[] = [
   [/(Authorization:\s*(?:Bearer|Basic)\s+)[A-Za-z0-9._\-+/=]{8,}/giu, true],
   [/((?:api[_-]?key|secret|token|passw(?:or)?d|access[_-]?key)\s*[:=]\s*['"]?)([A-Za-z0-9_\-/+=.]{12,})/giu, true],
   [/(--(?:password|passwd|pass|token|api-key|apikey|secret|access-key)(?:\s+|=)['"]?)([^\s'"]{4,})/giu, true],
+  [/((?<![A-Za-z0-9+.-])[A-Za-z][A-Za-z0-9+.-]*:\/\/)[^\s\/@:'"<>]+:[^\s\/@'"<>]+(?=@)/gu, true],
 ]
 
 export const REDACTED = '<redacted>'

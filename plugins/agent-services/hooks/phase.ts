@@ -213,9 +213,77 @@ function askOf(r: { session?: unknown; core?: { servedGate?(session: unknown, st
 
 const reminders = new WeakMap<object, { due: string } | 'told'>()
 
+type PlanMode = 'plan' | 'approved' | null
+let planMode: PlanMode = null
+let planFile: string | null = null
+let planNote: string | null = null
+let planEnterPrev: PlanMode | undefined
+
+const planFileOf = (v: unknown): string | null => (typeof v === 'string' && v.trim() ? normPath(v.trim()) : null)
+
+export function planModeNow(): PlanMode {
+  return planMode
+}
+
+export function planModeResetForTest(): void {
+  planMode = null
+  planFile = null
+  planNote = null
+  planEnterPrev = undefined
+}
+
+export function planModeSeen(e: unknown): void {
+  try {
+    if (!isObj(e) || planMode === 'approved') return
+    if (e.type === 'plan_mode') {
+      if (e.agentId) return
+      planMode = 'plan'
+      const f = planFileOf(isObj(e.detail) ? e.detail.planFilePath : null)
+      if (f) planFile = f
+      return
+    }
+    if (typeof e.permissionMode !== 'string' || !e.permissionMode || e.parentAgentId || e.agentId) return
+    planMode = e.permissionMode === 'plan' ? 'plan' : null
+  } catch {
+  }
+}
+
+export function planExit(e: unknown, done: unknown): void {
+  try {
+    if (isObj(e) && e.tool === 'EnterPlanMode' && !e.agentId) {
+      const refused = !isObj(done) || done.deny !== undefined || done.isError === true
+      if (planMode !== 'approved') planMode = refused ? (planEnterPrev === undefined ? planMode : planEnterPrev) : 'plan'
+      planEnterPrev = undefined
+      return
+    }
+    if (!isObj(e) || e.tool !== 'ExitPlanMode' || e.agentId || !isObj(done)) return
+    if (done.deny !== undefined || done.isError === true) return
+    const f = planFileOf(isObj(done.result) ? done.result.filePath : null)
+    if (f) planFile = f
+    planMode = 'approved'
+    planNote = `${ADVICE_LABEL} agent-services: the user approved your plan in plan mode` +
+      (planFile ? ` (plan file: ${planFile})` : '') + '. The planning gate stands down for the rest of this session. ' +
+      'Write the approved plan into agent-state.md in the project root so it outlasts the session: the goal under ' +
+      '`## Goal`, one `- [ ] <id>: <step> (after: <ids>) (owns: <globs>)` line per step under `## Plan`, and ' +
+      '`phase: running` as the first line.'
+  } catch {
+  }
+}
+
+function takePlanNote(): string | null {
+  const n = planNote
+  planNote = null
+  return n
+}
+
 export async function holdWrite(rt: Promise<Runtime>, tool: unknown, input: Obj, cwd: () => Promise<string>, agent?: unknown,
   places?: () => Promise<GatePlaces | null>): Promise<string | null> {
+  if (!agent && tool === 'EnterPlanMode' && planMode !== 'approved') {
+    if (planEnterPrev === undefined) planEnterPrev = planMode
+    planMode = 'plan'
+  }
   if (agent || typeof tool !== 'string' || !WRITE_TOOLS.includes(tool)) return null
+  if (planMode) return null
   try {
     const r = await rt
     if (!r || !canAsk()) return null
@@ -554,8 +622,8 @@ export async function pushLessons(rt: Promise<PushRuntime>, agent: unknown, cwd:
       if (told) (notify ?? queueNotice)(told)
     }
     if (text && sameAsLast(lessonsSlot(r), text)) text = null
-    const remind = takeReminder(r)
-    return [text, await toolbox, remind].filter((t): t is string => !!t)
+    const remind = planMode ? null : takeReminder(r)
+    return [text, await toolbox, remind, takePlanNote()].filter((t): t is string => !!t)
   } catch {
     const tb = await toolbox.catch(() => null)
     return tb ? [tb] : []

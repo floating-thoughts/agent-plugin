@@ -1,9 +1,10 @@
 import type { EngineInterface } from 'claude-code'
 import { readyTogether, STEPS_FILE } from './flow'
-import { ago, fitLines, jobOpen, jobsLive, jobsMarkRead, jobsNotification, jobStepOf, jobText, listJobs, noticesOf, readJobs, statusWord, JOBS_FILE, type Job } from './jobs'
+import { ago, fitLines, jobOpen, jobsLive, jobsMarkRead, jobsNotification, jobStepOf, jobText, listJobs, noticesOf, noticeStatus, readJobs, statusWord, JOBS_FILE, type Job } from './jobs'
+import { reportNotices } from './failure_report'
 import { ownershipNote } from './ownership'
 import { readPlan } from './plan_file'
-import { isFinished } from './quiet'
+import { finishedFromNotification, isFinished } from './quiet'
 import { NOTE_PREFIX } from './review'
 import { relNum, relText } from './reliability'
 import { loadTaskState, projectDir } from './task_state_io'
@@ -284,6 +285,8 @@ export async function jobsClaimScope<T>(e: Obj, run: () => Promise<T>): Promise<
 
 export async function jobsPrompt($: EngineInterface, e: Obj, rt?: Ready): Promise<Obj> {
   try {
+    if (isObj(e)) finishedFromNotification(e.text)
+    if (isObj(e) && !e.agentId) reportFailedNotices(e.text)
     if (!isObj(e) || !(await jobsLive(rt))) return e
     const text = typeof e.text === 'string' ? e.text : ''
     const notices = e.origin?.kind === 'task-notification' || text.includes('<task-notification>') ? noticesOf(text) : []
@@ -316,9 +319,14 @@ export async function jobsNoticeSeen($: EngineInterface, text: unknown, rt?: Rea
   try {
     const notices = noticesOf(text)
     if (!notices.length) return
+    reportFailedNotices(text)
     for (const n of notices) for (const id of [n.id, n.call]) if (id !== null && noticed.size < 500) noticed.add(id)
     await jobsNotification($, text, rt)
   } catch {}
+}
+
+function reportFailedNotices(text: unknown): void {
+  reportNotices(noticesOf(text).filter((n) => noticeStatus(n.status, n.summary) === 'failed'))
 }
 
 async function readSteps($: EngineInterface): Promise<string | null> {
