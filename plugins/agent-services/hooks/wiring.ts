@@ -706,7 +706,13 @@ export class Wiring {
     const held = await get(this.d.store, USAGE_DAYS_KEY)
     const days = isObj(held) && isObj(held.days) ? held.days : {}
     const savings = (await this.metricsOnNow()) ? await this.savingsBody(false) : null
-    return panelOf(days, heldPlan(), savings, this.today(), this.now())
+    // the week's counts for the Stats column: the last 7 local days of the store counters, summed
+    const week: Record<string, number> = {}
+    const now = this.now()
+    for (let i = 0; i < 7; i++) {
+      for (const [k, v] of Object.entries(countsOf(await readDay(this.d.store, localDay(now - i * 86_400_000))))) week[k] = (week[k] ?? 0) + v
+    }
+    return panelOf(days, heldPlan(), savings, this.today(), now, week)
   }
 
   async panelLines(): Promise<string[]> {

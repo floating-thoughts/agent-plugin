@@ -21,6 +21,7 @@ import { checkpointCall, checkpointPersonPrompt, checkpointTurnEnd, recheckCheck
 import { notePersonPrompt, servedBrief, takeRouteHint } from './flow_state'
 import { takeNotice } from './methods'
 import { methodsLevel } from './methods_level'
+import { setBandPending } from './band'
 import { SEP } from './status'
 import { engineStore } from './store'
 import { authorCheck, ownerCheck, signedIn } from './subagents'
@@ -176,7 +177,7 @@ let queued: string[] = []
 /** register.ts setStatus: the status line text with the open-decision count added. */
 export function withPending(text: string): string {
   lastStatus = text
-  return pendingSuffix(text, openDecisions)
+  return text // the open-decision count shows at the top of the band (band.ts setBandPending), not in the status line
 }
 
 async function readProject($: EngineInterface, name: string): Promise<string | null> {
@@ -191,11 +192,9 @@ async function readProject($: EngineInterface, name: string): Promise<string | n
 
 async function refreshPending($: EngineInterface): Promise<void> {
   const n = pendingCount(await readProject($, PENDING_FILE))
+  setBandPending(n)
   if (n === openDecisions) return
   openDecisions = n
-  try {
-    $.ui.status(pendingSuffix(lastStatus, n))
-  } catch {}
 }
 
 async function notesOn($: EngineInterface): Promise<boolean> {
