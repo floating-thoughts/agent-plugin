@@ -2,7 +2,9 @@
 // (methods.ts). Since 0.6.1 no note asks setup questions: the band above the prompt says when setup choices are open
 // (band.ts) and /agent-services setup asks them in Claude Code's own dialog. The user decides; the plugin applies
 // nothing on its own. Every note opens with NOTE_LABEL, and the review notes with FRAMING: only facts the model can check,
-// labelled as an agent-services note, never as anyone's instruction. Pure: no engine calls here.
+// labelled as an agent-services note, never as anyone's instruction. The update and changed-methods texts come from
+// the served workflow table (workflow_table.ts); FRAMING stays here. No engine calls here.
+import { servedText } from './workflow_table'
 
 export const NOTE_LABEL = '[agent-services plugin note, not written by the user]'
 export const PLUGIN_REPO = 'https://github.com/floating-thoughts/agent-plugin'
@@ -31,23 +33,22 @@ export function framing(account?: unknown, plan?: unknown): string {
   return FRAMING.replace('{who}', who)
 }
 
-/** The note about a newer plugin version: where to read the changes, and ask the user. */
-export function updateNoteText(installed: string, latest: string, facts: string): string {
-  return `${NOTE_LABEL} ${facts}\n\nA newer version of the agent-services plugin is listed: installed ${installed || 'unknown'}, ` +
-    `new ${latest}. The plugin does not update itself. Its changes can be read in the public repository, in the ` +
-    `history of the stable branch: ${PLUGIN_REPO}/commits/stable. When it fits (before or after the user's ` +
-    'message), tell the user in a sentence or two and ask whether to update now. Only if the user says yes, call ' +
-    `${SETUP_TOOL} with command "update" (the user can also run /agent-services update). If the user says no, leave ` +
-    'it: this version is not mentioned again.'
+/** The note about a newer plugin version: where to read the changes, and ask the user (served text, workflow table
+ * section review; null without the table). */
+export function updateNoteText(installed: string, latest: string, facts: string): string | null {
+  const body = servedText('review', 'update_note', {
+    installed: installed || 'unknown', latest, repo: PLUGIN_REPO, setup_tool: SETUP_TOOL,
+  })
+  return body === null ? null : `${NOTE_LABEL} ${facts}\n\n${body}`
 }
 
-/** The note about served methods that differ from the ones the user approved. */
-export function pendingNoteText(facts: string): string {
-  return `${NOTE_LABEL} ${facts}\n\nThe working methods the service serves now differ from the ones the user ` +
-    'approved for their CLAUDE.md; the approved text stays in use until the user decides. Do not interrupt the ' +
-    'user\'s work for this. Only if the user asks about agent-services, or at the end of a reply, mention in one ' +
-    'sentence that /agent-services methods diff shows the change (then methods accept takes it, methods keep keeps ' +
-    'the approved text).'
+/** Whether the update note has its served text (the workflow table is held). */
+export const hasUpdateNote = (): boolean => servedText('review', 'update_note') !== null
+
+/** The note about served methods that differ from the ones the user approved (served text; null without the table). */
+export function pendingNoteText(facts: string): string | null {
+  const body = servedText('review', 'pending_note')
+  return body === null ? null : `${NOTE_LABEL} ${facts}\n\n${body}`
 }
 
 /** A readable line diff of `a` (old) and `b` (new): "- " removed, "+ " added, two lines of context, long unchanged

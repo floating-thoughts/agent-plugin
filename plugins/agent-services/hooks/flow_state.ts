@@ -8,7 +8,11 @@
 // - The routing hint (0.6.2): the hint of the first pass answer that carried one (the service sends it when a
 //   description has no task type word), held for the next prompt's note (flow.ts) and taken once per session.
 
-export const REVIEW_RX = /\b(code[- ]?)?review(s|ed|ing)?\b|\baudit(s|ed|ing)?\b|\u5ba1\u67e5|\u8bc4\u5ba1|\u5ba1\u6838|\u30ec\u30d3\u30e5\u30fc|\ub9ac\ubdf0/i // also review words in Chinese, Japanese, Korean
+import { RX_INPUT_MAX, servedRegex } from './rules'
+
+// The review words: the served pattern (rules patterns.json, review) covers every language the service knows; the
+// built-in one, used only without the tables, keeps the English words.
+export const REVIEW_RX = /\b(code[- ]?)?review(s|ed|ing)?\b|\baudit(s|ed|ing)?\b/i
 
 let askedReview = false
 let briefRule: string | null = null
@@ -18,7 +22,7 @@ let routeHintTaken = false
 
 /** A message the person wrote (not a plugin's or a notification): sets the review flag for this turn. */
 export function notePersonPrompt(text: unknown): void {
-  askedReview = typeof text === 'string' && REVIEW_RX.test(text)
+  askedReview = typeof text === 'string' && servedRegex('patterns', 'review', REVIEW_RX).test(text.slice(0, RX_INPUT_MAX))
 }
 
 export const userAskedReview = (): boolean => askedReview

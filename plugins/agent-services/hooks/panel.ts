@@ -8,8 +8,9 @@
 //                               active; Concurrent: the agents' summed run time less that
 //                               clock time. The service's figures when it has them, else this computer's.
 //
-// Unknown figures show "--". METHOD_LINE is the disclosure shown wherever the time figures appear; the service
-// sends the same sentence with its figures.
+// Unknown figures show "--". methodLine() is the disclosure shown wherever the time figures appear (METHOD_LINE is
+// its built-in form); the service sends the same sentence with its figures. The idle gap, the typing speed and the
+// sentence come from the served time model (rules timemodel.json) when the tables are held.
 //
 //   usageDaysOf(facts, fromDay)                       -> { day: UsageDay } (days >= fromDay)
 //   refreshUsage(kv, scan, nowMs)                     -> the stored days, refreshed when due (never throws)
@@ -20,16 +21,37 @@
 import type { KV } from './engine_types'
 import { localDay } from './pyfmt'
 import { safeGet, safeSet } from './store'
+import { servedNumber, servedValue } from './rules'
+import { IDLE_GAP_MS, idleGapMs } from './transcripts'
 import type { Facts } from './transcripts'
 
-export const METHOD_LINE =
-  'Saved for you is clock time when at least one agent was working (gaps over 10 minutes count as idle; time ' +
-  "with several agents running counts once). It is the agents' own run time, not an estimate of how long a person " +
-  'would take. Spent by you is your own time at the keyboard, estimated as typed bytes / 200 bytes per minute. ' +
-  "Concurrency save = the agents' combined run time minus clock time, i.e. what running them side by side saved " +
-  'compared with one at a time.'
 export const USAGE_DAYS_KEY = 'usage_days' // { through, at, lock?, days: { day: UsageDay } }: this computer's figures
-export const TYPING_BYTES_PER_MINUTE = 200
+export const TYPING_BYTES_PER_MINUTE = 200 // built-in; the served time model (timemodel.json) sets it
+export const METHOD_LINE = methodText(methodTemplate(), IDLE_GAP_MS / 60_000, TYPING_BYTES_PER_MINUTE)
+
+/** The disclosure's built-in wording; {idle_gap_minutes} and {typing_bytes_per_minute} take the values in use. */
+function methodTemplate(): string {
+  return 'Saved for you is clock time when at least one agent was working (gaps over {idle_gap_minutes} minutes ' +
+    "count as idle; time with several agents running counts once). It is the agents' own run time, not an estimate " +
+    'of how long a person would take. Spent by you is your own time at the keyboard, estimated as typed bytes / ' +
+    "{typing_bytes_per_minute} bytes per minute. Concurrency save = the agents' combined run time minus clock time, " +
+    'i.e. what running them side by side saved compared with one at a time.'
+}
+
+function methodText(template: string, gapMinutes: number, bytesPerMinute: number): string {
+  return template.split('{idle_gap_minutes}').join(String(gapMinutes)).split('{typing_bytes_per_minute}').join(String(bytesPerMinute))
+}
+
+/** Typed bytes per minute: the served typing_bytes_per_minute, else TYPING_BYTES_PER_MINUTE. */
+export function typingBytesPerMinute(): number {
+  return servedNumber('timemodel', 'typing_bytes_per_minute', TYPING_BYTES_PER_MINUTE, 10, 10_000)
+}
+
+/** The disclosure with the values in use: the served method sentence when there is one, else the built-in one. */
+export function methodLine(): string {
+  const t = servedValue('timemodel', 'method')
+  return methodText(typeof t === 'string' && t ? t : methodTemplate(), idleGapMs() / 60_000, typingBytesPerMinute())
+}
 
 type Obj = Record<string, any>
 export type UsageDay = {
@@ -251,7 +273,7 @@ export function panelOf(days: unknown, p: Plan | null, savings: unknown, today: 
   const t = s && isObj(s.time) && num(s.time.agent_seconds) !== null ? s.time : null
   const sum = (k: keyof UsageDay) => Object.values(all).reduce((n, d) => n + (num(d[k]) ?? 0), 0)
   const you = t ? t.agent_seconds : sum('agent_seconds')
-  const typing = t ? (num(t.typing_seconds) ?? 0) : (sum('typed_bytes') * 60) / TYPING_BYTES_PER_MINUTE
+  const typing = t ? (num(t.typing_seconds) ?? 0) : (sum('typed_bytes') * 60) / typingBytesPerMinute()
   const concurrent = t ? (num(t.concurrent_seconds) ?? 0) : Math.max(0, sum('agent_sum_seconds') - you)
   const time: Column = {
     title: 'Time',
@@ -272,7 +294,7 @@ export function panelOf(days: unknown, p: Plan | null, savings: unknown, today: 
       ['Index reads', count('index')],
     ],
   }
-  return { columns: [token, quota, time, stats], method: METHOD_LINE }
+  return { columns: [token, quota, time, stats], method: methodLine() }
 }
 
 const rowText = (r: string[]): string => r.filter((x) => x !== '').join(' ')

@@ -101,6 +101,75 @@ export function rulesTable<T = unknown>(name: string): T | null {
   return t === undefined ? null : (t as T)
 }
 
+// Served parameters for features that also work without the tables (time figures, review words, commit and
+// line-range patterns, trim timing, board wording): the caller passes its built-in value, used whenever the table
+// or the key is missing or not usable.
+
+/** Key `key` of table `name` as served (any JSON value), or undefined. */
+export function servedValue(name: string, key: string): unknown {
+  const t = held?.tables[name]
+  return t && typeof t === 'object' && !Array.isArray(t) ? (t as Record<string, unknown>)[key] : undefined
+}
+
+/** A served number above 0 and within [min, max] (the caller's sane bounds), else `fallback`. */
+export function servedNumber(name: string, key: string, fallback: number, min = Number.MIN_VALUE,
+  max = Number.MAX_SAFE_INTEGER): number {
+  const v = servedValue(name, key)
+  return typeof v === 'number' && Number.isFinite(v) && v > 0 && v >= min && v <= max ? v : fallback
+}
+
+// Served patterns run synchronously on every prompt and every shell command: a pattern longer than RX_SOURCE_MAX or
+// one that may backtrack without end (riskyPattern) is not used (the built-in one is), and callers test at most the
+// first RX_INPUT_MAX characters of their input.
+export const RX_SOURCE_MAX = 512
+export const RX_INPUT_MAX = 8192
+
+const repeatAt = (src: string, i: number): boolean =>
+  src[i] === '+' || src[i] === '*' || (src[i] === '{' && /^\{\d+(,\d*)?\}/.test(src.slice(i)))
+
+/** A conservative screen: too long, or a group holding a quantifier or an alternation that is itself repeated by
+ * +, * or {n,m} (the (a+)+, (a*)*, (a|a)+ shapes). Some safe patterns are refused too; they fall back. */
+export function riskyPattern(src: string): boolean {
+  if (src.length > RX_SOURCE_MAX) return true
+  const open: boolean[] = [] // per open group: it holds a quantifier or an alternation
+  let inClass = false
+  for (let i = 0; i < src.length; i++) {
+    const c = src[i]
+    if (c === '\\') { i++; continue }
+    if (inClass) { if (c === ']') inClass = false; continue }
+    if (c === '[') { inClass = true; continue }
+    if (c === '(') { open.push(false); continue }
+    if (c === ')') {
+      const inner = open.pop() ?? false
+      if (inner && repeatAt(src, i + 1)) return true
+      if (inner && open.length) open[open.length - 1] = true
+      continue
+    }
+    if (open.length && (c === '|' || repeatAt(src, i))) open[open.length - 1] = true
+  }
+  return false
+}
+
+let rxCache = new Map<string, RegExp | null>() // "flags/source" -> compiled (null: does not compile, or risky)
+
+/** A served pattern {pattern, flags} compiled once (flags limited to i, m, s, u), else `fallback` (also for a risky
+ * pattern, riskyPattern). Test at most RX_INPUT_MAX characters with it. */
+export function servedRegex(name: string, key: string, fallback: RegExp): RegExp {
+  const v = servedValue(name, key) as Record<string, unknown> | undefined
+  if (!v || typeof v !== 'object' || typeof v.pattern !== 'string' || riskyPattern(v.pattern)) return fallback
+  const flags = typeof v.flags === 'string' ? [...new Set(v.flags.replace(/[^imsu]/g, ''))].join('') : ''
+  const id = `${flags}/${v.pattern}`
+  if (!rxCache.has(id)) {
+    if (rxCache.size > 64) rxCache = new Map()
+    let rx: RegExp | null = null
+    try {
+      rx = new RegExp(v.pattern, flags)
+    } catch {}
+    rxCache.set(id, rx)
+  }
+  return rxCache.get(id) ?? fallback
+}
+
 /** The served version of the tables, or null. */
 export function rulesVersion(): string | null {
   return held?.version ?? null

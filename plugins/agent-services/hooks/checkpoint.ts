@@ -4,7 +4,8 @@
 // - The tool is registered only when no other plugin in the session offers a tool named "checkpoint"; with another
 //   one, this plugin's notes name that one (flow_state.ts checkpointToolName) and its own tool, if registered before
 //   the other appeared, points to it.
-// - Main conversation only. A short conversation (under CHECKPOINT_MIN_TOKENS) is not compacted.
+// - Main conversation only. A short conversation (under the served minimum size) is not compacted. The minimum and
+//   the answer texts come from the served workflow table (section checkpoint); without it nothing is marked.
 // - A turn that did not end normally (interrupted, refused, an error) is neither compacted nor resumed; a message
 //   the person sends after the turn ended means the person leads, so nothing is sent on the model's behalf.
 // - The compaction instructions start with the core's CHECKPOINT_MARK, so the core counts it as a checkpoint.
@@ -13,9 +14,10 @@
 import type { EngineInterface } from 'claude-code'
 import { CHECKPOINT_MARK } from './core'
 import { checkpointToolName, setCheckpointTool } from './flow_state'
+import { servedInt, servedText } from './workflow_table'
 
 export const CHECKPOINT_TOOL = 'mcp__agent-services__checkpoint'
-export const CHECKPOINT_MIN_TOKENS = 20_000
+// The tool description stays local: the tool is registered at session start, before the served tables arrive.
 export const CHECKPOINT_DESCRIPTION =
   'Mark a checkpoint (agent-services): once your current reply ends, the conversation is compacted into a summary ' +
   'that keeps what you list, and your next step, if you give one, comes back to you as a message so the work goes ' +
@@ -86,19 +88,26 @@ export async function checkpointCall($: EngineInterface, e: Obj): Promise<{ resu
     const t = (await $.session.usage()).context.tokens
     tokens = typeof t === 'number' ? t : null
   } catch {}
-  if (tokens !== null && tokens < CHECKPOINT_MIN_TOKENS) {
-    return { result: `The conversation is short (${tokens} tokens): no compaction is needed. Carry on.` }
+  const short = tokens === null ? null : checkpointShort(tokens)
+  if (short) return { result: short }
+  const milestone = str(e.milestone, 200) || 'milestone'
+  const next = str(e.next, 2000)
+  const how = servedText('checkpoint', marked !== null ? 'how_again' : 'how_first')
+  const after = servedText('checkpoint', next ? 'after_next' : 'after_none')
+  const answer = how && after ? servedText('checkpoint', 'recorded', { milestone, how, after }) : null
+  if (!answer || servedInt('checkpoint', 'min_tokens', 0) === null) {
+    return { result: 'The checkpoint is not available yet (the agent-services rule tables have not arrived): nothing was marked. Carry on.' }
   }
-  const again = marked !== null
-  marked = { milestone: str(e.milestone, 200) || 'milestone', keep: str(e.keep, 4000), next: str(e.next, 2000) }
+  marked = { milestone, keep: str(e.keep, 4000), next }
   personSpoke = false
-  const after = marked.next
-    ? 'then your next step comes back to you as a message and you carry on from the summary'
-    : 'nothing is sent afterwards, so the session waits for the user'
-  return {
-    result: `Checkpoint "${marked.milestone}" ${again ? 'replaces the one marked earlier' : 'recorded'}. The conversation ` +
-      `is compacted once this reply ends, keeping what you listed; ${after}. Finish your reply now.`,
-  }
+  return { result: answer }
+}
+
+/** The answer for a conversation under the served minimum size (it is not compacted), or null: big enough, or no
+ * table. */
+export function checkpointShort(tokens: number): string | null {
+  const min = servedInt('checkpoint', 'min_tokens', 0)
+  return min !== null && tokens < min ? servedText('checkpoint', 'short', { tokens }) : null
 }
 
 /** prompt.submit of the main conversation from a person: after a checkpointed turn, the person leads. */

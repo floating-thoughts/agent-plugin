@@ -26,6 +26,7 @@ import type { Clock, GateState, KV, Random, ReadText, SvcResult, Transport } fro
 import { indexed, isAbsPath, joinPath, normpath, normPath } from './paths'
 import { ORG_PAUSED_LINE } from './org'
 import { checkpointToolName, noteRouteHint, userAskedReview } from './flow_state'
+import { RX_INPUT_MAX, servedRegex } from './rules'
 
 export { indexed, normpath, normPath } from './paths'
 
@@ -62,10 +63,29 @@ export const GATE_NOTICES: Readonly<Record<string, string>> = {
 export const PLAN_NOTICE = "agent-services: this account's plan does not include every service; the others run on their open " +
   'defaults. Plan changes happen on the account, with no reinstall.'
 
-export const COMMIT_RX = new RegExp(
-  `(?:^|[\\s;&|(])git(?:\\s+-[cC]\\s+(?:[^\\s"']|"[^"]*"|'[^']*')+|\\s+--?[A-Za-z][\\w-]*` +
-  `(?:=(?:[^\\s"']|"[^"]*"|'[^']*')+)?)*\\s+commit(?![\\w-])`)
+// `git [options] commit`: an option is -c/-C with a value or -x/--name[=value]; a value holds at most one quoted
+// part. Up to five options, written out with no repeated group, so the served copy passes riskyPattern (rules.ts).
+const GIT_VAL = `[^\\s"']*(?:(?:"[^"]*"|'[^']*')[^\\s"']*)?`
+const GIT_OPT = `(?:\\s+--?[A-Za-z][\\w-]*(?:(?:=|(?<=\\s-[cC])\\s+)${GIT_VAL})?)?`
+export const COMMIT_RX = new RegExp(`(?:^|[\\s;&|(])git${GIT_OPT.repeat(5)}\\s+commit(?![\\w-])`)
 const SED_RX = /\bsed\s+-n\s+['"]?\d+,\d+p['"]?\s+("[^"]+"|'[^']+'|[^\s|;&>]+)/
+// COMMIT_RX and SED_RX are the built-in patterns; the served ones (rules patterns.json: commit, sed_range) win.
+
+/** A shell command that makes a git commit (counted for the checkpoint advice). */
+export function isCommit(cmd: string): boolean {
+  return servedRegex('patterns', 'commit', COMMIT_RX).test(cmd.slice(0, RX_INPUT_MAX))
+}
+
+/** The file a `sed -n 'A,Bp' file` command reads in part (an index read), or null. */
+export function sedRangePath(cmd: string): string | null {
+  const m = servedRegex('patterns', 'sed_range', SED_RX).exec(cmd.slice(0, RX_INPUT_MAX))
+  return m && typeof m[1] === 'string' ? m[1].replace(/^["']|["']$/g, '') : null
+}
+
+/** Tests: the built-in sources, compared with the served table. */
+export function builtinPatternSources(): { commit: string; sed_range: string } {
+  return { commit: COMMIT_RX.source, sed_range: SED_RX.source }
+}
 
 const DEFS = (CONTRACT as unknown as { definitions: Record<string, { enum: string[] }> }).definitions
 export const SERVED_ROLES: readonly string[] = DEFS.ServedRole!.enum
@@ -688,7 +708,7 @@ export class Core {
       const tool = e.tool
       const inp = e.input as Ev
       const cmd = inp.command
-      if ((tool === 'Bash' || tool === 'PowerShell') && typeof cmd === 'string' && COMMIT_RX.test(cmd)) s.commits += 1
+      if ((tool === 'Bash' || tool === 'PowerShell') && typeof cmd === 'string' && isCommit(cmd)) s.commits += 1
       const todos = inp.todos
       if (tool === 'TodoWrite' && Array.isArray(todos)) {
         const n = todos.filter((t) => isObj(t) && t.status === 'completed').length
@@ -711,8 +731,7 @@ export class Core {
     if (tool === 'Read' && typeof inp.file_path === 'string' && (!nil(inp.offset) || !nil(inp.limit))) {
       path = inp.file_path
     } else if (tool === 'Bash' && typeof inp.command === 'string') {
-      const m = SED_RX.exec(inp.command)
-      if (m) path = m[1]!.replace(/^["']|["']$/g, '')
+      path = sedRangePath(inp.command)
     }
     if (!path) return
     let file = normPath(path)

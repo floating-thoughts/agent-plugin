@@ -16,7 +16,8 @@ disk every few seconds, so a request made in the last seconds before Claude Code
   Code works as usual. Only a sign-in hint shows in the status line and above the prompt.
 - Signed in, it sends small, fixed-format requests. The service does not keep your work: what it receives is used to
   answer and then discarded. It does keep counts, ids, the daily usage summaries (only once you turn them on), your
-  account, and IP addresses (in its request log, and for about 15 minutes in its anti-abuse records). The details
+  account, and IP addresses (in its request log only as keyed hashes, and in clear for about 15 minutes in its
+  anti-abuse records). The details
   are below.
 - How the service processes what it receives and how its advice is made is a business secret and is not published.
   Its answers come back in a fixed format, listed below. You and the model see each answer where it is used, and
@@ -86,6 +87,10 @@ sends only the update channel (stable or beta); no command, prompt, tool input o
 ever sent for these engines. The tables are kept in memory for that session only (never written to a file, the store or
 a log), and stay until the session ends even if the service becomes unreachable. Without them (signed out, offline,
 locked) every one of these engines is off; the band, the status line and one line at session start say so.
+The same tables also carry the parameters and wording of some features that work without them: the idle gap and
+typing speed of the time figures and their explanation, the review words the routing request's yes or no comes from,
+the patterns that count a git commit or a file read in parts with `sed -n`, and the board's phrases and saved-day
+threshold. Without the tables these use the plugin's built-in values (the review words then cover English only).
 
 What the engines do on this computer, with the tables:
 
@@ -130,7 +135,7 @@ What the engines do on this computer, with the tables:
 
 | What | Kept | For how long |
 |---|---|---|
-| Request log: time, route, status, error code (for a failed sign-in, the reason), account id, device id, a token hash prefix, IP addresses (the connecting address and your address as the network edge reports it), the rate limit hit (IP addresses taken out), whether the request was sealed, latency | yes | no time limit: the log is capped only by size (about 20 MiB, plus one older copy), so how long a line stays depends on traffic |
+| Request log: time, route, status, error code (for a failed sign-in, the reason), account id, device id, a token hash prefix, keyed hashes of IP addresses (of the connecting address and of your address as the network edge reports it; the same address gives the same hash on this server, so abuse can be traced from line to line, but the log alone does not give the address back), the rate limit hit (IP addresses taken out), whether the request was sealed, latency | yes | no time limit: the log is capped only by size (about 20 MiB, plus one older copy), so how long a line stays depends on traffic |
 | Mail log: time, kind of mail, the recipient's address masked, whether it was sent | yes | no time limit: capped by size (about 5 MiB, plus one older copy) |
 | Your account: email, company, plan, status, role | yes | while the account exists (deleting an account only marks it deleted) |
 | Each sign-in: device id, device public key, Claude account hash, harness, a token check value, plugin version, times | yes | while the account exists (ended sign-ins are kept) |
@@ -202,16 +207,17 @@ text of your messages (only to see whether one asks for a review), and the marke
 - The checkpoint tool (`checkpoint`: milestone, keep, next), registered only when no other plugin in the session has a
   tool named `checkpoint`. After the reply in which the model called it, the plugin compacts the conversation keeping
   what the model listed, then sends the model's next step back as a message from this plugin (not after an
-  interrupted turn, and not once you wrote a message yourself). A short conversation is not compacted.
+  interrupted turn, and not once you wrote a message yourself). A short conversation is not compacted. The minimum
+  size and the tool's answers come from the served rule tables; until they arrive, nothing is marked.
 - The test lock: a subagent's Edit, Write, MultiEdit or NotebookEdit of a file matching a glob in
   `.agent/test-lock.json` (`{"locked": ["tests/**"]}`) is denied; the main conversation may edit those files. Changes
   made through Bash or other tools are not checked.
 - The status line shows how many `- [ ]` lines `.agent/pending.md` has (decisions waiting for you).
 - Notes for the model at the next prompt, labelled as agent-services notes: when a foreground Bash, PowerShell or
-  subagent call of the main conversation ran longer than 60 seconds (at most 3 per session), and when
+  subagent call of the main conversation ran longer than the served time (at most the served number per session), and when
   `.agent/steps.json` lists more steps ready to start than the last turn dispatched subagents. Once per session, the
   hint the routing service sent for a subagent that ran without routing advice (a description without a task type
-  word).
+  word). The times, counts and texts of these notes come from the served rule tables; without them no note is made.
 - The speed-up suggestion the routing service sends is added once to the end of each routed subagent's prompt.
 - The autonomy choice: when you answer the working methods' question with "Fully automatic (agent-services
   recommends this)" or "Check in with me as usual" (Claude Code's AskUserQuestion dialog, in the main conversation,
@@ -269,8 +275,8 @@ Every answer has a fixed shape:
 
 Checkpoint timing has no switch of its own: it stops when you sign out or uninstall, and offline mode stops it;
 those stop subagent routing too. The planning gate follows the methods level: only at `methods on` does it hold file edits
-(Edit, Write, MultiEdit, NotebookEdit) until a project's `agent-state.md` has a plan, and an Edit of at most 10
-changed lines passes (so do writes to `agent-state.md` and to files under `.agent/`); at `suggest` it holds nothing and adds one reminder to the next prompt; at `off`, in a session
+(Edit, Write, MultiEdit, NotebookEdit) until a project's `agent-state.md` has a plan, and an Edit of at most the served number of
+changed lines passes (so do writes to `agent-state.md` and to files under `.agent/`); without the served rule tables it holds nothing; at `suggest` it holds nothing and adds one reminder to the next prompt; at `off`, in a session
 nobody can be asked in (such as `claude -p`) and for subagents it does nothing. It does not cover Bash: a file
 written through a Bash command is never held. Where your company set the daily upload off for everyone, only its
 admin can change it.

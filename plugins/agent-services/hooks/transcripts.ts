@@ -3,6 +3,7 @@
 // daily body and the estimate are built from. Nothing here touches the engine: files and prices are passed in.
 import { utf8 } from './e2e'
 import { cmp, cmpTuple, isObj, localDay, localMonth, parseIso, pyLen, pyRound, pySum } from './pyfmt'
+import { servedNumber } from './rules'
 
 export const FIELDS = ['input', 'output', 'cacheRead', 'cacheWrite5m', 'cacheWrite1h'] as const
 export const DISPATCH_TOOLS = ['Agent', 'Task']
@@ -250,8 +251,14 @@ export type Interval = [number, number] // ms
 
 // ------------------------------------------------------------------ time: typed bytes and agent time
 
-// Two events of one transcript at most this far apart belong to one active interval; a longer gap is idle.
+// Two events of one transcript at most this far apart belong to one active interval; a longer gap is idle. The
+// served time model (rules timemodel.json, idle_gap_minutes) sets it; this is the built-in value without the tables.
 export const IDLE_GAP_MS = 10 * 60 * 1000
+
+/** The idle gap in ms: the served idle_gap_minutes, else IDLE_GAP_MS. */
+export function idleGapMs(): number {
+  return servedNumber('timemodel', 'idle_gap_minutes', IDLE_GAP_MS / 60_000, 1, 240) * 60_000
+}
 
 /** A user row's text: the string content, or its text blocks joined; null for a tool result. */
 function contentText(row: Obj): string | null {
@@ -313,13 +320,14 @@ function turnEvent(row: Obj): boolean {
   return row.isSidechain !== true && row.type !== 'queue-operation' && !(row.type === 'system' && row.subtype === 'away_summary')
 }
 
-/** One transcript's event times (ms) as active intervals: consecutive events at most IDLE_GAP_MS apart. */
+/** One transcript's event times (ms) as active intervals: consecutive events at most idleGapMs() apart. */
 export function intervalsOf(times: number[]): Interval[] {
+  const gap = idleGapMs()
   const at = [...times].sort((a, b) => a - b)
   const out: Interval[] = []
   for (const v of at) {
     const last = out[out.length - 1]
-    if (last && v - last[1] <= IDLE_GAP_MS) last[1] = v
+    if (last && v - last[1] <= gap) last[1] = v
     else out.push([v, v])
   }
   return out.filter(([s, e]) => e > s)
@@ -519,7 +527,7 @@ export class Scanner {
     }
   }
 
-  /** A subagent transcript's active intervals: all its timestamps (IDLE_GAP_MS rule). */
+  /** A subagent transcript's active intervals: all its timestamps (idleGapMs rule). */
   private subIntervals(text: string): void {
     const at: number[] = []
     for (const m of text.matchAll(/"timestamp":\s*"([^"]+)"/g)) {
