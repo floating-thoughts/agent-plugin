@@ -22,6 +22,7 @@
 //   model ids normalized as the Python client's read_events does), so it equals the Python client's build_daily.
 // - Nothing is uploaded unless the savings record is on (choice.ts uploadOn), and never a day before its floor
 //   (choice.ts uploadFloor).
+import type { EngineInterface } from 'claude-code'
 import type { CoreOptions } from './core'
 import type { GateState, KV, SvcResult, Transport } from './engine_types'
 import type { Outbox } from './outbox'
@@ -29,8 +30,8 @@ import type { Hook, Kind, Svc } from './svc'
 import type { Facts, MetricsState, Prices, TranscriptFile } from './metrics'
 import type { DayCounters } from './counters'
 import { localDay, readDay } from './counters'
-import { hex, sha256Hex, utf8 } from './e2e'
-import { BodyTooLarge, DAILY_ROUTE, dailyBody, isDay, isLong, normModel, plusDays, READ_LIMIT, scan, uploadDays, walkOrder } from './metrics'
+import { b64Encode, hex, sha256Hex, utf8 } from './e2e'
+import { BodyTooLarge, DAILY_ROUTE, dailyBody, isDay, isLong, normModel, plusDays, READ_LIMIT, uploadDays, walkOrder } from './metrics'
 import { SALT_KEY } from './records'
 import { collect, pageChanged, publishedUrlOk, render as renderPage, renderDue } from './render'
 import { savingsDue, statusText, updateCommand, updateHintDue } from './status'
@@ -38,9 +39,9 @@ import { counterDays, countsOf, dayCountsFromStore, dayEmpty, normalizeDay } fro
 import { boardData, minUsd, readOutboxDay, timelineOf, weeklyOf } from './board_facts'
 import { bandFacts, paused, setBandPanel, type BandFacts, type BandKind, type BandState } from './band'
 import { readOrg } from './org'
-import { accountOf, accountSwitched, readEntry, recordConsent, uploadFloor, uploadOn, writeEntry } from './choice'
+import { accountOf, accountSwitched, readEntry, recordConsent, recordState, uploadFloor, uploadOn, writeEntry } from './choice'
 import { boardLines, heldPlan, panelLines, panelOf, refreshUsage, USAGE_DAYS_KEY, type Panel } from './panel'
-import { Scanner } from './transcripts'
+import { linesOf, Scanner, unpricedNote } from './transcripts'
 import { refreshToolDays, type ProcessRun } from './usage_tool'
 export { notePlan } from './panel' // register.ts imports it through this module
 import { BossBoard } from './boss'
@@ -73,6 +74,8 @@ export type WiringFs = {
   read(path: string): Promise<string> // rejects when missing or unreadable ($.fs.read refuses files over 4 MiB)
   write(path: string, text: string): Promise<void>
   list?(path: string): Promise<readonly { name: string; size?: number; dir?: boolean; mtime?: number }[]> // mtime: ms
+  // a file too large for read(), its text in pieces (engineChunks in register.ts); rejects or throws when it fails
+  chunks?(path: string): AsyncIterable<string>
 }
 
 export type WiringDeps = {
@@ -130,16 +133,18 @@ const result = (r: { ok: boolean; status: number | null; body: unknown; error: s
 /**
  * The transcript files under the projects root (every *.jsonl at any depth, as the diagnostic tool's globs),
  * in os.walk order. A file over READ_LIMIT, or one the file access refuses, is listed with text null (metrics.ts
- * leaves it out of the facts; estimate.ts scales it by size).
+ * leaves it out of the facts and lists it in facts.unread; estimate.ts scales it by size).
  * `since` (ms): a file last changed before it is left out, as it holds no entry of a later moment (a listing without
  * mtime keeps every file). `maxBytes`: reading more text than this throws, so a caller under a hook's time budget
  * stops before parsing gigabytes (the parse is the hook's own time; the reads are not).
+ * `stream` (with onFile): a file over READ_LIMIT is given as `lines` read from fs.chunks (Scanner.addLines), one
+ * line held at a time; under maxBytes a file that would pass the bound stays unread instead of throwing.
  */
 export async function loadTranscripts(
   fs: WiringFs,
   root: string | null | undefined,
   maxDepth = 6,
-  bound: { since?: number; maxBytes?: number; onFile?: (f: TranscriptFile) => void } = {},
+  bound: { since?: number; maxBytes?: number; stream?: boolean; onFile?: (f: TranscriptFile) => void | Promise<void> } = {},
 ): Promise<TranscriptFile[]> {
   const out: TranscriptFile[] = []
   if (!root || typeof fs.list !== 'function') return out
@@ -185,6 +190,13 @@ export async function loadTranscripts(
   if (bound.onFile) {
     // one file at a time, in walkOrder: no text is kept after the callback
     for (const f of walkOrder(later)) {
+      if (bound.stream && f.size !== null && f.size > READ_LIMIT && typeof fs.chunks === 'function') {
+        const fits = bound.maxBytes === undefined || readBytes + f.size <= bound.maxBytes
+        if (fits) readBytes += f.size
+        const chunks = fs.chunks.bind(fs)
+        await bound.onFile(fits ? { rel: f.rel, size: f.size, text: null, lines: linesOf(chunks(f.path)) } : { rel: f.rel, size: f.size, text: null })
+        continue
+      }
       let text: string | null = null
       if (f.size === null || f.size <= READ_LIMIT) {
         try {
@@ -196,10 +208,62 @@ export async function loadTranscripts(
       const got = text === null ? (f.size ?? 0) : utf8(text).length
       if (text !== null) readBytes += got
       if (bound.maxBytes !== undefined && readBytes > bound.maxBytes) throw new Error('transcripts over the read bound')
-      bound.onFile({ rel: f.rel, size: f.size ?? got, text: text !== null && got > READ_LIMIT ? null : text })
+      await bound.onFile({ rel: f.rel, size: f.size ?? got, text: text !== null && got > READ_LIMIT ? null : text })
     }
   }
   return walkOrder(out)
+}
+
+/** The sentence a view adds when its figures are incomplete: transcripts it could not read (their sessions, tokens
+ * and subagent runs are left out) and models with no known price (their dollars count as 0); null when complete. */
+export function incompleteNote(facts: Pick<Facts, 'unread' | 'unpriced'>): string | null {
+  const n = (facts.unread ?? []).length
+  const parts = [
+    n ? `${n} transcript file${n === 1 ? '' : 's'} could not be read, so ${n === 1 ? 'its' : 'their'} usage is left out.` : null,
+    unpricedNote(facts.unpriced),
+  ].filter((x): x is string => !!x)
+  return parts.length ? parts.join(' ') : null
+}
+
+/** How long the copy command may send nothing before it is stopped and the file counts as unread. */
+export const COPY_IDLE_MS = 60000
+
+/** The argv that copies one file's bytes to standard output (engineChunks): `cat` on macOS and Linux; on Windows
+ * PowerShell opens the file named by the AGENT_SVC_COPY variable read-only, sharing writes (the session may still be
+ * writing it), and copies it. Fixed text, no shell: the path never becomes part of a command. */
+export function copyArgv(path: string): string[] {
+  if (!/^(?:[A-Za-z]:[\\/]|[\\/]{2})/.test(path)) return ['cat', path]
+  const script =
+    "$f=[IO.File]::Open($env:AGENT_SVC_COPY,'Open','Read','ReadWrite');$o=[Console]::OpenStandardOutput();$f.CopyTo($o);$o.Flush();$f.Close()"
+  const b = new Uint8Array(script.length * 2)
+  for (let i = 0; i < script.length; i++) b[i * 2] = script.charCodeAt(i) // UTF-16LE of an ASCII text
+  return ['powershell.exe', '-NoProfile', '-NonInteractive', '-EncodedCommand', b64Encode(b)]
+}
+
+/**
+ * The text of a transcript too large for $.fs.read, in pieces as the engine streams them ($.process.spawn of
+ * copyArgv): register.ts passes it as the file access's `chunks`. Throws when the command cannot start or ends with
+ * another code than 0, or sends nothing for COPY_IDLE_MS (it is then stopped), so the file counts as unread. Only
+ * this process reads the text; nothing is sent.
+ */
+export async function* engineChunks($: EngineInterface, path: string, idleMs = COPY_IDLE_MS): AsyncGenerator<string> {
+  // cwd: the plugin's own folder, never the session's project folder (a bare command name is looked up there first on Windows)
+  const child = $.process.spawn({ argv: copyArgv(path), cwd: $.plugin.root, env: { AGENT_SVC_COPY: path } })
+  const pieces = child[Symbol.asyncIterator]()
+  for (;;) {
+    let timer: ReturnType<typeof setTimeout> | undefined
+    const idle = new Promise<null>((res) => { timer = setTimeout(() => res(null), idleMs) })
+    const step = await Promise.race([pieces.next(), idle])
+    clearTimeout(timer)
+    if (!step) {
+      void pieces.return?.()?.catch(() => {}) // leaving the stream ends the command
+      throw new Error('copy stalled')
+    }
+    if (step.done) break
+    if (step.value.stream === 'stdout') yield step.value.text
+  }
+  const end = await child.result
+  if (end.code !== 0) throw new Error('copy failed')
 }
 
 // ------------------------------------------------------------------ the wiring
@@ -213,6 +277,7 @@ export class Wiring {
   private rendering = false
   private fetching = new Set<string>()
   private tickedDay: string | null = null // the local day the daily upload last ran in this session
+  private previewed: string | null = null // previewNote: what the last previewBody left out
 
   /** the company admin's board (boss.ts), rendered after the person's own board. */
   readonly boss: BossBoard
@@ -364,7 +429,10 @@ export class Wiring {
     const st = await this.authState()
     if (st !== 'ok') return statusText({ auth: st === 'locked' || st === 'paused' ? st : 'signed_out', metricsOn: false, saved: null, counts: {} })
     const on = await this.metricsOnNow()
-    return statusText({ auth: 'ok', metricsOn: on, saved: on ? saved : null, counts: await this.todayCounts(), update, gate: this.closedGate() })
+    // sharingAsk false: the person's final "Don't upload" or a company "off", where asking to turn sharing on is moot
+    const rec = await recordState(this.d.store)
+    const sharingAsk = rec.own !== 'off' && rec.org !== 'off'
+    return statusText({ auth: 'ok', metricsOn: on, sharingAsk, saved: on ? saved : null, counts: await this.todayCounts(), update, gate: this.closedGate() })
   }
 
   /** The reason the service gate is closed ('unknown' before the first hello counts as open), or null. */
@@ -450,7 +518,7 @@ export class Wiring {
       const gate = this.closedGate()
       if (gate !== null) {
         const kinds: Record<string, BandKind> = { login: 'signed_out', locked: 'locked', paused: 'paused', offline: 'offline', upgrade: 'upgrade' }
-        return { state: kinds[gate] ?? 'unreachable' }
+        return { state: Object.hasOwn(kinds, gate) ? kinds[gate]! : 'unreachable' }
       }
       const on = await this.metricsOnNow()
       const s = on ? await this.savingsBody(false) : null
@@ -507,6 +575,8 @@ export class Wiring {
     try {
       const got = JSON.parse(String(await this.d.fs.read(path)))
       if (isObj(got)) for (const k of Object.keys(out)) if (k in got) out[k] = got[k]
+      // dashboard.ts markPublishing: another session's first publish is under way; kept so this write does not erase it
+      if (isObj(got) && typeof got.publishing_at === 'number') out.publishing_at = got.publishing_at
     } catch {
       // none yet
     }
@@ -681,11 +751,12 @@ export class Wiring {
    * kept), and the days of the days file (TIME_DAYS_FILE, written by the owner tool that reads every transcript,
    * over-4-MiB ones included; usage_tool.ts runs it when it is on this computer) take the place of the scan's time
    * figures and go to `full_days` for the panel. */
-  async facts(bound: { since?: number; maxBytes?: number } = {}, full = false): Promise<Facts> {
-    if (!full) return scan(await loadTranscripts(this.d.fs, this.d.projectsRoot, 6, bound), this.d.prices ?? {})
+  async facts(bound: { since?: number; maxBytes?: number; stream?: boolean } = {}, full = false): Promise<Facts> {
+    // one file at a time (the facts of scan() over the same files); `stream`: files over READ_LIMIT are read line by line
     const s = new Scanner(this.d.prices ?? {})
-    await loadTranscripts(this.d.fs, this.d.projectsRoot, 6, { ...bound, onFile: (f) => s.add(f) })
+    await loadTranscripts(this.d.fs, this.d.projectsRoot, 6, { ...bound, onFile: async (f) => void (f.lines ? await s.addLines(f, f.lines) : s.add(f)) })
     const facts = s.finish()
+    if (!full) return facts
     // usage_tool.ts: the local scan tool, when it is on this computer and due, writes the days file first
     await refreshToolDays({ fs: this.d.fs, store: this.d.store, dataDir: this.d.dataDir, projectsRoot: this.d.projectsRoot ?? null, prices: this.d.prices, run: this.d.run ?? null, now: this.now() })
     return this.withToolDays(facts)
@@ -791,7 +862,7 @@ export class Wiring {
   }
 
   private async sendTime(): Promise<void> {
-    const facts = await this.facts({}, true)
+    const facts = await this.facts({ stream: true }, true)
     const today = this.today()
     const keep = plusDays(today, -395)
     const upload = await uploadFloor(this.d.store, today) // the daily upload's floor (the choice, an account switch)
@@ -824,7 +895,14 @@ export class Wiring {
   async previewBody(day: string): Promise<Obj> {
     const since = new Date(`${day}T00:00:00`).getTime()
     // the tool's days file as the upload has it (withToolDays), without running the tool inside the hook
-    return this.dailyBody(day, await this.withToolDays(await this.facts({ since, maxBytes: 384 * 1024 * 1024 })))
+    const facts = await this.withToolDays(await this.facts({ since, maxBytes: 384 * 1024 * 1024, stream: true }))
+    this.previewed = incompleteNote(facts)
+    return this.dailyBody(day, facts)
+  }
+
+  /** What the last preview's figures leave out (transcripts that could not be read, models with no price), or null. */
+  previewNote(): string | null {
+    return this.previewed
   }
 
   /** The savings part of one day's body: the store counters, normalized. */
@@ -922,7 +1000,8 @@ export class Wiring {
       // 0.7.9, or a failed call) is recorded once first, and nothing is uploaded today when that fails
       if (entry.consent !== true && !(await this.consent(true))) return { sent: [], error: 'consent_failed' }
       // only the transcripts changed since the first day to send began: the same figures, far less to parse
-      const facts = await this.facts({ since: new Date(`${first}T00:00:00`).getTime() }, true)
+      // files over READ_LIMIT are read line by line (stream), so long sessions count in by_model, by_task and sessions
+      const facts = await this.facts({ since: new Date(`${first}T00:00:00`).getTime(), stream: true }, true)
       const withCounts = new Set<string>()
       for (const d of await counterDays(this.d.store)) if (!dayEmpty(await readDay(this.d.store, d))) withCounts.add(d)
       const active = (day: string): boolean => {

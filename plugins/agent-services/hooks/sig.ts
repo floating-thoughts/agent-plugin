@@ -121,6 +121,14 @@ export function verifyResponse(
   return null
 }
 
+/** The ts field of an answer's signature header (unix seconds), or null. Trust it only after verifyResponse returned
+ * null or 'stale_response': both mean the signature over this request's fresh challenge was good, so the ts is the
+ * server's own time. */
+export function signedTs(headers: unknown): number | null {
+  const m = SIG_FIELDS.exec((headerValue(headers, SIG_HEADER) ?? '').trim())
+  return m ? Number(m[2]) : null
+}
+
 // ------------------------------------------------------------------ device key and request signature
 
 /** A new device key: the 32-byte Ed25519 seed (kept as base64 under device_key, like the Python client). */

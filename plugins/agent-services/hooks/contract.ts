@@ -6,7 +6,7 @@ export type ToolSpec = {
   input_schema: Record<string, unknown>
 }
 
-export const CONTRACT_SHA256 = "bde6aa11728251f64eae8c1c4c05c063b0bc2e13224fac70cf1f87786e07fd17"
+export const CONTRACT_SHA256 = "87789d15b92e9a9f091ae5f38bb463169a1a10fe518bafc9b3d8c1e4c16ab211"
 
 export const API = "svc/1" as const
 export const PREFIX = "/svc/v1" as const
@@ -247,7 +247,7 @@ export const CONTRACT = {
   "tls_min": "1.2",
   "endpoint": "Endpoint in the client config: https://<IPv4>:<port> (direct over a private network, the server's own certificate) or https://<hostname>[:<port>] (a TLS-terminating tunnel such as Cloudflare Tunnel)",
   "trust": "IPv4 endpoint: trust only the certificate SHA-256 fingerprint pinned in the client config (pin kind cert_sha256), not the system trust store. Hostname endpoint: the system trust store plus the hostname check (pin kind ca), and both server_keys and e2e_keys are required, so a TLS-terminating edge can neither forge an answer nor read a credential or served content. Never fall back to plaintext: with e2e_keys set, a request that cannot be sealed is not sent",
-  "response_signature": "With server_keys in the client config, every answer must carry X-Agent-Server-Signature: v=1; kid=<16 hex: sha256(raw public key)[:16]>; ts=<unix seconds>; sig=<base64 Ed25519 signature> over the UTF-8 lines agent-svc-response/1, status, METHOD, path without query, the request's X-Agent-Challenge (32 hex, fresh per request), ts, sha256 hex of the body bytes, joined by a newline. The client refuses an answer that is unsigned, signed by a key not in server_keys, bound to another request (replay) or more than 300 seconds off its clock, never uses it, and closes the shell gate (reason unverified); an unsigned 5xx, 403 or 429 (the tunnel edge's own page) counts as an unreachable server and is backed off (an unsigned Retry-After is honored up to 60 seconds); with e2e_keys, a signed success that is not a sealed answer, or one that does not open, is never used either. Verifier: host/services.py _verify_response",
+  "response_signature": "With server_keys in the client config, every answer must carry X-Agent-Server-Signature: v=1; kid=<16 hex: sha256(raw public key)[:16]>; ts=<unix seconds>; sig=<base64 Ed25519 signature> over the UTF-8 lines agent-svc-response/1, status, METHOD, path without query, the request's X-Agent-Challenge (32 hex, fresh per request), ts, sha256 hex of the body bytes, joined by a newline. The client refuses an answer that is unsigned, signed by a key not in server_keys or bound to another request (replay), never uses it, and closes the shell gate (reason unverified); a correctly signed answer more than 300 seconds off its clock is not used either and closes the gate with reason clock (the computer clock is the likely cause, error clock_skew); an unsigned 5xx, 403 or 429 (the tunnel edge's own page) counts as an unreachable server and is backed off (an unsigned Retry-After is honored up to 60 seconds); with e2e_keys, a signed success that is not a sealed answer, or one that does not open, is never used either. Verifier: host/services.py _verify_response",
   "egress": "Only the plugin's hooks module sends (its svc channel, inside the Claude Code process); sessions, other hooks, other plugins, tools and the UI never connect to the service directly. Until the migration release the Python client (the local connector process, host/services.py) is the one sender instead",
   "e2e": {
    "envelope": "End-to-end envelope (host/e2e.py, both sides), used for every request but GET /health whenever the client config has e2e_keys (required for a hostname endpoint, optional for the IPv4 one). The client makes a fresh X25519 key per request; shared = X25519(that key, the first key in e2e_keys); HKDF-SHA256(shared, salt agent-svc-e2e/1, info \"keys\" + ephemeral public key + server public key) gives 64 bytes: the request key (first 32) and the answer key (last 32). Outer request: POST to an outer path (x-transport outer_paths) with X-Agent-E2E: v=1; kid=<16 hex: sha256(raw X25519 public key)[:16]>; epk=<base64 ephemeral public key>; ts=<unix seconds>, X-Agent-Challenge and Content-Type application/octet-stream; body = 12-byte nonce || AES-256-GCM(request key, inner, aad). Inner: compact JSON {method, path (with query), headers} + newline + the raw body; the headers are the credential headers (Authorization, X-Agent-Account, X-Agent-Device, X-Agent-Claude, X-Agent-Timestamp, X-Agent-Nonce, X-Agent-Signature) and Content-Type, which never travel outside the envelope. AAD: the lines agent-svc-e2e/1, req (or resp), POST, the outer path, kid, epk, ts, challenge. Answer: 200 application/octet-stream, body = random 12-byte nonce || AES-256-GCM(answer key, compact JSON {status, headers} + newline + body, aad with resp); errors found before the envelope opens (limits, bad_envelope) are plain JSON. The server refuses a timestamp more than 300 seconds off, an unknown kid (before any key work), an envelope that does not open, a login route outside the login outer path, and a replayed ephemeral key, all as 400 bad_envelope counted as a failed authentication of the client IP; one that opens but is stamped before the server's start is 503 restarted (Retry-After), not counted. The Ed25519 response signature covers the outer answer (the ciphertext), so a client checks it before decrypting and a signature never confirms a guess about the plaintext",
@@ -810,7 +810,7 @@ export const CONTRACT = {
   "tools": [
    {
     "name": "router_advice",
-    "description": "Ask agent-services which model and reasoning_effort a spawn_agent call should use (an agent-services suggestion). Pass task_name as you will give it to spawn_agent: lowercase letters, digits and underscores, starting with a task word (plan, replan, acceptance, review, default, explore) and an underscore. Only the task name is sent; the brief stays on this machine. Without task_name the whole tier table comes back. Returns advice: a sentence naming the model and effort, or null for an unknown task word.",
+    "description": "Ask agent-services which model and reasoning_effort a spawn_agent call should use (an agent-services suggestion). Pass task_name as you will give it to spawn_agent: lowercase letters, digits and underscores, starting with a task word (plan, replan, acceptance, review, default, explore) and an underscore. Only the task name is sent; the brief stays on this machine. Without task_name the whole tier table comes back. Returns advice: a sentence naming the model and effort, or null for an unknown task word; for a known task word also brief_rule, a short served rule to copy into the subagent's brief.",
     "inputSchema": {
      "type": "object",
      "properties": {
@@ -974,7 +974,7 @@ export const CONTRACT = {
    },
    {
     "name": "setup_sharing",
-    "description": "Turn Codex usage sharing off, or read what it sends; call it only with the user's answer. Sharing (the token counts per model per day of the PostModelRequest hook) turns on only with the unchecked box on the Codex sign-in page. \"sharing off\" withdraws it (the counts are then dropped unread); \"sharing not_now\" leaves it as it is; \"sharing preview\" returns what the hook sends, what the server keeps and today's stored counts. Returns whether sharing is on.",
+    "description": "Turn Codex usage sharing off, or read what it sends; call it only with the user's answer. Sharing (the token counts per model per day of the PostModelRequest hook) turns on only with Yes on the Codex sign-in page (Yes or No, neither preselected). \"sharing off\" withdraws it (the counts are then dropped unread); \"sharing not_now\" leaves it as it is; \"sharing preview\" returns what the hook sends, what the server keeps and today's stored counts. Returns whether sharing is on.",
     "inputSchema": {
      "type": "object",
      "properties": {
@@ -4470,7 +4470,8 @@ export const CONTRACT = {
          "enum": [
           "haiku",
           "opus",
-          "sonnet"
+          "sonnet",
+          "fable"
          ]
         },
         {

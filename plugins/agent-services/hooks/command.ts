@@ -31,7 +31,8 @@
 //   only days after the day of the choice) and "Don't upload" (`sharing off`). A company's "on" asks its members the
 //   same question, saying the admin recommends it; nothing of a member is uploaded before they answer.
 // - Subagent routing has three levels (routing_level.ts, default suggest): `routing off` makes the agent.spawn hook do
-//   nothing at all (routingOff): no request, no deny, no model change, nothing added to the subagent's prompt;
+//   no routing work (routingOff): no request, no routing deny, no model change, nothing added to the subagent's prompt
+//   (the weekly usage line of the served rules still holds, subagents.ts spawnGate);
 //   `routing suggest` asks for advice only; `routing strict` lets the service refuse a dispatch without a task type
 //   word. `routing on` is the 0.6.1 spelling of `routing suggest` (RENAMED).
 // - 0.6.3: the setup tool the model calls can never turn the upload on (no sharing on_backfill, on_from_now or on):
@@ -43,6 +44,7 @@
 // The Command class is harness-neutral (its deps are injected); the functions at the end are the Claude Code
 // adapter over `$`.
 import type { EngineInterface } from 'claude-code'
+import { countsOf } from './day_counts'
 import { estimateFacts, estimateRequest } from './estimate'
 import { BodyTooLarge, DAILY_ROUTE, READ_LIMIT } from './metrics'
 import { plusDays } from './pyfmt'
@@ -62,7 +64,7 @@ import { dataDir, engineDirs, envOf, readTextOf } from './engine_env'
 import { COMPANY_VIEW_LINE, companyCommand } from './boss'
 import { hasTrust, type TrustFile, unbalancedTrust, withoutTrust, withTrust } from './trust'
 import { approveMethods, importLine, LEVEL_KEY, type Level, levelOf, methodsDiff, methodsNoted, methodsNotes,
-  previewMethods, readLevel, seenDiff, settlePending, syncMethodsNow } from './methods'
+  pendingUnseen, previewMethods, readLevel, seenDiff, settlePending, syncMethodsNow } from './methods'
 import { AUTONOMY_LINE, AUTONOMY_SET, readAutonomy, setAutonomy } from './autonomy'
 import { framing, hasUpdateNote, lineDiff, NOTE_LABEL, pendingNoteText, updateNoteText } from './review'
 import { bandSetup } from './band'
@@ -94,7 +96,7 @@ export const COMMAND_SPEC = {
     'secrets [forget] | trim [on | off] | check]',
 } as const
 
-// Every word the command answers: the seventeen of USAGE, then the hidden `code` (sign-in fallback) and `served`.
+// Every word the command answers: the eighteen of USAGE, then the hidden `code` (sign-in fallback) and `served`.
 export const KNOWN_COMMANDS = ['status', 'login', 'logout', 'setup', 'sharing', 'savings', 'methods', 'routing',
   'autonomy', 'update', 'offline', 'estimate', 'info', 'remove', 'company', 'secrets', 'trim', 'check', 'code', 'served']
 /** The subcommands that work while signed out (`methods` alone and `methods off` too, see dispatch). */
@@ -125,10 +127,9 @@ export const SHARING_OPTIONS = ['Upload, including the past 30 days', 'Upload fr
   'Show me what is sent']
 export const SHARING_HEADER = 'Savings'
 // The 0.6.1 page-only question under a company "on": no longer asked since 0.6.2 (the member answers the savings
-// question itself); kept one version for callers that import it.
+// question itself); the tests check that no dialog asks it.
 export const PAGE_QUESTION = 'Your company turned the daily usage upload on. Show your savings on a private page in ' +
   'your claude.ai account too (only you can see it)?'
-export const PAGE_OPTIONS = ['Publish it', 'Not now', 'Never']
 export const METHODS_QUESTION = 'agent-services serves working methods (planning, delegating to subagents, testing, ' +
   'review, delivery, checkpoints). How should Claude use them?'
 export const METHODS_OPTIONS = ['As suggestions (Recommended)', 'As my own instructions', 'Off']
@@ -178,8 +179,9 @@ export const SETUP_COMMANDS = [
 ]
 // The routing level as status shows it, and the answer once it is set (routing_level.ts).
 export const ROUTING_STATUS: Readonly<Record<RoutingLevel, string>> = {
-  off: `Subagent routing: off. Subagents start as dispatched and nothing is asked of the service; ${COMMAND} routing ` +
-    'suggest turns it back on.',
+  off: 'Subagent routing: off. Subagents start as dispatched and nothing is asked of the service; only the weekly ' +
+    `usage line, where your served rules include it, still stops new subagents. ${COMMAND} routing suggest turns it ` +
+    'back on.',
   suggest: 'Subagent routing: suggest (the default). Each subagent dispatch asks the service for advice on its model ' +
     `and effort, and a dispatch without a task type word still runs; ${COMMAND} routing strict refuses those, ` +
     `${COMMAND} routing off turns routing off.`,
@@ -188,8 +190,9 @@ export const ROUTING_STATUS: Readonly<Record<RoutingLevel, string>> = {
     `suggest or ${COMMAND} routing off changes it.`,
 }
 export const ROUTING_SET: Readonly<Record<RoutingLevel, string>> = {
-  off: 'Subagent routing is off: agent-services sends no routing request, denies no subagent, changes no model and ' +
-    `adds nothing to subagent prompts. ${COMMAND} routing suggest turns it back on.`,
+  off: 'Subagent routing is off: agent-services sends no routing request, changes no model and adds nothing to ' +
+    'subagent prompts; only the weekly usage line, where your served rules include it, still stops new subagents. ' +
+    `${COMMAND} routing suggest turns it back on.`,
   suggest: 'Subagent routing is set to suggest (the default): each subagent dispatch asks the service for advice on ' +
     `its model and effort, and a dispatch without a task type word runs as written. ${COMMAND} routing strict ` +
     `refuses those; ${COMMAND} routing off turns routing off.`,
@@ -217,8 +220,10 @@ export const SETUP_SPEC = {
     'suggestions; "methods on" makes them the user\'s own instructions through one marked section in the user\'s ' +
     'CLAUDE.md and lets the planning gate hold larger file edits until there is a plan (read "methods preview" with ' +
     'the user first); "methods off" turns them off. "methods diff" shows how changed methods differ from the approved ' +
-    'ones; "methods accept" takes the new text, "methods keep" keeps the approved one. "routing off" stops the ' +
-    'subagent routing advice (no request, no deny, no model change, nothing added to subagent prompts); "routing ' +
+    'ones; "methods accept" takes the new text, "methods keep" keeps the approved one. "methods on" and "methods ' +
+    'accept" change nothing until the user confirms them in a dialog of the plugin. "routing off" stops the ' +
+    'subagent routing advice (no request, no model change, nothing added to subagent prompts; only the weekly usage ' +
+    'line, where the served rules include it, still stops new subagents); "routing ' +
     'suggest" (the default) asks for advice on each subagent and never refuses one for a missing task type word; ' +
     '"routing strict" lets the service refuse a dispatch whose description does not start with a task type word. ' +
     '"update" updates the plugin to ' +
@@ -276,6 +281,8 @@ export const ERROR_TEXT: Record<string, string> = {
   account_locked: NOTICE_TEXT.account_locked!,
   org_paused: ORG_PAUSED_LINE,
   locked_out: NOTICE_TEXT.locked_out!,
+  clock_skew: NOTICE_TEXT.clock_skew!,
+  claude_unreadable: "Claude Code's .claude.json could not be read just now, so nothing was sent; try again in a moment.",
   unsigned_response: UNVERIFIED,
   bad_signature: UNVERIFIED,
   stale_response: UNVERIFIED,
@@ -365,6 +372,7 @@ export type CommandDeps = {
   facts?: () => Promise<Facts | ScanProgress | null> // the estimate's scan of this machine's history (EstimateScan);
   // null when there is none
   dailyBody?: (day: string) => Promise<Record<string, unknown>> // one day's POST /metrics/daily body (may throw)
+  previewNote?: () => string | null // what the last dailyBody left out, in words
   refreshTime?: () => Promise<string> // `sharing refresh_time`: past days' time figures again (wiring.ts refreshTime)
   panel?: () => Promise<string[]> // the usage panel's lines (panel.ts panelLines through wiring.ts)
   clientVersion?: string // the plugin's release version (the export's shell stamp), for the estimate body
@@ -423,7 +431,7 @@ export function dailySummary(body: Record<string, unknown>): string {
     `in plain words, on ${String(body.day ?? '?')} this machine had ` +
     `${count(sum(rows('sessions'), (r) => r.count), 'session', 'sessions')}, ` +
     `${count(sum(rows('by_task'), (r) => r.count), 'subagent run', 'subagent runs')} and ` +
-    `${count(rows('compact').length, 'compaction', 'compactions')}, using ${count(tokens, 'token', 'tokens')} in total ` +
+    `${count(countsOf({ route: [], index: [], compact: rows('compact') } as any).compact_start ?? 0, 'compaction', 'compactions')}, using ${count(tokens, 'token', 'tokens')} in total ` +
     `(about ${usd(sum(models, (r) => r.api_usd))} at API prices). Only these numbers are sent: no prompts, file ` +
     'contents or file paths. The exact data, for anyone who wants to check:'
   )
@@ -436,7 +444,7 @@ export const pct = (x: unknown): string => {
 }
 
 export const errorText = (code: string | null | undefined): string =>
-  ERROR_TEXT[code ?? 'failed'] ?? `The request failed (${code}).`
+  Object.hasOwn(ERROR_TEXT, code ?? 'failed') ? ERROR_TEXT[code ?? 'failed']! : `The request failed (${code}).`
 
 const EMAIL_RX = /^[^\s@]+@[^\s@]+$/
 export const validEmail = (s: unknown): s is string =>
@@ -444,9 +452,12 @@ export const validEmail = (s: unknown): s is string =>
 
 /** The code as typed in the dialog: spaces and dashes people add between digits are dropped. */
 export const cleanCode = (s: string): string => s.replace(/[\s-]+/g, '')
-// The mailed sign-in code is 8 digits (6 to 8 taken). After login the person pastes
-// it as their next message (the dialog put typing last, under Other); prompt.submit catches it before the model.
-export const PASTED_CODE_RX = /^[0-9]{6,8}$/
+// The mailed sign-in code is 8 digits. After login the person pastes it as their next message (the dialog put typing
+// last, under Other); prompt.submit catches it before the model. Only a message that is nothing but those 8 digits
+// (spaces between them allowed) counts: a date such as 2026-11-09 or a shorter number goes to the model.
+export const PASTED_CODE_RX = /^[0-9]{8}$/
+/** A pasted message as the code it may be: only the spaces dropped (never dashes or other characters). */
+export const pastedForm = (s: string): string => s.trim().replace(/ +/g, '')
 // prompt.submit has a time budget and forwards the message when a hook runs past it: the pasted path answers by then
 export const PASTED_WAIT_MS = 6_000
 export const PASTED_SLOW = `The sign-in is still being checked. Run ${COMMAND} status in a moment to see whether it finished.`
@@ -464,6 +475,14 @@ export type AutoUpdateSources = {
   settings: (source: string) => Promise<unknown> // one settings source as loaded ({} or null when none)
   readText: (path: string) => Promise<string | null> // null when missing or unreadable
   configDir: string // CLAUDE_CONFIG_DIR, else <home>/.claude
+  marketplace?: string // the marketplace this copy was installed from (marketplaceOf); MARKETPLACE when unknown
+}
+
+/** The marketplace an installed copy came from, read from its folder (<config>/plugins/cache/<marketplace>/...);
+ * null for a copy loaded from anywhere else. Pure. */
+export function marketplaceOf(root: unknown): string | null {
+  const m = typeof root === 'string' ? /[\\/]plugins[\\/]cache[\\/]([^\\/]+)[\\/]/.exec(root) : null
+  return m && m[1] ? m[1] : null
 }
 
 const flag = (entry: unknown): boolean | null => {
@@ -476,11 +495,13 @@ const flag = (entry: unknown): boolean | null => {
 export async function autoUpdateState(src: AutoUpdateSources): Promise<AutoUpdate> {
   const env = async (n: string) => {
     try {
-      return Boolean(await src.env(n))
+      // set means a true value, as Claude Code reads these switches: "0", "false", "no", "off" or empty is not set
+      return /^\s*(1|true|yes|on)\s*$/i.test(String((await src.env(n)) ?? ''))
     } catch {
       return false
     }
   }
+  const market = src.marketplace || MARKETPLACE
   let off = false
   for (const v of AUTO_UPDATE_OFF_VARS) if (await env(v)) off = true
   if (off && !(await env(AUTO_UPDATE_FORCE_VAR))) return { on: false, source: 'env', how: AUTO_UPDATE_HOW }
@@ -492,7 +513,7 @@ export async function autoUpdateState(src: AutoUpdateSources): Promise<AutoUpdat
       data = null
     }
     const markets = isObj(data) ? data.extraKnownMarketplaces : undefined
-    const v = isObj(markets) ? flag(markets[MARKETPLACE]) : null
+    const v = isObj(markets) ? flag(markets[market]) : null
     if (v !== null) return { on: v, source: name, how: AUTO_UPDATE_HOW }
   }
   let known: unknown = null
@@ -502,7 +523,7 @@ export async function autoUpdateState(src: AutoUpdateSources): Promise<AutoUpdat
   } catch {
     known = null
   }
-  const v = isObj(known) ? flag(known[MARKETPLACE]) : null
+  const v = isObj(known) ? flag(known[market]) : null
   if (v !== null) return { on: v, source: 'plugin_menu', how: AUTO_UPDATE_HOW }
   return { on: false, source: 'default', how: AUTO_UPDATE_HOW }
 }
@@ -631,18 +652,23 @@ export class Command {
   private d: CommandDeps
   private previewed: { body: Record<string, unknown>; text: string; at: number } | null = null
   private askedMem: number | null = null // the "last asked" time where no shared file is wired (tests)
+  // The person's own evidence in this session (the setup tool asks for it): they read the methods text in their own
+  // command's answer, or picked "As my own instructions" in the plugin's dialog.
+  private userPreviewed = false
+  private userChoseOn = false
 
   constructor(deps: CommandDeps) {
     this.d = deps
   }
 
-  /** One run of /agent-services <args>; always answers a text, already redacted. */
-  async run(args: string): Promise<string> {
+  /** One run of /agent-services <args>; always answers a text, already redacted. `byTool`: the model's setup tool ran
+   * it, not the person's own command. */
+  async run(args: string, byTool = false): Promise<string> {
     let text: string
     try {
       const words = String(args ?? '').trim().split(/\s+/).filter(Boolean)
       const renamed = renameOf(words)
-      text = await this.dispatch(renamed ? renamed.words : words)
+      text = await this.dispatch(renamed ? renamed.words : words, byTool)
       if (renamed) text += `\n${renamed.line}`
     } catch {
       text = `agent-services: the command failed; try ${COMMAND} status.`
@@ -650,7 +676,7 @@ export class Command {
     return redact(text)
   }
 
-  private async dispatch(words: string[]): Promise<string> {
+  private async dispatch(words: string[], byTool = false): Promise<string> {
     const sub = (words[0] ?? 'status').toLowerCase()
     const rest = words.slice(1)
     const svc = this.d.svc
@@ -678,7 +704,7 @@ export class Command {
         return rest.length === 1 && rest[0]!.toLowerCase() === 'on' ? this.sharingChoice()
           : rest.length ? USAGE : this.savings()
       case 'methods':
-        return this.methods(rest)
+        return this.methods(rest, byTool)
       case 'routing':
         return this.routing(rest)
       case 'autonomy':
@@ -891,6 +917,7 @@ export class Command {
     if (a === METHODS_OPTIONS[2]) return this.methods(['off'])
     const kept = await this.methods(['suggest'])
     if (a === METHODS_OPTIONS[0]) return kept
+    this.userChoseOn = true // the person's own answer: the setup tool may apply "on" once
     // "my own instructions": only after the user read the text, so it is shown here and confirmed with methods on
     return `${kept}\nTo make them your own instructions, read them first:\n${await this.methods(['preview'])}\n` +
       `Then run ${COMMAND} methods on.`
@@ -946,6 +973,11 @@ export class Command {
    * stored values, then the uninstall command. Only the slash command runs it. */
   private async remove(): Promise<string> {
     const rd = this.d.removeDeps
+    // offline sends nothing, so the server sign-in could not be ended, and after remove no logout is possible
+    if ((await this.safe(() => this.d.svc.status(), {} as any))?.offline === true) {
+      return `Offline mode is on, so remove could not end the sign-in on the server; nothing was changed. Run ` +
+        `${COMMAND} offline off, then ${COMMAND} remove.`
+    }
     return removeAll({
       logout: async () => 'Sign-out: ' + (await this.logout()),
       trustOff: async () => {
@@ -1029,13 +1061,32 @@ export class Command {
     return `Removed the agent-services section from ${f.path}.`
   }
 
-  private async methods(rest: string[]): Promise<string> {
+  private async methods(rest: string[], byTool = false): Promise<string> {
     const sub = (rest[0] ?? '').toLowerCase()
     const f = this.d.trustFile
     if (rest.length > 1) return USAGE
     if (sub === '') return this.methodsLine()
+    const chosen = sub === 'on' && this.userChoseOn
+    if (sub === 'on' || sub === 'off' || sub === 'suggest') this.userChoseOn = false // one answer applies one "on"
+    if (byTool && (sub === 'on' || sub === 'accept') && !chosen) {
+      // the model asked: these make served text the person's own instructions, so only the person's own answer applies
+      const yes = sub === 'on' ? 'Make them my own instructions' : 'Take the new text'
+      const a = this.canAsk()
+        ? await this.dialog(sub === 'on'
+          ? 'Claude asks to make the agent-services working methods your own instructions: one line in your CLAUDE.md ' +
+            `loads them, and the planning gate then holds larger file edits until there is a plan. ${COMMAND} methods ` +
+            'preview shows the text. Make them your own instructions?'
+          : 'Claude asks to take the changed agent-services working methods as your own instructions. ' +
+            `${COMMAND} methods diff shows the change. Take the new text?`, [yes, 'Not now'], METHODS_HEADER)
+        : null
+      if (a !== yes) {
+        return `Nothing was changed: "methods ${sub}" needs the user's own answer. The user can type ${COMMAND} ` +
+          `methods ${sub} themselves${sub === 'on' ? ` (after ${COMMAND} methods preview)` : ` (after ${COMMAND} methods diff)`}.`
+      }
+    }
     if (sub === 'preview') {
-      const full = await previewMethods()
+      if (!byTool) this.userPreviewed = true // the text is in the person's own answer
+      const full = await previewMethods(!byTool)
       const line = f ? await f.importLine() : null
       return (line ? `With ${COMMAND} methods on, this line is added to the end of your CLAUDE.md (${f!.path}):\n\n${line}\n\n` +
         'It loads a file this plugin keeps renewed while you are signed in; a later change to the text is shown ' +
@@ -1045,7 +1096,7 @@ export class Command {
           : `The full text now:\n\n----- begin -----\n${full.trim()}\n----- end -----`)
     }
     if (sub === 'diff') {
-      const d = await methodsDiff(lineDiff)
+      const d = await methodsDiff(lineDiff, !byTool) // shown to the user (not a run by the model's tool): methods accept may take it
       const seen = d === null && (await this.safe(() => this.level(), 'suggest' as Level)) !== 'on'
         ? await seenDiff(this.d.store, lineDiff) : null
       if (seen) {
@@ -1058,6 +1109,9 @@ export class Command {
             `${COMMAND} methods accept takes the new text; ${COMMAND} methods keep keeps the approved one.`
     }
     if (sub === 'accept' || sub === 'keep') {
+      if (sub === 'accept' && (await this.safe(() => pendingUnseen(), false))) {
+        return `The changed text was not shown in this session, or it changed since: run ${COMMAND} methods diff, then ${COMMAND} methods accept.`
+      }
       const done = await settlePending(sub === 'accept')
       if (!done) return 'There is no changed text to review; nothing was changed.'
       return sub === 'accept'
@@ -1104,7 +1158,7 @@ export class Command {
     return `Added the agent-services section to ${f.path}: from the next session on, the working methods you approved ` +
       `count as your own instructions, and the planning gate holds larger file edits until agent-state.md has a plan; ` +
       `a change to the methods is shown to you first. ${COMMAND} methods suggest takes the section out again.` +
-      (ok.text !== null && !ok.shown
+      (ok.text !== null && !(ok.shown && this.userPreviewed)
         ? ` No preview was shown in this session, so this is the text approved:\n\n----- begin -----\n` +
             `${ok.text.trim()}\n----- end -----`
         : '')
@@ -1152,6 +1206,12 @@ export class Command {
     const s = await recordState(this.d.store)
     const on = sub === 'backfill' || sub === 'from_now'
     if (s.org === 'off' && on) return `${ORG_SET_TEXT} Nothing was changed.`
+    // "not now" only postpones an open question: a choice already made (on, or the final "Don't upload") stays
+    if (sub === 'not_now' && s.own !== 'unanswered') {
+      return `Nothing was changed: the savings record is ${s.own === 'on' ? 'on' : "off (don't upload)"} by your own ` +
+        `choice. ${s.own === 'on' ? `${COMMAND} sharing off turns it off.` : `${COMMAND} sharing on_backfill or ` +
+          `sharing on_from_now turns it on.`}`
+    }
     const { entry } = await readEntry(this.d.store)
     // the same answer again keeps its moment, so a later floor never skips days already due
     const at = on && entry.record === 'on' && (entry.backfill !== false) === (sub === 'backfill') && typeof entry.at === 'number'
@@ -1244,7 +1304,11 @@ export class Command {
       try {
         const body = await this.d.dailyBody(day)
         const text = this.d.svc.preview('POST', DAILY_ROUTE, body)
-        if (text !== null) upload = `Exactly what one daily upload sends (for ${day}): ${dailySummary(body)}\n${text}`
+        if (text !== null) {
+          upload = `Exactly what one daily upload sends (for ${day}): ${dailySummary(body)}\n${text}`
+          const note = this.d.previewNote?.() // what this body leaves out (unpriced or unread usage)
+          if (note) upload += ` ${note}`
+        }
       } catch (e) {
         if (e instanceof BodyTooLarge) upload += ` (The summary for ${day} is too large to upload.)`
       }
@@ -1343,7 +1407,22 @@ export class Command {
   /** Ask for the mailed code in the dialog and finish the sign-in. */
   private async finish(email: string, before: string): Promise<string> {
     const head = before ? before + '\n' : ''
-    const typed = await this.ask(`Type the sign-in code mailed to ${email} (under Other)?`, CODE_CANCEL)
+    let picked: string | null = null
+    try {
+      picked = this.d.ask ? String(await this.d.ask(`Type the sign-in code mailed to ${email} (under Other)?`,
+        { options: CODE_CANCEL, header: ASK_HEADER })).trim() : null
+    } catch {
+      picked = null // dismissed, or nobody can be asked
+    }
+    if (picked === CODE_CANCEL[1]) {
+      // "Cancel sign-in": no later message is taken as its code, in any session
+      const gone = await this.safe(async () => (await this.d.svc.cancelLogin(), true), false)
+      return head + (gone
+        ? `Sign-in cancelled; no message is taken as its code any more. Run ${COMMAND} login to start again.`
+        : 'Sign-in not finished, and the waiting sign-in could not be cleared: for up to 10 minutes a message that is ' +
+          `only an 8-digit number is still taken as its code. Run ${COMMAND} login to start again.`)
+    }
+    const typed = picked && !CODE_CANCEL.includes(picked) ? picked : null
     if (typed === null) {
       return head + `Sign-in not finished. Enter the code with ${COMMAND} code within 10 minutes (any session).`
     }
@@ -1354,7 +1433,7 @@ export class Command {
 
   /** A message that is only a sign-in code while a sign-in waits for one: finish it (the answer), else null. */
   async pasted(text: string): Promise<string | null> {
-    const code = cleanCode(String(text ?? ''))
+    const code = pastedForm(String(text ?? ''))
     if (!PASTED_CODE_RX.test(code)) return null
     const email = await this.safe(() => this.d.svc.pendingEmail(), null)
     if (!email) return null
@@ -1396,6 +1475,7 @@ export class Command {
   private async logout(): Promise<string> {
     const svc = this.d.svc
     const before = await svc.authState(true)
+    await this.safe(async () => svc.cancelLogin(), undefined) // a sign-in waiting for its code ends with it
     const r = await svc.logout()
     if (r.error !== 'offline') clearRules() // the engines stop at once (also when the store kept the sign-in)
     if (r.ok) return 'Signed out: the server ended this sign-in and it was deleted from this machine.'
@@ -1612,7 +1692,7 @@ function timeText(t: TimeFigures | null): string {
 
 export function estimateError(code: string | null): string {
   const c = code ?? 'failed'
-  return `No estimate: ${ESTIMATE_DETAIL[c] ?? errorText(c)} A failed estimate never undoes the sign-in.`
+  return `No estimate: ${Object.hasOwn(ESTIMATE_DETAIL, c) ? ESTIMATE_DETAIL[c]! : errorText(c)} A failed estimate never undoes the sign-in.`
 }
 
 /** The DiagEstimate answer in plain sentences (the Python client's estimate_answer: the server's figures, unchanged). */
@@ -1653,6 +1733,7 @@ export type EngineOptions = {
   outbox?: Outbox | null
   prices?: Prices | null // the shipped price table; without it the estimate has no data
   dailyBody?: (day: string) => Promise<Record<string, unknown>>
+  previewNote?: () => string | null
   refreshTime?: () => Promise<string> // wiring.ts refreshTime
   panel?: () => Promise<string[]> // wiring.ts panelLines
   clientVersion?: string
@@ -1687,6 +1768,7 @@ export function engineDeps($: EngineInterface, o: EngineOptions): CommandDeps {
         settings: (source) => ($.settings.read as any)({ source }),
         readText,
         configDir: d.configDir,
+        marketplace: marketplaceOf($.plugin.root) ?? undefined,
       })
     },
     updateLine: async () =>
@@ -1778,7 +1860,7 @@ export function serveCommand(
       return { result: `"${c}" applies the user's own answer, so it runs only in the main conversation of a session ` +
         `the user is at; nothing was changed. The user can type ${COMMAND} ${c} themselves.` }
     }
-    const text = await (await servedCommand($)).run(c)
+    const text = await (await servedCommand($)).run(c, true)
     void Promise.resolve(after?.(c.split(' ')[0]!)).catch(() => undefined)
     return { result: text }
   }).catch(($: EngineInterface, e: any, next: any) => ({
@@ -1848,7 +1930,7 @@ export async function pastedCode(
     (Array.isArray(e?.attachments) && e.attachments.length)) return null
   const text = e?.text
   if (!servedOptions || typeof text !== 'string' || text.length > 40) return null
-  if (!PASTED_CODE_RX.test(cleanCode(text))) return null // most messages: nothing is built or read
+  if (!PASTED_CODE_RX.test(pastedForm(text))) return null // most messages: nothing is built or read
   try {
     const answer = await (await servedCommand($)).pasted(text)
     if (answer === null) return null // no sign-in waits: an ordinary message

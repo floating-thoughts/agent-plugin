@@ -139,13 +139,15 @@ async function takeLease($: EngineInterface, path: string, now: number): Promise
 }
 
 // The binary Claude Code runs on, else `claude` on PATH, else where its installers put it; '' when none runs.
+// Every run starts in the plugin's own folder: on Windows a bare name is also looked up in the folder a process starts
+// in, and the session's project folder (a cloned repository) must never supply a claude.exe or py.exe.
 async function findExe($: EngineInterface): Promise<{ exe: string; listed: string }> {
   const home = (await text(() => $.env.get('HOME'))) || (await text(() => $.env.get('USERPROFILE')))
   const tried = [await text(() => $.env.get('CLAUDE_CODE_EXECPATH')), 'claude', `${home}/.local/bin/claude`,
     `${home}/.local/bin/claude.exe`, `${home}/.claude/local/claude`, '/opt/homebrew/bin/claude', '/usr/local/bin/claude']
   for (const at of tried.filter((p, i, all) => p && !p.startsWith('/.') && all.indexOf(p) === i)) {
     try {
-      const listed = String((await $.process.run([at, 'plugin', 'list', '--json'], { timeoutMs: 60_000 })).stdout ?? '')
+      const listed = String((await $.process.run([at, 'plugin', 'list', '--json'], { timeoutMs: 60_000, cwd: $.plugin.root })).stdout ?? '')
       return { exe: at, listed }
     } catch {}
   }
@@ -219,7 +221,7 @@ async function run($: EngineInterface, interactive: boolean): Promise<void> {
     if (id === null) return noted($, `${exe} plugin list --json does not list ${$.plugin.name} from a marketplace`)
     const market = id.slice(id.lastIndexOf('@') + 1)
     // the listing only: this never installs or changes the plugin
-    await $.process.run([exe, 'plugin', 'marketplace', 'update', market], { timeoutMs: RUN_TIMEOUT_MS })
+    await $.process.run([exe, 'plugin', 'marketplace', 'update', market], { timeoutMs: RUN_TIMEOUT_MS, cwd: $.plugin.root })
     const installed = versionIn(listed, id)
     const latest = listedVersion(await manifestOf($, market), $.plugin.name)
     if (isRemoved()) return // /agent-services remove ran meanwhile: nothing is written again
@@ -283,8 +285,8 @@ export async function applyUpdate($: EngineInterface, marketplace = 'agent-plugi
       return (applied = answer)
     }
     const id = idOf(listed, $.plugin.name) ?? `${$.plugin.name}@${marketplace}`
-    await $.process.run([exe, 'plugin', 'marketplace', 'update', id.slice(id.lastIndexOf('@') + 1)], { timeoutMs: RUN_TIMEOUT_MS })
-    const r = await $.process.run([exe, 'plugin', 'update', id, '--json'], { timeoutMs: RUN_TIMEOUT_MS })
+    await $.process.run([exe, 'plugin', 'marketplace', 'update', id.slice(id.lastIndexOf('@') + 1)], { timeoutMs: RUN_TIMEOUT_MS, cwd: $.plugin.root })
+    const r = await $.process.run([exe, 'plugin', 'update', id, '--json'], { timeoutMs: RUN_TIMEOUT_MS, cwd: $.plugin.root })
     const out = readUpdate(r.exitCode, String(r.stdout ?? ''), String(r.stderr ?? ''))
     if (out.kind === 'updated') {
       const path = await statePath($)
@@ -325,7 +327,7 @@ export async function probeProcess($: EngineInterface): Promise<boolean> {
 export function processRunner($: EngineInterface, present: boolean): ProcessRun | null {
   if (!present || processMissing) return null
   return async (argv, opts) => {
-    const r: any = await $.process.run(argv, { timeoutMs: opts.timeoutMs, stdin: opts.stdin })
+    const r: any = await $.process.run(argv, { timeoutMs: opts.timeoutMs, stdin: opts.stdin, cwd: $.plugin.root })
     return { exitCode: typeof r?.exitCode === 'number' ? r.exitCode : null, stdout: String(r?.stdout ?? ''), stderr: String(r?.stderr ?? '') }
   }
 }

@@ -29,7 +29,8 @@ const MODEL_ID = /^claude-[a-z0-9.-]{1,60}\n?$/ // re.match with $ also takes a 
 type Obj = Record<string, any>
 export type Prices = Obj
 export type Counts = { input: number; output: number; cacheRead: number; cacheWrite5m: number; cacheWrite1h: number }
-export type TranscriptFile = { rel: string; size?: number; text: string | null }
+// lines: a file over READ_LIMIT read as a stream (wiring.ts loadTranscripts with `stream`); Scanner.addLines takes it
+export type TranscriptFile = { rel: string; size?: number; text: string | null; lines?: AsyncIterable<string> }
 export type Entry = { model: string; moment: number; isFast: boolean; counts: Counts; file: string }
 
 // ------------------------------------------------------------------ prices (the usage module)
@@ -48,26 +49,55 @@ export const matches = (name: string, prefix: string): boolean => {
   return !/^\p{Nd}/u.test(rest) && !/^-\p{Nd}{1,2}(?!\p{Nd})/u.test(rest)
 }
 
-export function priceOf(model: string, prompt: number, prices: Prices): Counts | null {
-  const name = bare(model || '')
+/**
+ * The price row of a model id the table does not list, by its family: claude-<family>-<n>[-<n>] (a newer version
+ * than the table knows, e.g. claude-opus-5-6) takes the row of the newest version of that family in the table that
+ * is not above it. Null for any other name, and for a version older than every listed one of its family.
+ */
+export function familyRow(name: string, prices: Prices): Obj | null {
+  const m = /^claude-([a-z]+)-(\d{1,3}(?:-\d{1,2})?)(?![\d])/.exec(name)
+  if (!m) return null
+  const want = m[2].split('-').map(Number)
+  let best: Obj | null = null
+  let bestV: number[] = []
   for (const row of prices.models ?? []) {
-    if (matches(name, row.prefix)) {
-      let [inp, out, read] = [row.input, row.output, row.cache_read]
-      for (const tier of prices.long_prompt ?? []) {
-        if (matches(name, tier.prefix) && prompt > tier.over) {
-          ;[inp, out, read] = [tier.input, tier.output, tier.cache_read]
-        }
-      }
-      return {
-        input: inp,
-        output: out,
-        cacheRead: read,
-        cacheWrite5m: inp * (prices.cache_write_5m ?? 1.25),
-        cacheWrite1h: inp * (prices.cache_write_1h ?? 2.0),
-      }
+    const r = typeof row?.prefix === 'string' ? /^claude-([a-z]+)-(\d{1,3}(?:-\d{1,2})?)$/.exec(row.prefix) : null
+    if (!r || r[1] !== m[1]) continue
+    const v = r[2].split('-').map(Number)
+    const newer = cmpTuple(v, want) <= 0 && (best === null || cmpTuple(v, bestV) > 0)
+    if (newer) {
+      best = row
+      bestV = v
     }
   }
-  return null
+  return best
+}
+
+/** The line the views show when some usage has no price (its dollars count as 0), or null when all is priced. */
+export function unpricedNote(models: readonly string[] | null | undefined): string | null {
+  const list = (models ?? []).filter((m) => typeof m === 'string' && m)
+  if (!list.length) return null
+  return `No price is known for ${list.join(', ')}: ${list.length === 1 ? 'its' : 'their'} usage counts as $0.`
+}
+
+export function priceOf(model: string, prompt: number, prices: Prices): Counts | null {
+  const name = bare(model || '')
+  const listed = (prices.models ?? []).find((row: Obj) => matches(name, row.prefix))
+  const row = listed ?? familyRow(name, prices)
+  if (!row) return null
+  let [inp, out, read] = [row.input, row.output, row.cache_read]
+  for (const tier of prices.long_prompt ?? []) {
+    if (matches(name, tier.prefix) && prompt > tier.over) {
+      ;[inp, out, read] = [tier.input, tier.output, tier.cache_read]
+    }
+  }
+  return {
+    input: inp,
+    output: out,
+    cacheRead: read,
+    cacheWrite5m: inp * (prices.cache_write_5m ?? 1.25),
+    cacheWrite1h: inp * (prices.cache_write_1h ?? 2.0),
+  }
 }
 
 export const promptOf = (c: Counts): number => c.input + c.cacheRead + c.cacheWrite5m + c.cacheWrite1h
@@ -98,6 +128,38 @@ export function usageOf(u: Obj): Counts {
 // ------------------------------------------------------------------ transcripts
 
 const lines = (text: string): string[] => text.split('\n')
+
+/**
+ * The lines of a text that comes in pieces, the same as text.split('\n') of the whole text, so a file too large to
+ * read whole is counted line by line: only the line being read is held. A line longer than maxLine characters is
+ * given as '' (a row that size holds no figure; the cap bounds what one line can hold).
+ */
+export async function* linesOf(chunks: AsyncIterable<string>, maxLine = 64 * 1024 * 1024): AsyncGenerator<string> {
+  let parts: string[] = []
+  let held = 0
+  let over = false
+  for await (const chunk of chunks) {
+    let from = 0
+    for (;;) {
+      const at = chunk.indexOf('\n', from)
+      const piece = at < 0 ? chunk.slice(from) : chunk.slice(from, at)
+      if (!over && held + piece.length > maxLine) {
+        over = true
+        parts = []
+      } else if (!over && piece) {
+        parts.push(piece)
+        held += piece.length
+      }
+      if (at < 0) break
+      yield over ? '' : parts.join('')
+      parts = []
+      held = 0
+      over = false
+      from = at + 1
+    }
+  }
+  yield over ? '' : parts.join('')
+}
 export const parseLine = (raw: string): unknown => {
   try {
     return JSON.parse(raw)
@@ -141,25 +203,28 @@ export function collect(files: TranscriptFile[]): Map<string, Entry> {
 /** collect() of one more file into `seen` (the files in order give collect()'s map). */
 function collectInto(seen: Map<string, Entry>, file: TranscriptFile): void {
   if (typeof file.text !== 'string') return
-  for (const raw of lines(file.text)) {
-    if (!raw.includes('"usage"') || !raw.includes('"assistant"')) continue
-    const row = parseLine(raw)
-    if (!isObj(row) || row.type !== 'assistant') continue
-    const message = isObj(row.message) ? row.message : {}
-    const usage = message.usage
-    const model = typeof message.model === 'string' ? message.model : ''
-    const stamp = row.timestamp
-    if (!isObj(usage) || !stamp || model.startsWith('<')) continue
-    const moment = parseIso(stamp, 'local')
-    if (moment === null) continue
-    const key = JSON.stringify([message.id ?? null, row.requestId ?? null])
-    const counts = usageOf(usage)
-    const held = seen.get(key)
-    if (!held) {
-      seen.set(key, { model, moment, isFast: usage.speed === 'fast', counts, file: file.rel })
-    } else {
-      for (const f of FIELDS) held.counts[f] = Math.max(held.counts[f], counts[f])
-    }
+  for (const raw of lines(file.text)) collectLine(seen, raw, file.rel)
+}
+
+/** collectInto() of one line of the file `rel`. */
+function collectLine(seen: Map<string, Entry>, raw: string, rel: string): void {
+  if (!raw.includes('"usage"') || !raw.includes('"assistant"')) return
+  const row = parseLine(raw)
+  if (!isObj(row) || row.type !== 'assistant') return
+  const message = isObj(row.message) ? row.message : {}
+  const usage = message.usage
+  const model = typeof message.model === 'string' ? message.model : ''
+  const stamp = row.timestamp
+  if (!isObj(usage) || !stamp || model.startsWith('<')) return
+  const moment = parseIso(stamp, 'local')
+  if (moment === null) return
+  const key = JSON.stringify([message.id ?? null, row.requestId ?? null])
+  const counts = usageOf(usage)
+  const held = seen.get(key)
+  if (!held) {
+    seen.set(key, { model, moment, isFast: usage.speed === 'fast', counts, file: rel })
+  } else {
+    for (const f of FIELDS) held.counts[f] = Math.max(held.counts[f], counts[f])
   }
 }
 
@@ -314,6 +379,21 @@ export function turnStart(row: Obj, marked: boolean): number | null {
   return typedBytes(text)
 }
 
+/** A main transcript's timestamped row as the turn count needs it, for either file format (turnStart). */
+type TurnRow = { moment: number; plain: number | null; marked: number | null; turnKey: string | null; rowKey: string; event: boolean }
+
+function turnRow(row: Obj, moment: number, rel: string, order: number): TurnRow {
+  const tp = isObj(row.turnPosition) ? row.turnPosition.turnIndex : undefined
+  return {
+    moment,
+    plain: turnStart(row, false),
+    marked: turnStart(row, true),
+    turnKey: tp !== undefined ? `${row.sessionId}:${tp}` : null,
+    rowKey: typeof row.uuid === 'string' ? row.uuid : `${rel}:${order}`,
+    event: turnEvent(row),
+  }
+}
+
 /** A row that counts as activity: every timestamped row of a transcript but a sidechain copy, a queue record and the
  * summary written when the person comes back (written after an idle spell, it would join it to the last turn). */
 function turnEvent(row: Obj): boolean {
@@ -421,6 +501,7 @@ export class Scanner {
   private readonly sessionRows = new Map<string, SessionRow>()
   private readonly raw: RawDispatch[] = []
   private readonly seenBlocks = new Set<string>()
+  private readonly compactionsSeen = new Set<string>()
   private readonly read = { files: 0, bytes: 0, main_bytes: 0, subagent_bytes: 0 }
   private readonly turnsSeen = new Set<string>()
   private readonly time: Record<string, { bytes: number; turns: number }> = {}
@@ -441,100 +522,142 @@ export class Scanner {
       this.unread.push({ rel: file.rel, size: sizeOf(file), subagent: place(file.rel)[2] })
       return
     }
-    collectInto(this.seen, file)
-    const [project, session, isSub] = place(file.rel)
-    const key = JSON.stringify([project, session])
-    const size = sizeOf(file)
-    this.read.files += 1
-    this.read.bytes += size
-    if (isSub) this.read.subagent_bytes += size
-    else this.read.main_bytes += size
+    const f = this.begin(file.rel, sizeOf(file))
+    for (const line of lines(file.text)) f.line(line)
+    f.end()
+  }
+
+  /**
+   * add() of a file too large to read whole (over READ_LIMIT): its lines as they come, one held at a time (linesOf).
+   * The facts are those add() gives for the same text. Nothing of the file counts until its last line is in: a
+   * stream that fails part way lists the file in unread, as a file that could not be read, and resolves false.
+   */
+  async addLines(file: { rel: string; size?: number }, source: AsyncIterable<string>): Promise<boolean> {
+    this.files += 1
+    const size = typeof file.size === 'number' && file.size >= 0 ? file.size : 0
+    const f = this.begin(file.rel, size)
+    try {
+      for await (const line of source) f.line(line)
+    } catch {
+      this.unread.push({ rel: file.rel, size, subagent: place(file.rel)[2] })
+      return false
+    }
+    f.end()
+    return true
+  }
+
+  /** One file's line-by-line pass: line() for each line in order, then end() adds what the file holds. Only the
+   * figures of its rows are kept (entries, times, turn candidates), never a line's text. */
+  private begin(rel: string, size: number): { line: (raw: string) => void; end: () => void } {
+    const [project, session, isSub] = place(rel)
+    const local = new Map<string, Entry>() // this file's entries, joined to `seen` at end()
+    const stamps: number[] = [] // a subagent transcript's timestamps (s): its active intervals (idleGapMs rule)
     const moments: number[] = []
-    const comps: [number | null, unknown][] = []
+    const rows: TurnRow[] = [] // a main transcript's timestamped rows, read as turns at end() (when `marked` is known)
+    const comps: [number | null, unknown, string | null][] = []
     const disp: [number | null, number, Obj][] = []
-    if (isSub) this.subIntervals(file.text)
-    const marked = !isSub && file.text.includes('"turnPosition"')
-    let turn: { skip: boolean } | null = null
-    const active: number[] = [] // this main transcript's event times (ms)
-    lines(file.text).forEach((line, order) => {
-      if (isSub && !line.includes('compact_boundary') && !line.includes('tool_use')) return
-      const row = parseLine(line)
+    let marked = false // the file is in the current format (a row anywhere names turnPosition)
+    let order = 0
+    const line = (raw: string): void => {
+      const at = order++
+      collectLine(local, raw, rel)
+      if (isSub) {
+        for (const m of raw.matchAll(/"timestamp":\s*"([^"]+)"/g)) {
+          const v = parseIso(m[1], 'local')
+          if (v !== null) stamps.push(v / 1000)
+        }
+      } else if (!marked && raw.includes('"turnPosition"')) marked = true
+      if (isSub && !raw.includes('compact_boundary') && !raw.includes('tool_use')) return
+      const row = parseLine(raw)
       if (!isObj(row)) return
       const moment = typeof row.timestamp === 'string' && row.timestamp ? parseIso(row.timestamp, 'local') : null
       if (moment !== null && !isSub) {
         moments.push(moment)
-        const typed = turnStart(row, marked)
-        if (typed !== null) {
-          const tp = isObj(row.turnPosition) ? row.turnPosition.turnIndex : undefined
-          const key = marked && tp !== undefined ? `${row.sessionId}:${tp}` : typeof row.uuid === 'string' ? row.uuid : `${file.rel}:${order}`
-          if (this.turnsSeen.has(key)) {
-            if (!turn || turn.skip) turn = { skip: true } // a copied turn (a resumed session): counted once
-          } else {
-            this.turnsSeen.add(key)
-            turn = { skip: false }
-            const d = (this.time[localDay(moment)] ??= { bytes: 0, turns: 0 })
-            d.bytes += typed
-            d.turns += 1
-            active.push(moment / 1000)
-          }
-        } else if (!turn?.skip && turnEvent(row)) active.push(moment / 1000)
+        rows.push(turnRow(row, moment, rel, at))
       }
       if (row.type === 'system' && row.subtype === 'compact_boundary') {
         const meta = row.compactMetadata
-        comps.push([moment, isObj(meta) ? meta.trigger : null])
+        comps.push([moment, isObj(meta) ? meta.trigger : null, typeof row.uuid === 'string' ? row.uuid : null])
       }
       if (row.type === 'assistant') {
         const content = isObj(row.message) ? row.message.content : null
         if (Array.isArray(content)) {
           for (const block of content) {
-            if (isObj(block) && block.type === 'tool_use' && DISPATCH_TOOLS.includes(block.name)) disp.push([moment, order, block])
+            if (isObj(block) && block.type === 'tool_use' && DISPATCH_TOOLS.includes(block.name)) disp.push([moment, at, block])
           }
         }
       }
-    })
-    if (active.length) this.intervals.push(...intervalsOf(active))
-    if (!isSub) {
-      let first: number | null = null
-      let last: number | null = null
-      for (const m of moments) {
-        if (first === null || m < first) first = m
-        if (last === null || m > last) last = m
+    }
+    const end = (): void => {
+      for (const [key, e] of local) {
+        const held = this.seen.get(key)
+        if (!held) this.seen.set(key, e)
+        else for (const f of FIELDS) held.counts[f] = Math.max(held.counts[f], e.counts[f])
       }
-      let minutes = 0
-      if (moments.length >= 2) minutes = pyRound(((last as number) - (first as number)) / 1e6 / 60, 1)
-      // responses are counted in finish(), once every file's entries are in
-      this.sessionRows.set(key, { session_id: session, project, month: first !== null ? localMonth(first) : null, minutes, responses: 0 })
-    }
-    for (const [moment, trigger] of comps) {
-      this.compactions.total += 1
-      const kind = trigger === 'manual' || trigger === 'auto' ? trigger : null
-      if (kind) this.compactions[kind] += 1
-      if (moment !== null) {
-        const daily = this.dayOf(localDay(moment))
-        daily.compactions += 1
-        if (kind === 'manual') daily.compactions_manual += 1
-        if (kind === 'auto') daily.compactions_auto += 1
+      const key = JSON.stringify([project, session])
+      this.read.files += 1
+      this.read.bytes += size
+      if (isSub) this.read.subagent_bytes += size
+      else this.read.main_bytes += size
+      if (isSub) this.intervals.push(...intervalsOf(stamps))
+      let turn: { skip: boolean } | null = null
+      const active: number[] = [] // this main transcript's event times (s)
+      for (const r of rows) {
+        const typed = marked ? r.marked : r.plain
+        if (typed !== null) {
+          const k = marked && r.turnKey !== null ? r.turnKey : r.rowKey
+          if (this.turnsSeen.has(k)) {
+            if (!turn || turn.skip) turn = { skip: true } // a copied turn (a resumed session): counted once
+          } else {
+            this.turnsSeen.add(k)
+            turn = { skip: false }
+            const d = (this.time[localDay(r.moment)] ??= { bytes: 0, turns: 0 })
+            d.bytes += typed
+            d.turns += 1
+            active.push(r.moment / 1000)
+          }
+        } else if (!turn?.skip && r.event) active.push(r.moment / 1000)
+      }
+      if (active.length) this.intervals.push(...intervalsOf(active))
+      if (!isSub) {
+        let first: number | null = null
+        let last: number | null = null
+        for (const m of moments) {
+          if (first === null || m < first) first = m
+          if (last === null || m > last) last = m
+        }
+        let minutes = 0
+        if (moments.length >= 2) minutes = pyRound(((last as number) - (first as number)) / 1e6 / 60, 1)
+        // responses are counted in finish(), once every file's entries are in
+        this.sessionRows.set(key, { session_id: session, project, month: first !== null ? localMonth(first) : null, minutes, responses: 0 })
+      }
+      for (const [moment, trigger, id] of comps) {
+        // the same row (uuid) again, as a resumed session's file copies the earlier rows: counted once, as turns are
+        if (id !== null) {
+          if (this.compactionsSeen.has(id)) continue
+          this.compactionsSeen.add(id)
+        }
+        this.compactions.total += 1
+        const kind = trigger === 'manual' || trigger === 'auto' ? trigger : null
+        if (kind) this.compactions[kind] += 1
+        if (moment !== null) {
+          const daily = this.dayOf(localDay(moment))
+          daily.compactions += 1
+          if (kind === 'manual') daily.compactions_manual += 1
+          if (kind === 'auto') daily.compactions_auto += 1
+        }
+      }
+      for (const [moment, at, block] of disp) {
+        if (block.id !== undefined && block.id !== null) {
+          const id = JSON.stringify(block.id)
+          if (this.seenBlocks.has(id)) continue
+          this.seenBlocks.add(id)
+        }
+        if (moment === null) continue
+        this.raw.push({ moment, rel, order: at, project, session, block })
       }
     }
-    for (const [moment, order, block] of disp) {
-      if (block.id !== undefined && block.id !== null) {
-        const id = JSON.stringify(block.id)
-        if (this.seenBlocks.has(id)) continue
-        this.seenBlocks.add(id)
-      }
-      if (moment === null) continue
-      this.raw.push({ moment, rel: file.rel, order, project, session, block })
-    }
-  }
-
-  /** A subagent transcript's active intervals: all its timestamps (idleGapMs rule). */
-  private subIntervals(text: string): void {
-    const at: number[] = []
-    for (const m of text.matchAll(/"timestamp":\s*"([^"]+)"/g)) {
-      const v = parseIso(m[1], 'local')
-      if (v !== null) at.push(v / 1000)
-    }
-    this.intervals.push(...intervalsOf(at))
+    return { line, end }
   }
 
   /** Figures of transcripts read elsewhere (the over-4-MiB scan): typed bytes and turns per day, and intervals (ms). */

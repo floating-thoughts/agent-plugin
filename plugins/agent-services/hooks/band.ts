@@ -1,6 +1,6 @@
 // The band above the prompt: one short line of what agent-services did for this customer, in
 // the board's and the status line's own facts and words, e.g.
-//   "agent-services saved you $3.10 in the last 7 days | today: 5 jobs on a cheaper model | latest: ... at 2:05 pm"
+//   "agent-services saved you $3.10 in the last 7 days | today: 5 subagents on cheaper models | latest: ... at 2:05 pm"
 //   (the parts joined by status.ts SEP, a middle dot, shown here as |)
 //
 // Decision (it replaced "hidden while signed out, paused or with nothing to show"): the band
@@ -207,8 +207,25 @@ export function setBandPending(n: unknown): void {
 /** The band's top line over the panel: "1 decision waiting for you", "3 decisions waiting for you". */
 export const pendingLine = (n: number): string => `${n} decision${n === 1 ? '' : 's'} waiting for you`
 
-/** The band's top-right word: online while the panel shows (signed in and reaching the service), else offline. */
-export const connLine = (online: boolean): string => `${NAME}: ${online ? 'online' : 'offline'}`
+// The band's top-right word per state: online while figures show (signed in and reaching the service); offline only
+// for offline mode and a server that cannot be reached; otherwise the state's own word, as the line under it says.
+export const CONN_WORDS: Readonly<Record<string, string>> = {
+  facts: 'online', wait: 'online', off: 'online', offline: 'offline', unreachable: 'offline',
+  signed_out: 'signed out', locked: 'locked', paused: 'paused', upgrade: 'update needed', starting: 'starting',
+}
+/** The band's top-right text for a state name (true: online); an unknown state reads as starting, like its line. */
+export const connLine = (state: unknown): string => `${NAME}: ${state === true ? 'online' : (typeof state === 'string' && CONN_WORDS[state]) || 'starting'}`
+
+/** The columns the bordered panel needs: each box's widest line plus its padding and border, and the gaps between. */
+export function panelWidth(panel: Panel): number {
+  const box = (c: Panel['columns'][number]): number => {
+    const n = Math.max(0, ...c.rows.map((r) => r.length))
+    let cells = 2 * Math.max(0, n - 1)
+    for (let k = 0; k < n; k++) cells += Math.max(1, ...c.rows.map((r) => (r[k] || ' ').length))
+    return Math.max(c.title.length, cells) + 4
+  }
+  return panel.columns.reduce((a, c) => a + box(c), 0) + 2 * Math.max(0, panel.columns.length - 1)
+}
 
 /** wiring.ts: the usage panel (panel.ts panelOf) shown under the band's line; a redraw when it changed. Never throws. */
 export function setBandPanel(panel: Panel | null): void {
@@ -236,8 +253,8 @@ export function installBand(on: any): void {
     const line = bandText(shown && setupOpen ? { ...shown, setup: setupOpen } : shown, e.props?.bodyColumns)
     const { Text, Box } = $.ui.resolve(e as any) as any
     const panel = bandPanel(shown)
-    const isOnline = isObj(shown) && ['facts', 'wait', 'off'].includes(String(shown.state)) // signed in, reaching the service
-    const topRow = (online: boolean) =>
+    const isOnline = isObj(shown) ? String(shown.state) : 'starting' // the state name: connLine picks its word
+    const topRow = (online: unknown) =>
       Box({
         key: 'top', flexDirection: 'row', justifyContent: 'space-between',
         children: [
@@ -250,7 +267,10 @@ export function installBand(on: any): void {
       return Box({ flexDirection: 'column', children: [topRow(isOnline), Text({ key: 'line', dimColor: true, children: line })] })
     }
     // the band leaves out the disclosure (panel.method): the status command and the board still show it
-    if (typeof Box !== 'function') return Text({ dimColor: true, children: [`${pendingLine(pendingShown)}${SEP}${connLine(true)}`, ...(setupOpen ? [line] : []), ...panelLines(panel).slice(0, -1)].join('\n') })
+    // plain lines too where the body is narrower than the four boxes, which neither shrink nor wrap
+    const cols = e.props?.bodyColumns
+    const narrow = typeof cols === 'number' && Number.isFinite(cols) && cols > 0 && cols < panelWidth(panel)
+    if (typeof Box !== 'function' || narrow) return Text({ dimColor: true, children: [`${pendingLine(pendingShown)}${SEP}${connLine(true)}`, ...(setupOpen ? [line] : []), ...panelLines(panel).slice(0, -1)].join('\n') })
     const column = (c: Panel['columns'][number], i: number) =>
       Box({
         key: String(i), flexDirection: 'column', borderStyle: 'round', borderDimColor: true, paddingX: 1, flexShrink: 0, flexGrow: 1, // the four boxes share the full width

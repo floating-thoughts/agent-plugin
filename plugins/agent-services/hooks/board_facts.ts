@@ -15,7 +15,9 @@
 //
 // collect() stays the port of the Python client (its parity tests); the page's data slot is BOARD_FIELDS.
 import { localDay } from './counters'
-import { DATA_FIELDS } from './render'
+import { DATA_FIELDS, savingsPart, weeks } from './render'
+import { ORG_ADMIN_TOTALS } from './org'
+import { cheaper } from './summary'
 import { COMMAND, COUNTED, fixed, shortDay } from './status'
 import { plusDays, pyRound, pySum } from './pyfmt'
 import { servedNumber, servedValue } from './rules'
@@ -88,7 +90,7 @@ export function kindOf(line: unknown): string | null {
   const route = typeof line.route === 'string' ? line.route : ''
   const ans = parse(line.response_text)
   if (route === '/router/decide' && ans && ans.decision === 'route') {
-    return ans.model === 'haiku' || ans.model === 'sonnet' ? 'cheaper' : 'model'
+    return cheaper(ans.model) ? 'cheaper' : 'model'
   }
   if (route === '/checkpoint/timing') return ans && ans.now === true ? 'cleanup' : null
   if (route === '/served/fetch') return 'tips'
@@ -101,7 +103,7 @@ const phrase = (kind: string, n: number): string | null => {
   return p ? (n === 1 ? p[0] : p[1].replace('{n}', String(n))) : null
 }
 
-/** "So far today: 3 jobs on a cheaper model, 1 memory cleanup." in the status line's words, or null. */
+/** "So far today: 3 subagents on cheaper models, 1 memory cleanup." in the status line's words, or null. */
 export function todaySummary(counts: unknown): string | null {
   const c = isObj(counts) ? counts : {}
   const parts = COUNTED.filter(([k]) => (num(c[k]) ?? 0) > 0).map(([k, one, many]) => `${c[k]} ${c[k] === 1 ? one : many}`)
@@ -145,14 +147,16 @@ function peerPct(report: unknown): number | null {
   return null
 }
 
-export type WeeklyOpts = { metricsOn?: boolean | null; inOrg?: boolean | null }
+export type WeeklyOpts = { metricsOn?: boolean | null; inOrg?: boolean | null; adminLine?: string | null }
 
 /**
  * The last WEEK_DAYS days (today included) against the WEEK_DAYS before, from the savings body's by_day rows (the
- * board's comparison uses the same window), the share saved, the best day, the lever most of it came from, the
- * peer figure of GET /report, and the plain lines that say it. inOrg true adds ADMIN_LINE.
+ * two sums are render.ts weeks(), which the board's comparison reads too), the share saved, the best day, the lever
+ * most of it came from, the peer figure of GET /report, and the plain lines that say it. adminLine (see
+ * adminLine()) is added as the last line; inOrg true without it adds ADMIN_LINE.
  */
 export function weeklyOf(savings: unknown, report: unknown, today: string, opts: WeeklyOpts = {}): Obj {
+  const adminText = typeof opts.adminLine === 'string' && opts.adminLine ? opts.adminLine : opts.inOrg === true ? ADMIN_LINE : null
   const out: Obj = {
     days: WEEK_DAYS,
     this_week_usd: null,
@@ -165,23 +169,20 @@ export function weeklyOf(savings: unknown, report: unknown, today: string, opts:
     since: null,
     your_pct: null,
     peer_pct: peerPct(report),
-    admin_sees: opts.inOrg === true ? true : null,
+    admin_sees: adminText ? true : null,
     lines: [] as string[],
   }
-  const s = isObj(savings) && !('error' in savings) ? savings : null
-  const rows = s && Array.isArray(s.by_day) ? s.by_day.filter((r: unknown) => isObj(r) && typeof r.day === 'string') : []
+  const sav = savingsPart(savings)
   const cut1 = plusDays(today, -(WEEK_DAYS - 1))
-  const cut2 = plusDays(today, -(2 * WEEK_DAYS - 1))
-  const week = rows.filter((r: Obj) => cut1 <= r.day && r.day <= today)
-  const before = rows.filter((r: Obj) => cut2 <= r.day && r.day < cut1)
-  if (s && num(s.usd) !== null) {
-    out.total_usd = num(s.usd)
-    out.since = typeof s.first_day === 'string' ? s.first_day : null
-    out.your_pct = num(s.pct)
+  const week = sav ? sav.by_day.filter((r: Obj) => cut1 <= r.day && r.day <= today) : []
+  if (sav) {
+    out.total_usd = sav.usd
+    out.since = sav.first_day
+    out.your_pct = sav.pct
   }
+  ;[out.this_week_usd, out.last_week_usd] = weeks(sav, today) // 0, not null, when there are rows but none this week
   const min = minUsd()
   if (week.length) {
-    out.this_week_usd = pyRound(pySum(week.map((r: Obj) => num(r.usd) ?? 0)), 6)
     out.days_saved = week.filter((r: Obj) => (num(r.usd) ?? 0) >= min).length
     const best = week.reduce((a: Obj | null, r: Obj) => ((num(r.usd) ?? 0) > (a ? num(a.usd) ?? 0 : 0) ? r : a), null)
     if (best && (num(best.usd) ?? 0) >= min) out.best_day = { day: best.day, usd: num(best.usd) }
@@ -192,19 +193,19 @@ export function weeklyOf(savings: unknown, report: unknown, today: string, opts:
     }
     out.top_lever = top ? top[0] : null
   }
-  if (before.length) out.last_week_usd = pyRound(pySum(before.map((r: Obj) => num(r.usd) ?? 0)), 6)
   if (out.this_week_usd !== null && out.last_week_usd !== null) out.change_usd = pyRound(out.this_week_usd - out.last_week_usd, 6)
-  out.lines = weeklyLines(out, opts.metricsOn)
+  out.lines = weeklyLines(out, opts.metricsOn, adminText ?? ADMIN_LINE)
   return out
 }
 
-/** The plain lines of a weekly part (the board shows them; the band can take the first). */
-export function weeklyLines(w: Obj, metricsOn?: boolean | null): string[] {
+/** The plain lines of a weekly part (the board shows them; the band can take the first). WAIT_LINE only before any
+ * day was measured; with the savings record off and no measured day in the window, OFF_LINE. */
+export function weeklyLines(w: Obj, metricsOn?: boolean | null, adminText: string = ADMIN_LINE): string[] {
   const lines: string[] = []
   const usd = num(w.this_week_usd)
   const min = minUsd()
   const levers = leverWords()
-  if (metricsOn === false && usd === null) lines.push(OFF_LINE)
+  if (metricsOn === false && (usd === null || num(w.days_saved) === null)) lines.push(OFF_LINE)
   else if (usd === null) lines.push(WAIT_LINE)
   else {
     if (usd >= min) lines.push(`In the last ${WEEK_DAYS} days agent-services saved you ${money(usd)}.`)
@@ -222,7 +223,7 @@ export function weeklyLines(w: Obj, metricsOn?: boolean | null): string[] {
   if (peer !== null && yours !== null) {
     lines.push(`You save ${Math.round(yours * 100)}% of your usage cost; similar users save about ${Math.round(peer)}%.`)
   }
-  if (w.admin_sees === true) lines.push(ADMIN_LINE)
+  if (w.admin_sees === true) lines.push(adminText)
   return lines
 }
 
@@ -288,6 +289,17 @@ const safe = <T>(f: () => T): T | null => {
   }
 }
 
+/**
+ * What a member's own board says the company admin sees, or null: no company, or a company known to have no admin
+ * (has_admin false, nobody opens a company board). An admin who sees totals only gets org.ts's totals sentence.
+ */
+export function adminLine(status: unknown): string | null {
+  if (inOrg(status) !== true) return null
+  const org = isObj(status) && isObj(status.org) ? status.org : null
+  if (org && org.has_admin === false) return null
+  return org && org.view === 'totals' ? ORG_ADMIN_TOTALS : ADMIN_LINE
+}
+
 /** collect()'s answer with timeline and weekly added (exactly BOARD_FIELDS); a part that fails is null. */
 export function boardData(collected: Obj, input: BoardInput): Obj {
   const today = typeof collected?.today === 'string' ? collected.today : localDay(Date.now())
@@ -296,7 +308,7 @@ export function boardData(collected: Obj, input: BoardInput): Obj {
     ...collected,
     timeline: safe(() => timelineOf(input.outboxLines, input.todayCounts, today)),
     weekly: safe(() => {
-      const w = weeklyOf(input.savings, input.report, today, { metricsOn, inOrg: inOrg(input.status) })
+      const w = weeklyOf(input.savings, input.report, today, { metricsOn, adminLine: adminLine(input.status) })
       return Array.isArray(input.panel) && input.panel.length ? { ...w, usage_lines: input.panel } : w
     }),
   }

@@ -266,6 +266,33 @@ export function toolboxSummary(text: string): string | null {
   })
 }
 
+/** What the request log keeps of a rule-tables answer: the version, the scope and the table names, never the tables
+ * (they stay in memory only). */
+export function rulesSummary(text: string): string | null {
+  let b: unknown
+  try {
+    b = JSON.parse(text)
+  } catch {
+    return null
+  }
+  if (!isObj(b)) return null
+  return JSON.stringify({ version: b.version ?? null, scope: b.scope ?? null, tables: isObj(b.tables) ? Object.keys(b.tables).sort() : null })
+}
+
+/** What the request log keeps of a company summary: every field but the member list (emails) and the mail address,
+ * which become counts and a flag. */
+export function orgSummaryLog(text: string): string | null {
+  let b: unknown
+  try {
+    b = JSON.parse(text)
+  } catch {
+    return null
+  }
+  if (!isObj(b)) return null
+  const { people, mail_to, ...rest } = b
+  return JSON.stringify({ ...rest, people: Array.isArray(people) ? people.length : null, mail_to: mail_to ? 'set' : null })
+}
+
 export function redactFields(text: string | null, fields: readonly string[] | null | undefined): string | null {
   if (text == null || !fields || !fields.length) return text
   let o: unknown

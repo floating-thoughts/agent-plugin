@@ -11,7 +11,7 @@
 // token estimate removed and the number of runs per model, which the daily upload carries as savings.trim.
 import type { EngineInterface } from 'claude-code'
 import { addTrim, estimateTokens, localDay, readDay } from './counters'
-import { rulesTable, servedNumber } from './rules'
+import { riskyPattern, rulesTable, servedNumber } from './rules'
 import { engineStore } from './store'
 
 type Obj = Record<string, any>
@@ -41,7 +41,7 @@ function table(): Table | null {
     const keep: RegExp[] = []
     for (const s of src.keep_files) {
       try {
-        if (typeof s === 'string') keep.push(new RegExp(s, 'i'))
+        if (typeof s === 'string' && !riskyPattern(s)) keep.push(new RegExp(s, 'i'))
       } catch {
         // a bad pattern keeps nothing
       }

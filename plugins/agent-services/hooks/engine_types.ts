@@ -19,7 +19,7 @@ export type ServedSelect = { jit?: boolean; event?: string }
 
 // The shell gate as the Python client's gate_state(). Reasons: null (open), 'unknown' (no hello yet), 'login'
 // (no valid sign-in, or a 401 that did not recover), 'locked' (a 423 that did not recover), 'upgrade',
-// 'offline', 'unavailable', 'unverified'. 'login' and 'locked' are the auth-fail state.
+// 'offline', 'unavailable', 'unverified', 'clock' (this computer's clock is off). 'login' and 'locked' are the auth-fail state.
 export type GateState = { open: boolean; reason: string | null; minShell: string | null; retryAt?: number | null } // retryAt: unix seconds a bad_envelope stop ends
 
 // What the core needs from the svc channel. svc.ts implements it; the tests use a fake.

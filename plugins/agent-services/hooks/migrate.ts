@@ -2,7 +2,8 @@
 // of this release, after the tools are registered. Harness-neutral: the file access, the loopback fetch, the store,
 // the clock and the log line are passed in; nothing here touches `$`.
 //
-// In order, each step logged in <data dir>/MIGRATED (written last, so a session cut off half way runs it again):
+// In order, each step logged in <data dir>/MIGRATED and the store's MIGRATED_KEY (written last, so a session cut off
+// half way runs it again; either one there means done):
 // 1. The old daemon. If <data dir>/services/connector.json names one and it answers with its daemon proof (an
 //    HMAC under the local token: an answer without it is never the daemon), it is asked to sign out
 //    (POST /local/logout: it revokes its own server session and clears its OS key store entries) and then to stop
@@ -38,7 +39,11 @@ type Obj = Record<string, any>
 export type LoopbackAnswer = { status: number; headers?: Record<string, string>; text: string }
 export type MigrateDeps = {
   dataDir: string
-  fs: { read(path: string): Promise<string>; write(path: string, text: string): Promise<void> }
+  fs: {
+    read(path: string): Promise<string>
+    write(path: string, text: string): Promise<void>
+    list?(path: string): Promise<readonly { name: string; size?: number }[]> // tells an unreadable file from a missing one
+  }
   fetch: (url: string, init: { method: string; headers: Record<string, string>; body?: string }) => Promise<LoopbackAnswer>
   store: KV
   now: () => number // ms since the epoch
@@ -242,7 +247,17 @@ async function stopDaemon(d: MigrateDeps, dir: string): Promise<{ daemon: Daemon
 
 async function importCounters(d: MigrateDeps, dir: string): Promise<CounterStep> {
   const text = await readOr(d.fs, `${dir}/services/savings-events.jsonl`)
-  if (text === null) return 'none' // missing, or over the 4 MiB the engine reads
+  if (text === null) {
+    // missing, or there but unread: the engine refuses files over 4 MiB
+    let there: { name: string; size?: number } | undefined
+    try {
+      there = d.fs.list ? (await d.fs.list(`${dir}/services`)).find((e) => e.name === 'savings-events.jsonl') : undefined
+    } catch {
+      there = undefined
+    }
+    if (!there) return 'none'
+    return typeof there.size === 'number' && there.size <= EVENTS_LIMIT ? 'failed' : 'too_large'
+  }
   if (enc.encode(text).length > EVENTS_LIMIT) return 'too_large'
   try {
     const events = readEvents(text)
@@ -261,6 +276,8 @@ export async function migrate(d: MigrateDeps): Promise<Migration | null> {
   try {
     const dir = d.dataDir.replace(/[\\/]+$/, '')
     if ((await readOr(d.fs, `${dir}/${MIGRATED_FILE}`)) !== null) return null
+    // the store's copy counts too: a MIGRATED write that failed never runs the move (and its note) again
+    if (await Promise.resolve().then(() => d.store.get(MIGRATED_KEY)).then((v) => v != null, () => false)) return null
     const { daemon, logout } = await stopDaemon(d, dir)
     const counters = await importCounters(d, dir)
     // No daemon answered although the old plugin ran here: its server session may stay valid (max_devices above 1).

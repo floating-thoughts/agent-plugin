@@ -2,7 +2,8 @@
 
 This note ships with the plugin. `/agent-services info data` shows it, and so does the setup tool's `info data`
 command. The setup tool changes a choice (`sharing off`, `methods on` and the like) only in the main conversation of a
-session you are at, to apply your answer; elsewhere it refuses and changes nothing. It can never turn the savings
+session you are at, to apply your answer; elsewhere it refuses and changes nothing. When the model asks it for
+`methods on` or `methods accept`, nothing changes until you confirm in the plugin's own dialog. It can never turn the savings
 upload on: only you do, in the dialog of `/agent-services setup` or by typing `/agent-services sharing
 on_backfill|on_from_now` (`/agent-services sharing on` asks you the same three-option question).
 `/agent-services info hooks` lists every hook the plugin registers. `/agent-services info log` shows the request log on
@@ -25,8 +26,9 @@ disk every few seconds, so a request made in the last seconds before Claude Code
 
 ## 1. What each request sends, and when
 
-Every request goes to one fixed service address built into the plugin. Except for a plain health check, every
-request the plugin sends is sealed end to end (X25519 and AES-256-GCM) inside the TLS connection. (The service
+Every request to the service goes to one fixed address built into the plugin, and every one of them is sealed end
+to end (X25519 and AES-256-GCM) inside the TLS connection. (The only other address the plugin ever calls is this
+computer itself, once, after an upgrade from an older version: see "On this computer only" below.) (The service
 itself refuses an unsealed request only when it comes through its network edge, which is the way the plugin's
 requests come.) Every answer must carry the
 service's Ed25519 signature; an answer without one is not used. The network edge in front of the service sees
@@ -47,8 +49,8 @@ Claude Code); once you passed it, the plugin sends the check's one-time token wi
 |---|---|
 | Each session start, and when the sign-in check is due | the plugin version and the contract version |
 | 7 days before the sign-in expires | a hash of the next token |
-| Every subagent start (forks and teammates are skipped; nothing while `routing off`) | at `routing strict` only, the flag strict (so the service refuses a subagent whose description does not start with a task type word); the first word of the task description (whitespace-separated, at most 32 characters; the rest of the description is never sent), its length in characters, the subagent type (at most 64 characters), the requested model and effort, the harness, the dispatch number in this session, a hashed project id (an HMAC of the project folder with a key kept only on this computer, 16 hex digits), a random per-session id, the main session's model id (so the subagent never runs on a larger model), and yes or no for whether your latest message asked for a review (decided on this computer; your message is never sent) |
-| After every turn of the main agent | counters only: context use in percent and in tokens, turns, tool calls, finished todos, commits, minutes, and the per-session id. Except at methods level `off`, also the counts of that one turn that are not zero (for the turn advice): Read calls, Grep and Glob calls, web calls (WebFetch, WebSearch), the longest run of Read, Grep or Glob calls without an edit in between, the largest Bash or PowerShell result and the largest Read result in thousands of characters, refused tool calls, how often the most repeated failure of the turn has happened in this session (the last error lines of a failed call's result are compared on this computer as a salted hash kept in memory only; neither the lines nor the hash are sent), how many steps in `.agent/steps.json` are ready to start (only when that list changed; the step ids are not sent), subagents dispatched, the longest foreground Bash, PowerShell or subagent call in seconds, and which advice cases the service sent earlier in this session, how many turns ago and how often. No tool name, input, output, path or text is sent; a turn with nothing to count sends none of these |
+| Every subagent start (forks and teammates are skipped; nothing while `routing off`) | at `routing strict` only, the flag strict (so the service refuses a subagent whose description does not start with a task type word); the first word of the task description (whitespace-separated, at most 32 characters; the rest of the description is never sent), its length in characters, the subagent type (at most 64 characters), the requested model and effort, the harness, the dispatch number in this session, a hashed project id (an HMAC of the project folder with a key kept only on this computer, 16 hex digits), a random per-session id, the main session's model id (so the subagent never runs on a larger model), and yes or no for whether your latest message asked for a review (decided on this computer; your message is never sent). When the model asks for the same advice itself through the plugin's `router_advice` tool, the same kind of request is sent, and it may add `scope`: the shape of the planned work as counts and flags only (expected files, modules and sessions, the kind of work from a fixed list, and yes or no for: in git, requirements clear, testable, unfamiliar codebase; no text) |
+| After every turn of the main agent | counters only: context use in percent and in tokens, turns, tool calls, finished todos, commits, minutes, and the per-session id. Except at methods level `off`, also the counts of that one turn that are not zero (for the turn advice): Read calls, Grep and Glob calls, web calls (WebFetch, WebSearch), the longest run of Read, Grep or Glob calls without an edit in between, the largest Bash or PowerShell result and the largest Read result in thousands of characters, refused tool calls, how often the most repeated failure of the turn has happened in this session (the last error lines of a failed call's result are compared on this computer as a salted hash kept in memory only; neither the lines nor the hash are sent), how many steps in `.agent/steps.json` are ready to start (only when that list changed; the step ids are not sent), subagents dispatched, the longest foreground Bash, PowerShell or subagent call in seconds, and which advice cases the service sent earlier in this session, how many turns ago and how often. No tool name, input, output, path or text is sent; a turn with nothing to count sends none of these. When the model calls the plugin's `checkpoint_advice` tool, the same counters are sent once more (the figures the model gave, the plugin's own for those it left out) and, when the model names one, the work event: one word from a fixed list (`module_done`, `topic_switch`, `milestone`, `user_request`) |
 | The first foreground Bash or PowerShell call of the main agent with a given command head (except at methods level `off`; not a subagent's call, not one run in the background), at most once per head in a session | the per-session id and the command head: the program's name only (path and extension removed; for `python -m <module>` the module), and only when it is on the public list of common developer commands in the plugin (records.ts KNOWN_HEADS); any other command sends nothing. The arguments, the rest of the command line, paths, the project and run durations are not sent (the project id and the durations go as empty). The plugin waits at most 1 second for the answer; without one it goes on as if none came |
 | Session start (also a resumed session), the first prompt after a project's `agent-state.md` changes between planning and `phase: running`, and after `/clear` or a compaction, only at methods level `suggest` (the default) | the per-session id, the role `auto`, the work phase, the version pinned, the channel and the flag `jit` (this plugin takes the just-in-time items separately, see below) (to fetch the working methods; the full text goes to the model once per session and again only after `/clear`, a compaction, a phase change or a new served version) |
 | Session start, only at methods level `on` (your CLAUDE.md has the agent-services section) | the same, once for each of the six phases |
@@ -64,7 +66,8 @@ The **daily usage summary** holds: the day and the plugin version; per model, in
 and the cost; per task type (the plugin sends a word from a fixed list, or `other`; the service itself accepts any
 short word), model and hashed project, a count; session counts
 by kind and harness; the savings figures (token counts, compaction sizes, file-read sizes, random ids for
-compactions); and the day's time figures, numbers only: how many bytes you typed in your own prompts, the seconds
+compactions and, for each model request after a compaction, its model and its context size in tokens, or 0 where the
+size does not change the result); and the day's time figures, numbers only: how many bytes you typed in your own prompts, the seconds
 when at least one agent was working on this computer, the same seconds added up over every session and subagent,
 and the number of turns. It holds no prompt text, file contents, file paths or session ids. `/agent-services sharing preview`
 shows exactly what one upload sends.
@@ -73,8 +76,22 @@ shows exactly what one upload sends.
 summary, marked as a time-only refresh: the service changes only the time figures of a day it already holds, and
 stores nothing for a day it does not); the weekly-email switch (`sharing mail on|off`, `sharing on_backfill|on_from_now|off|not_now`); the
 company-email switch (company admins); `company` for a member of a company account who is not its admin (nothing but the signed request: the service answers only your own row of the admin's board, the week and the company settings that apply to you, and stores nothing new); and the one-time savings estimate (`estimate send`, only exactly what
-`estimate preview` showed you: token and cost totals per model, dispatch counts per task type from a fixed list,
-compaction counts and a session-length histogram).
+`estimate preview` showed you: the first and the last day of the history it covers, token and cost totals per
+model, dispatch counts per task type from a fixed list, compaction counts, the number of sessions, their total
+minutes and a session-length histogram).
+
+**On this computer only:** the first session after an upgrade from a version that ran a local helper program
+(the older Python core) reads `~/.agent-services/services/connector.json`, where that program left its port and
+its local token. Only when the file is there, the plugin sends two requests to `127.0.0.1` on that port, each with
+that token: one asks the old program to sign out (it then ends its own sign-in on the service and clears its
+entries in the operating system's key store), the other asks it to stop. An answer is used only when it carries the
+old program's proof (an HMAC under the same token). The old program gives that proof only to a request that carries
+the token, so the token is sent before the answer can be checked; it is a random value the old program made when it
+started, and it is good for nothing but that program's own local routes. No process is looked up or killed, and
+when nothing answers nothing else is tried. The same step reads `~/.agent-services/services/savings-events.jsonl`
+once (when it is under 4 MiB) and adds its counts to this plugin's day counters. What was done is written to
+`~/.agent-services/MIGRATED` and to the plugin store; the old files stay where they are. It runs once per computer,
+signed in or not.
 
 **Not our service:** the update check runs `claude plugin list --json` and `claude plugin marketplace update
 agent-plugin` at most once an hour on this computer (a check that fails counts too), which contact the plugin
@@ -104,8 +121,9 @@ trimmed, and the board leaves out its timeline items and the line naming where m
 
 What the engines do on this computer, with the tables:
 
-- Command guard (Bash and PowerShell): a search or recursive listing of a whole drive or the home folder and a
-  `cat >` with no input are refused; a git command that takes every changed file is refused while other agents are
+- Command guard (Bash and PowerShell): a `find`, `grep -r`, `rg` or `ls -R`, or a PowerShell `Get-ChildItem -Recurse`
+  (`gci`, `dir`, `ls`), whose path argument is a whole drive or the home folder (not one reached through an earlier
+  `cd`), and a `cat >` with no input are refused; a git command that takes every changed file is refused while other agents are
   running. Browser tools and WebFetch are refused on webmail sites and on a tab seen showing one. When a main turn
   ends on a promise of more of its own work with nothing running to wake it, it is sent back once. On accounts whose
   served rules turn it on (not product accounts), the main conversation's subagents start in the background.
@@ -124,7 +142,8 @@ What the engines do on this computer, with the tables:
   change that file. A subagent whose task names a step with `[step:ID]` waits until that step's dependencies in
   `.agent/steps.json` are done (`[override: reason]` lets it start). A subagent report longer than the served cap is
   saved whole in a file under the plugin's data folder (`agent-reports/<session>/`), and the conversation gets its
-  opening and the file's path. Where the served rules include a weekly usage line, no new subagent starts once the
+  opening and the file's path. The plugin never deletes these files on its own: they stay until you delete them
+  (`/agent-services remove` empties them with the rest of the data folder). Where the served rules include a weekly usage line, no new subagent starts once the
   weekly limit is past it; the line can depend on your subscription plan, which the plugin reads from the plan fields
   of `~/.claude.json` (the rate-limit tiers, the plan name and the organization type; they are not sent). A message
   that is only the word "override", sent once the line is reached, lets subagents start until the weekly reset.
@@ -211,11 +230,11 @@ fetched, never another member's. For the admin, the same command still shows the
 |---|---|
 | Claude Code's plugin store, a JSON file in your Claude Code folder (`~/.claude`) | the sign-in credential in plain text (the token, the next token during a rotation, the device key), plus account id, device id, plan, your choices (the savings record, the autonomy choice and the methods version you were last told about, each kept for each account that signed in here, and the methods level and the routing level) and switches, a local key for the project hash, and day counters. Any other plugin and any program running as you can read it; a copy works as your sign-in until the next rotation or sign-out. |
 | `~/.agent-services/services/device.json` | this computer's device id (`dev_` and 16 hex digits) as a small JSON file. A reinstall of the plugin keeps it, so the service keeps one id for this computer (its usage rows are not counted twice); the plugin store keeps a copy. The device key is not in this file. The file is not a sign-in: it works only with the sign-in token and the device key, which are in the plugin store. `/agent-services remove` empties it, so a reinstall after a remove gets a new id. |
-| `~/.agent-services/services/outbox/<day>-<session>.jsonl` | the request log: every request as sent (secrets such as the code and the token blanked) and its answer, previews, every call the model made to this plugin's tools with its full arguments (for one, a whole subagent description given to `router_advice`), and savings-page publish attempts. Kept 90 days, at most 2 MiB a file. |
+| `~/.agent-services/services/outbox/<day>-<session>.jsonl` | the request log: every request as sent (secrets such as the code and the token blanked) and its answer, previews, every call the model made to this plugin's tools with its full arguments (for one, a whole subagent description given to `router_advice`), and savings-page publish attempts. Of a rule-tables answer only the version, the scope and the table names are kept, of a company summary every field but the member list and the mail address (they become counts), and the browser check token of a sign-in is blanked. Kept 90 days, at most 2 MiB a file; an old file is emptied, not deleted (Claude Code gives plugins no way to delete a file), so empty files remain. The log of the version before the migration (`services/outbox.jsonl`, no longer written) has its sign-in codes and token hashes blanked and is emptied once it is 90 days old. |
 | `~/.agent-services/dashboard/`, `~/.agent-services/boss/`, `~/.agent-services/services/*.json` | your savings page (a company admin's board, with member emails in the per-member view; the admin's computer empties the board page and deletes its cached company summary from the plugin store after sign-out, when the account is no longer the admin, and once the summary is more than 30 minutes old, checked when the board is refreshed after a turn and about every minute while Claude Code runs) and their publish state (`dashboard.json`, `boss.json`), and for each board the page format last published and the version of its figures document (`dashboard-live.json`, `boss-live.json`) |
 | `~/.agent-services/methods.md`, `methods.approved.md`, `methods.pending.md` | the working-methods text |
 | `~/.agent-services/methods.seen.md`, `methods.previous.md` | the served working-methods text of the version last seen and of the one before it, so `/agent-services methods diff` can show what changed |
-| Claude Code's plugin store (see above), keys `checkpoint_counts`, `terms_accepted`, `redline_override`, `login_check` | checkpoint counters per hashed session id; the browser check token the service gave for a sign-in under signs of abuse (with the email, 10 minutes); the terms version you accepted at sign-in (sent with the code, with "business use, 18 or older"); the weekly reset until which you let your agent start subagents past the usage line |
+| Claude Code's plugin store (see above), keys `checkpoint_counts`, `terms_accepted`, `redline_override`, `login_check`, `clock_off` | checkpoint counters per hashed session id; the browser check token the service gave for a sign-in under signs of abuse (with the email, 10 minutes); the terms version you accepted at sign-in (sent with the code, with "business use, 18 or older"); the weekly reset until which you let your agent start subagents past the usage line; the server's time and this computer's when a signed answer showed this computer's clock more than 5 minutes off (requests then pause for up to 30 minutes, or until the clock is right) |
 | `~/.agent-services/services/asked.json` | when a setup question was last asked, by any session (an unanswered question waits 7 days) |
 | `plugin-update.json` (in Claude Code's data folder for this plugin, else `~/.agent-services/services/`) | the update check's state |
 | `~/.agent-services/MIGRATED` | what the one-time move from an older version did |
@@ -252,6 +271,15 @@ text of your messages (only to see whether one asks for a review), and the marke
   figures of a day go with that day's daily summary only while the savings record is on. Without the file, on a
   surface where the plugin cannot run programs, or when the tool fails, times out or answers anything else, the
   plugin's own scan is used as before. Removing the file stops it.
+
+- Large transcripts: a transcript file over 4 MiB is not read in one piece. When the daily summary, the time figures
+  or `sharing preview` are built (not at the usage panel's refresh), the plugin starts a fixed program that copies the
+  file to it line by line: `cat <file>` on macOS and Linux; on Windows `powershell.exe` with a fixed script that opens
+  the file read-only, the file's path passed in the `AGENT_SVC_COPY` environment variable (no shell, the path never
+  becomes part of a command). The same per-day counts are taken from it as from a smaller file, so the daily summary
+  now covers long sessions too; nothing else is read and nothing more is sent. A file that could not be read is left
+  out, and `sharing preview` says which usage is missing. A summary larger than 64 KiB is shortened (per-task rows and
+  the tail of long step lists go first), never skipped.
 
 - The checkpoint tool (`checkpoint`: milestone, keep, next), registered only when no other plugin in the session has a
   tool named `checkpoint`. After the reply in which the model called it, the plugin compacts the conversation keeping
@@ -364,7 +392,10 @@ says how many wait.
 `/agent-services remove` signs out (the service ends the sign-in), takes the agent-services section out of your
 CLAUDE.md (with the same checks as `methods off`), deletes every value in the plugin store (the sign-in credential
 included), and empties every file in `~/.agent-services` and in the plugin's data folder. Claude Code gives plugins
-no way to delete a file, so the files are left empty and you can delete the folders yourself. It leaves one file,
+no way to delete a file, so the files are left empty and you can delete the folders yourself. Up to 5000 files are
+emptied in one run, the request log first, newest first; the answer says how many were left as they were
+(delete the folders yourself for those). While offline mode is on it changes nothing and says so, because the
+sign-in could not be ended on the server. It leaves one file,
 `~/.agent-services/REMOVED`: other open Claude Code sessions see it within a few seconds and stop too (close them
 before you uninstall). It does not delete your private savings page on claude.ai or what the service keeps for your
 account. The setup tool the model can call cannot run it; you type it. It then prints the uninstall command.

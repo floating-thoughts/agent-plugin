@@ -21,6 +21,11 @@ export const SECRET_RES: readonly (readonly [RegExp, boolean])[] = [
   [new RegExp(EDGE + 'xox[abprs]-[A-Za-z0-9-]{10,}', 'gu'), false],
   [new RegExp(EDGE + 'AKIA[0-9A-Z]{16}(?![A-Za-z0-9_])', 'gu'), false],
   [new RegExp(EDGE + 'AIza[0-9A-Za-z_-]{35}(?![A-Za-z0-9_])', 'gu'), false],
+  // not in the retired Python client: Stripe secret, restricted and webhook keys, and JWTs (three base64url parts,
+  // the first two JSON objects, so each starts with eyJ). A bare AWS secret key (40 base64 characters) is left out:
+  // it cannot be told from a git commit hash or other ids; its labelled form is caught by the key= rule below.
+  [new RegExp(EDGE + '(?:(?:sk|rk)_(?:live|test)_[A-Za-z0-9]{16,}|whsec_[A-Za-z0-9+/=]{24,})', 'gu'), false],
+  [new RegExp(EDGE + 'eyJ[A-Za-z0-9_-]{8,}\\.eyJ[A-Za-z0-9_-]{8,}\\.[A-Za-z0-9_-]{8,}', 'gu'), false],
   [/(Authorization:\s*(?:Bearer|Basic)\s+)[A-Za-z0-9._\-+/=]{8,}/giu, true],
   [/((?:api[_-]?key|secret|token|passw(?:or)?d|access[_-]?key)\s*[:=]\s*['"]?)([A-Za-z0-9_\-/+=.]{12,})/giu, true],
   // command-line flags: --password x, --token=x; -p is too ambiguous to touch

@@ -26,11 +26,15 @@
 // service's verdict are injected (register.ts wires them).
 import { normPath } from './paths'
 import { canAsk } from './choice'
-import { levelNow, methodsActive, queueNotice, seenVersion } from './methods'
+import { LEVEL_KEY, levelNow, methodsActive, methodsWired, queueNotice, seenVersion } from './methods'
+import type { Level } from './methods'
+import { TRUST_KEY } from './trust'
 import { autonomyNote, readAutonomy } from './autonomy'
 import { askVerdict, knownVerdict, PLAN_STEPS_SENT_MAX } from './gate_verdict'
 import type { AskGate, GateLevel, GateState } from './gate_verdict'
 import { ToolboxPush } from './toolbox'
+import { runLimitsAgain } from './run_limits'
+import { watchAgain } from './watch'
 export { methodsStart } from './methods' // register.ts wires it beside pushStart
 export { noteAutonomy } from './autonomy' // register.ts tool.call, after the call ran
 
@@ -70,7 +74,8 @@ export function parseState(text: string | null): PhaseState {
     }
     if (h) continue
     if (section === 'goal' && line.trim()) goal.push(line.trim())
-    if (section === 'plan' && /^\s*- +\S/.test(line)) plan.push(line.trim().slice(2).trim())
+    const item = section === 'plan' ? /^\s*(?:[-*+]|\d{1,3}[.)]) +(\S.*)$/.exec(line) : null // "- ", "* ", "+ ", "1. ", "1) "
+    if (item) plan.push(item[1]!.trim())
   }
   return { exists: true, phase, goal: goal.join('\n'), plan }
 }
@@ -577,11 +582,25 @@ export async function pushStart(r: PushRuntime): Promise<void> {
 
 let onNoteSent = false // level on: the autonomy note was sent in this process (pushLessons)
 
+// The level for a push. Before methodsStart wired its reader (the first prompt can come first), the stored answer is
+// read here without the CLAUDE.md check: a stored "on" then counts as "on", so no served text goes out until the level
+// is known (the push waits for a later prompt).
+async function pushLevel(r: NonNullable<PushRuntime>): Promise<Level> {
+  if (methodsWired() || !r.store) return levelNow()
+  const v = (await r.store.get(LEVEL_KEY)) as { level?: unknown } | null | undefined
+  const l = v && typeof v === 'object' ? v.level : undefined
+  if (l === 'off' || l === 'on') return l
+  if (l === 'suggest') return 'suggest'
+  const t = (await r.store.get(TRUST_KEY)) as { answer?: unknown } | null | undefined // the 0.5.0 answer seeds the level
+  const a = t && typeof t === 'object' ? t.answer : undefined
+  return a === 'on' || a === 'off' ? a : 'suggest'
+}
+
 /** register.ts, a /clear or a compaction of the main agent (agent null): push the current phase's items again on
  * the next prompt. Never throws. */
 export function pushAgain(r: PushRuntime, agent: unknown): void {
   try {
-    if (r && !agent) { lessonPush(r).again(); toolboxPush(r)?.again(); onNoteSent = false }
+    if (r && !agent) { lessonPush(r).again(); toolboxPush(r)?.again(); onNoteSent = false; runLimitsAgain(); watchAgain() }
   } catch {
     // nothing to push
   }
@@ -595,12 +614,14 @@ export async function pushLessons(rt: Promise<PushRuntime>, agent: unknown, cwd:
   let toolbox: Promise<string | null> = Promise.resolve(null)
   try {
     const r = await rt
-    if (!r || (await levelNow()) === 'off') return []
+    const level = r ? await pushLevel(r) : 'off'
+    if (!r || level === 'off') return []
     // the toolbox index (toolbox.ts): once per session and after /clear or a compaction, at level suggest and on
     toolbox = toolboxPush(r)?.prompt() ?? Promise.resolve(null)
-    // the methods came with CLAUDE.md (methods.ts): no push repeats them
+    // the methods came with CLAUDE.md (methods.ts): no push repeats them. At level "on" nothing served is pushed even
+    // when that file had expired: the served text may be a candidate the user has not accepted (methods.pending.md).
     const push = lessonPush(r)
-    let text = !methodsActive() ? await push.prompt(async () => cwd()) : null
+    let text = level === 'suggest' && !methodsActive() ? await push.prompt(async () => cwd()) : null
     const version = push.takeVersion()
     if (text && r.store) {
       // 0.6.3: the user's kept autonomy choice goes with the methods; a new served version is said to the user once
@@ -608,7 +629,7 @@ export async function pushLessons(rt: Promise<PushRuntime>, agent: unknown, cwd:
       if (note) text = `${text}\n${note}`
       const told = version ? await seenVersion(r.store, version) : null
       if (told) (notify ?? queueNotice)(told) // flow.ts flowPrompt shows a queued one in this same prompt
-    } else if (!text && methodsActive() && !onNoteSent && r.store && (await r.svc.authState()) === 'ok') {
+    } else if (!text && (level === 'on' || methodsActive()) && !onNoteSent && r.store && (await r.svc.authState()) === 'ok') {
       // level on: the methods came with CLAUDE.md, so the kept choice goes alone, once, and again after /clear
       const note = autonomyNote(await readAutonomy(r.store))
       if (note) { text = note; onNoteSent = true }

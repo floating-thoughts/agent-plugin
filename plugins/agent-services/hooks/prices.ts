@@ -3,7 +3,7 @@
 // the hooks module reads no price file.
 export const PRICES: Record<string, any> = {
   "source": "https://platform.claude.com/docs/en/about-claude/pricing",
-  "checked": "2026-10-22",
+  "checked": "2026-11-09",
   "unit": "USD per million tokens",
   "note": "Public list prices. Models are matched by id prefix, most specific first.",
   "cache_write_5m": 1.25,
@@ -12,6 +12,18 @@ export const PRICES: Record<string, any> = {
     "multiplier": 2.0
   },
   "models": [
+    {
+      "prefix": "claude-fable-5-2",
+      "input": 8.0,
+      "output": 40.0,
+      "cache_read": 0.2
+    },
+    {
+      "prefix": "claude-mythos-5-2",
+      "input": 8.0,
+      "output": 40.0,
+      "cache_read": 0.2
+    },
     {
       "prefix": "claude-fable-5-1",
       "input": 10.0,

@@ -12,6 +12,7 @@
 //   counts     today's counts { route, compact_start, index } (todayCounts builds them from savings events)
 //   update     optional: the update command line (updateCommand) when updateHintDue says it is time
 //   gate       optional: the reason the service gate is closed (svc.ts GateState.reason), or null while open
+//   sharingAsk optional: false after a final "Don't upload" or a company "off": the line never suggests sharing on
 // Decision: the line always says something, in the same words as the band above the prompt
 // (band.ts BAND_TEXT says each state in full).
 // Decision: the engine already shows the plugin's name before the status line, so the line
@@ -41,17 +42,19 @@ export const GATE_STATUS: Readonly<Record<string, string>> = {
   unavailable: `can't reach its server`,
   unverified: `can't reach its server`,
   upgrade: `update needed`,
+  clock: `computer clock is off`,
 }
 // today's counts: [event kind, one, many]
 export const COUNTED: [string, string, string][] = [
-  ['route', 'job on a cheaper model', 'jobs on a cheaper model'],
+  ['route', 'subagent on a cheaper model', 'subagents on cheaper models'], // summary.ts says the same
   ['compact_start', 'memory cleanup', 'memory cleanups'],
 ]
 const DAY_RX = /^[0-9]{4}-([0-9]{2})-([0-9]{2})\n?$/
 
 export type Counts = Record<string, number>
 export type Auth = 'ok' | 'signed_out' | 'auth_failed' | 'locked' | 'paused'
-export type StatusInput = { auth: Auth; metricsOn: boolean; saved: unknown; counts: Counts; update?: string | null; gate?: string | null }
+export type StatusInput = { auth: Auth; metricsOn: boolean; saved: unknown; counts: Counts; update?: string | null; gate?: string | null
+  sharingAsk?: boolean }
 
 const isObj = (v: unknown): v is Record<string, any> => typeof v === 'object' && v !== null && !Array.isArray(v)
 const num = (v: unknown): v is number => typeof v === 'number' && Number.isFinite(v)
@@ -79,16 +82,17 @@ export function shortDay(first: unknown): string | null {
   return month && day >= 1 && day <= 31 ? `${month} ${day}` : null
 }
 
-/** The line for the upload switch, the last server figure (or null) and today's counts, at most MAX_LEN. */
-export function render(metricsOn: boolean, saved: unknown, counts: Counts): string {
+/** The line for the upload switch, the last server figure (or null) and today's counts, at most MAX_LEN. `ask` false:
+ * the upload is off by a final choice (the person's or the company's), so no "sharing on" hint. */
+export function render(metricsOn: boolean, saved: unknown, counts: Counts, ask = true): string {
   const today = todayText(counts)
   const head: string[] = [] // the engine prints the plugin's name before the line (CLI and desktop), so the line leaves it out
   let tail: string | null = null
   let short: string | null = null
   const usd = isObj(saved) ? saved.usd : undefined
   if (!metricsOn) {
-    tail = HINT_OFF
-    short = HINT_OFF_SHORT
+    tail = ask ? HINT_OFF : null
+    short = ask ? HINT_OFF_SHORT : null
   } else {
     return '' // signed in and on: no status line; the band's panel shows the figures and the open decisions
   }
@@ -113,8 +117,8 @@ export function statusText(input: StatusInput): string {
   if (typeof input.update === 'string' && input.update) return input.update
   const gate = typeof input.gate === 'string' ? input.gate : ''
   if (gate === 'login' || gate === 'locked' || gate === 'paused') return gate === 'login' ? SIGN_IN_LINE : gate === 'locked' ? LOCKED_LINE : ORG_PAUSED_STATUS
-  if (GATE_STATUS[gate]) return GATE_STATUS[gate]
-  return render(input.metricsOn === true, input.saved, input.counts ?? {})
+  if (Object.hasOwn(GATE_STATUS, gate)) return GATE_STATUS[gate]!
+  return render(input.metricsOn === true, input.saved, input.counts ?? {}, input.sharingAsk !== false)
 }
 
 /** StatusLine.counts(): today's (UTC day of nowSec) route, compaction and index events. */

@@ -43,7 +43,7 @@ import { deviceFileOf, resolveDeviceId, type DeviceFile, type DurableDir } from 
 import { Outbox } from './outbox'
 import type { RequestLine } from './outbox'
 import { keepOrg, ORG_PAUSED_LINE, validOrg } from './org'
-import { devicePublicKey, newDeviceSeed, signedHeaders, verifyResponse } from './sig'
+import { devicePublicKey, newDeviceSeed, SIG_SKEW_SECONDS, signedHeaders, signedTs, verifyResponse } from './sig'
 import {
   CREDENTIAL_KEYS,
   getText,
@@ -71,8 +71,10 @@ import {
   matchRoute,
   num,
   parseConfig,
+  orgSummaryLog,
   redactFields,
   retrySeconds,
+  rulesSummary,
   servedProps,
   servedSummary,
   toolboxSummary,
@@ -135,11 +137,13 @@ export const AUTH_STATE_TTL_MS = 5000
 export const BAD_ENVELOPE_LIMIT = 2
 export const BAD_ENVELOPE_WINDOW_MS = 600000 // the server's failure window (5 in 10 minutes locks the IP)
 export const LOGIN_PENDING_MS = 600000
+// .claude.json there but unreadable this long in a row is not a half-written file (too large or broken for good):
+// requests go out again without the hash, as before, rather than never
+export const CLAUDE_UNREADABLE_MS = 60000
 export const HELLO_PATH = '/auth/hello'
 export const PLAN_PATH = '/auth/plan'
 export const RETRY_STATUS = [500, 502, 503, 504]
 export const EDGE_STATUS = [403, 429]
-export const UNVERIFIED_ERRORS = ['unsigned_response', 'bad_signature', 'stale_response']
 export const SERVICES = ['health', 'updates', 'incidents', 'metrics', 'router', 'checkpoint', 'limits'] as const
 export const SERVICE_DEFAULTS: Record<string, boolean> = {
   health: true,
@@ -170,6 +174,9 @@ export const GATE_NOTICES: Record<string, string> = {
   unavailable: "agent-services can't reach its server; it tries again in a few minutes and at the next session.",
   unavailable_until: 'agent-services stopped sending: the server could not open two requests in a row; it tries ' +
     'again in about {minutes} minutes.',
+  clock:
+    "agent-services paused: this computer's clock is more than 5 minutes off, so the server's answers cannot be " +
+    'checked. Set the clock right (turn on automatic time); it tries again in about 30 minutes or once the clock is right.',
   unverified:
     "agent-services can't verify its server: an answer claiming to come from the server was not signed by the server's key (a " +
     'proxy or a fake server may be in the way); nothing it said was used. It tries again in a few minutes.',
@@ -186,6 +193,9 @@ export const NOTICE_TEXT: Record<string, string> = {
   server_unverified:
     "agent-services stopped: an answer was not signed by the server's key, so it was not used (a proxy or a fake " +
     'server may be in the way). It tries again in a few minutes.',
+  clock_skew:
+    "agent-services paused: this computer's clock is more than 5 minutes off, so the server's answers cannot be " +
+    'checked. Set the clock right (turn on automatic time); it tries again in about 30 minutes or once the clock is right.',
   endpoint_changed: 'The agent-services address or server keys changed, so this machine was signed out; sign in again.',
   bad_envelope:
     'agent-services stopped sending: the server could not open two requests in a row; it tries again in 10 minutes.',
@@ -217,7 +227,7 @@ export type Deps = {
   session: string // the harness session id (token_next:<session>, lease holder)
   random?: Random
   outbox?: Outbox | null
-  claudeHash?: () => Promise<string> // sha256 hex of the Claude account id, "" when unknown
+  claudeHash?: () => Promise<string | null> // sha256 hex of the Claude account id; "" none; null: unreadable now
   config?: ClientConfig // a staging build only; the shipped shell passes nothing
   shellVersion?: string
   harness?: string
@@ -280,7 +290,10 @@ export class Svc {
   private lastNotice = new Map<string, number>()
   private authCache: { at: number; value: AuthState } | null = null
   private ready: Promise<void> | null = null
-  private claude: string | null = null
+  private claude: string | null = null // a hash read once (never "" or a failed read)
+  private claudeSent = '' // the hash the last signed request carried
+  private claudeBadSince: number | null = null // when .claude.json first could not be read, while that lasts
+  private clockTold = false // the clock notice, once per session
   private servedBind = new Map<string, string>()
   private servedJitRefused = false // the service refused `jit` once and took the request without it: not sent again
 
@@ -531,6 +544,45 @@ export class Svc {
     this.setGate('unverified')
   }
 
+  /** A validly signed answer for this request whose only fault is its time: this computer's clock is off (the signed
+   * ts is the server's own time). Every session pauses its sealed requests for 30 minutes, so the server's per-IP
+   * failure count is not fed; the server is not distrusted. */
+  private async clockOff(server: number | null): Promise<void> {
+    if (server !== null) await safeSet(this.kv, KEYS.clockOff, { server, local: this.nowS(), until: this.d.now() + 30 * 60000 })
+    this.clockStop()
+  }
+  private clockStop(): void {
+    if (!this.clockTold) this.notice('clock_skew')
+    this.clockTold = true
+    this.setGate('clock')
+  }
+  /** The shared clock pause holds: less than 30 minutes old, and the clock has not visibly been set right (moved back
+   * past the moment it was seen, or, when it was behind, caught up with the server's time). */
+  private async clockPaused(): Promise<boolean> {
+    const c = await safeGet(this.kv, KEYS.clockOff)
+    if (!isObj(c) || typeof c.server !== 'number' || typeof c.local !== 'number' || typeof c.until !== 'number') return false
+    const now = this.nowS()
+    if (now < c.local || this.d.now() >= c.until) return false
+    return !(c.server > c.local && now >= c.server - SIG_SKEW_SECONDS)
+  }
+
+  /** The Claude account hash: the cached one, else read now (a failed read is tried once more and never cached).
+   * null: .claude.json is there but could not be read ("" once that has lasted CLAUDE_UNREADABLE_MS). */
+  private async claudeNow(): Promise<string | null> {
+    if (this.claude) return this.claude
+    for (let i = 0; i < 2; i++) {
+      if (i) await this.d.sleep(100)
+      const h = await this.d.claudeHash().catch(() => null)
+      if (typeof h !== 'string') continue
+      if (h) this.claude = h
+      this.claudeBadSince = null
+      return h
+    }
+    const now = this.d.now()
+    this.claudeBadSince ??= now
+    return now - this.claudeBadSince >= CLAUDE_UNREADABLE_MS ? '' : null
+  }
+
   // ---------------- transport: one token, retries inside the deadline
   private async within<T>(p: Promise<T>, ms: number): Promise<{ v: T } | { err: unknown } | null> {
     if (ms <= 0) return null
@@ -549,7 +601,7 @@ export class Svc {
     return true
   }
 
-  private async signing(token: string, method: string, wire: string, body: string): Promise<Record<string, string> | null> {
+  private async signing(token: string, method: string, wire: string, body: string): Promise<Record<string, string> | string | null> {
     const seedB64 = await getText(this.kv, KEYS.deviceKey)
     let seed: Uint8Array
     try {
@@ -558,7 +610,9 @@ export class Svc {
       return null
     }
     if (seed.length !== 32) return null
-    if (this.claude === null) this.claude = await this.d.claudeHash().catch(() => '')
+    const claude = await this.claudeNow()
+    if (claude === null) return 'claude_unreadable' // never sent with a hash that may be wrong: no false sign-out
+    this.claudeSent = claude
     return signedHeaders(
       method,
       wire,
@@ -568,7 +622,7 @@ export class Svc {
         accountId: (await getText(this.kv, KEYS.accountId)) ?? '',
         deviceId: (await resolveDeviceId(this.kv, this.d.file, this.d.random, false)) ?? '',
         deviceSeed: seed,
-        claudeHash: this.claude ?? '',
+        claudeHash: claude,
       },
       this.nowS(),
       this.d.random,
@@ -597,12 +651,17 @@ export class Svc {
         last = R(false, { error: 'unavailable', attempts })
         break
       }
+      if (!plain && (await this.clockPaused())) {
+        this.clockStop()
+        last = R(false, { error: 'clock_skew', attempts })
+        break
+      }
       const inner: Record<string, string> = {}
       if (method === 'POST') inner['Content-Type'] = 'application/json'
       if (o.token) {
         const sh = await this.signing(o.token, method, wire, body ?? '')
-        if (!sh) {
-          last = R(false, { error: 'not_logged_in', attempts })
+        if (!sh || typeof sh === 'string') {
+          last = R(false, { error: sh || 'not_logged_in', attempts })
           break
         }
         Object.assign(inner, sh)
@@ -672,6 +731,12 @@ export class Svc {
           await this.throttle(retrySeconds(rh['retry-after'], EDGE_COOL_SECONDS, UNSIGNED_RETRY_MAX))
           break
         }
+        if (bad === 'stale_response') {
+          // signed with a pinned key over this request's fresh challenge: authentic, only the clocks disagree
+          await this.clockOff(signedTs(rh))
+          last = R(false, { error: 'clock_skew', attempts })
+          break
+        }
         last = R(false, { error: bad, attempts })
         this.distrust()
         break
@@ -721,6 +786,8 @@ export class Svc {
       }
       if (ok && wire.split('?', 1)[0] === PREFIX + SERVED_ROUTE) shown = servedSummary(data)
       if (ok && wire.split('?', 1)[0] === PREFIX + TOOLBOX_ROUTE) shown = toolboxSummary(data)
+      if (ok && wire.split('?', 1)[0] === PREFIX + '/served/rules') shown = rulesSummary(data)
+      if (ok && wire.split('?', 1)[0] === PREFIX + '/org/summary') shown = orgSummaryLog(data)
       if (o.secret) shown = redactFields(shown, o.secret)
       this.logged(line, ist, shown, null)
       if (ok) {
@@ -798,6 +865,19 @@ export class Svc {
     const tried = new Set<string>([sent])
     let last = first
     let attempts = first.attempts
+    if (first.error === 'claude_account_mismatch') {
+      // .claude.json may have been read mid-write: read it again; a different hash is tried once before a sign-out
+      const was = this.claudeSent
+      this.claude = null
+      const now = await this.claudeNow()
+      if (now === null) return first // unreadable now: never a sign-out on a read that failed
+      if (now !== was) {
+        const r = await this.attempt(method, wire, body, service, deadline, { ...o, token: sent })
+        attempts += r.attempts
+        if (r.status !== 401) return { ...r, attempts }
+        last = { ...r, attempts }
+      }
+    }
     const send = async (t: string): Promise<Res | null> => {
       tried.add(t)
       const r = await this.attempt(method, wire, body, service, deadline, { ...o, token: t })
@@ -1008,7 +1088,7 @@ export class Svc {
     else if (res.status === 423 || (res.status === 429 && res.error === 'locked_out')) this.setGate('locked')
     else if (throttled(res.status, res.error)) {
       // rate limited or busy: the server is up; the gate keeps its state
-    } else if (this.gs.reason === 'unverified' || this.gs.reason === 'unavailable') {
+    } else if (this.gs.reason === 'unverified' || this.gs.reason === 'unavailable' || this.gs.reason === 'clock') {
       // attempt() closed it already
     } else this.setGate('unavailable')
     return strip(res)
@@ -1049,7 +1129,8 @@ export class Svc {
    * first, inside the caller's deadline. */
   private async ensureOpen(d: Deadline, hook: Hook): Promise<boolean> {
     if (this.gs.open) return true
-    if (!['unknown', 'login', 'locked', 'paused'].includes(this.gs.reason ?? '')) return false // unverified, unavailable, upgrade, offline
+    if (this.gs.reason === 'clock' && !(await this.clockPaused())) this.setGate('unknown') // the pause is over: try again
+    if (!['unknown', 'login', 'locked', 'paused'].includes(this.gs.reason ?? '')) return false // unverified, unavailable, upgrade, offline, clock
     const hello = this.handshake(hook)
     const got = await this.within(hello, d.remaining())
     return got !== null && this.gs.open
@@ -1155,7 +1236,8 @@ export class Svc {
     const key = `${sessionRef}\n${role}`
     const s = await this.settings()
     const bound = this.servedBind.get(key)
-    const pin = bound ?? (SERVED_ROLES.includes(role) ? s.served.pins[role] ?? null : null)
+    const own = SERVED_ROLES.includes(role) ? s.served.pins[role] ?? null : null // the user's pin
+    let pin = bound ?? own
     const body: Record<string, unknown> = { session_ref: sessionRef, role, phase, pinned_version: pin, channel: s.served.channel }
     if (state) body.state = state // a planning-gate question (phase.ts): the verdict comes in `gate`, with no items
     if (select?.event) body.event = select.event
@@ -1170,6 +1252,13 @@ export class Svc {
       res = await this.call('POST', SERVED_ROUTE, body, { hook })
       // a 422 says only bad_request: `jit` was the field refused only when the same request passes without it
       if (res.ok) this.servedJitRefused = true
+    }
+    if (!res.ok && res.status === 404 && bound !== undefined && bound !== own && ['version_withdrawn', 'no_such_version'].includes(res.error ?? '')) {
+      // the version this session was bound to was withdrawn or left the channel: unbind and ask once without it
+      this.servedBind.delete(key)
+      pin = own
+      body.pinned_version = pin
+      res = await this.call('POST', SERVED_ROUTE, body, { hook })
     }
     if (!res.ok) return res
     const b: any = res.body
@@ -1216,6 +1305,7 @@ export class Svc {
     const res = await this.exchange('POST', PREFIX + '/auth/login/start', JSON.stringify(check ? { email, check } : { email }), 'auth', this.deadline('auth', hook), {
       signed: false,
       retry: true,
+      secret: ['check', 'check_url'], // the browser check token stays out of the request log
     })
     const got = isObj(res.body) ? res.body.check : null
     if (res.error === 'check_required' && typeof got === 'string' && /^[A-Za-z0-9_-]{1,100}$/.test(got)) {
@@ -1235,6 +1325,12 @@ export class Svc {
   async pendingEmail(): Promise<string | null> {
     const p = await safeGet(this.kv, KEYS.loginPending)
     return isObj(p) && typeof p.email === 'string' && typeof p.until === 'number' && this.d.now() < p.until ? p.email : null
+  }
+
+  /** Forgets a sign-in that waits for its code (and a check token kept for it): no later message is sent as a code. */
+  async cancelLogin(): Promise<void> {
+    await safeDelete(this.kv, KEYS.loginPending)
+    await safeDelete(this.kv, 'login_check')
   }
 
   private async device(): Promise<{ id: string; pub: string }> {
@@ -1270,16 +1366,18 @@ export class Svc {
     } catch {
       return R(false, { error: 'store_unavailable' })
     }
+    this.claude = null // read afresh for a new sign-in
+    const ch = await this.claudeNow()
+    if (ch === null) return R(false, { error: 'claude_unreadable' }) // the code is not spent on a hash that may be wrong
     const token = b64url(this.d.random(32))
     const body: Record<string, string> = { email: mail, code, token_hash: sha256Hex(utf8(token)), device_pubkey: dev.pub, device_id: dev.id }
-    const ch = await this.d.claudeHash().catch(() => '')
     if (ch) body.claude_hash = ch
     body.harness = this.d.harness
     const terms = await safeGet(this.kv, 'terms_accepted')
     if (typeof terms === 'string' && terms) { body.accept_terms = terms; body.business_18 = 'true' }
     const d = this.deadline('auth', hook)
     const res = await this.exchange('POST', PREFIX + '/auth/login/finish',
-      JSON.stringify(body.business_18 ? { ...body, business_18: true } : body), 'auth', d, { signed: false, retry: true })
+      JSON.stringify(body.business_18 ? { ...body, business_18: true } : body), 'auth', d, { signed: false, retry: false }) // a one-time code is never resent blind
     if (res.ok && isObj(res.body)) {
       const b = res.body
       if (!(await safeSet(this.kv, KEYS.token, token))) return R(false, { error: 'store_unavailable' })
@@ -1290,7 +1388,7 @@ export class Svc {
         if (b[n] != null) await safeSet(this.kv, k, n === 'expires_at' ? b[n] : String(b[n]))
         else await safeDelete(this.kv, k)
       }
-      this.claude = ch
+      this.claude = ch || null
       this.authCache = null
       this.planRoutes = null
       this.refused.clear()

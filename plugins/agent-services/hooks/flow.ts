@@ -24,7 +24,6 @@ import { briefFor, notePersonPrompt, takeRouteHint } from './flow_state'
 import { takeNotice } from './methods'
 import { methodsLevel } from './methods_level'
 import { setBandPending } from './band'
-import { SEP } from './status'
 import { engineStore } from './store'
 import { authorCheck, ownerCheck, redlineOverride, signedIn } from './subagents'
 import { toolInput } from './tools'
@@ -87,10 +86,14 @@ export function lockGlobs(text: string | null): string[] {
   }
 }
 
-/** The glob that locks `file`, or null. Pure. */
+/** The glob that locks `file`, or null; a file in a git worktree (".../worktrees/<id>/...", where a subagent with
+ * isolation works) is also matched by its path inside that worktree. Pure. */
 export function lockedBy(file: string, cwd: string | null, globs: readonly string[]): string | null {
   const rel = relPath(file, cwd)
-  return globs.find((g) => globRx(g).test(rel) || globRx(g).test(slash(file))) ?? null
+  const paths = [rel, slash(file)]
+  const inTree = /(?:^|\/)worktrees\/[^/]+\/(.+)$/i.exec(rel)?.[1] // a match too many only denies
+  if (inTree) paths.push(inTree)
+  return globs.find((g) => paths.some((p) => globRx(g).test(p))) ?? null
 }
 
 /** The deny reason for a subagent's edit of a locked test file. Pure. */
@@ -102,13 +105,6 @@ export const lockReason = (file: string, glob: string): string =>
 export function pendingCount(text: string | null): number {
   if (!text) return 0
   return text.split(/\r?\n/).filter((l) => /^\s*[-*]\s+\[ \]\s*\S/.test(l)).length
-}
-
-/** The status line with the open-decision count added. Pure. */
-export function pendingSuffix(text: string, n: number): string {
-  if (n <= 0) return text
-  const part = n === 1 ? '1 decision waits for you' : `${n} decisions wait for you`
-  return text ? `${text}${SEP}${part}` : part
 }
 
 export const DONE_STATUSES: readonly string[] = ['done', 'completed', 'complete']

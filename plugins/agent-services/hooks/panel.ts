@@ -59,8 +59,8 @@ export function methodLine(): string {
 
 /** The dollar figure's disclosure, shown with the time method wherever the panel's disclosure appears. */
 export function savedNote(): string {
-  return 'Saved (est.) is an estimate against API list prices for the same work with every subagent on the most ' +
-    'capable model (Opus); it is not a bill or a refund.'
+  return 'Saved (est.) is an estimate against API list prices for the same work with every subagent on a top-tier model (Opus); ' +
+    'it is not a bill or a refund.'
 }
 
 type Obj = Record<string, any>

@@ -25,14 +25,14 @@ export const ROUTE_LIMIT = 120
 export const ERROR_LIMIT = 300
 export const PUBLISH_REASON_LIMIT = 200 // a denied dashboard publish: the reason kept
 /** Top-level request fields never written to the outbox (the sign-in code and anything token-like). */
-export const REQUEST_SECRET = ['code', 'token', 'token_hash', 'new_token_hash', 'device_key', 'password', 'secret']
+export const REQUEST_SECRET = ['code', 'token', 'token_hash', 'new_token_hash', 'device_key', 'password', 'secret', 'check']
 const NAME_RX = /^(\d{4}-\d{2}-\d{2})-[0-9a-f]{8}\.jsonl$/
 const DAY_MS = 86400000
 
 export type OutboxFs = {
   read(path: string): Promise<string> // rejects when the file is missing
   write(path: string, text: string): Promise<void>
-  list(path: string): Promise<readonly { name: string; size?: number }[]>
+  list(path: string): Promise<readonly { name: string; size?: number; mtime?: number }[]>
   remove?(path: string): Promise<void>
 }
 
@@ -113,6 +113,7 @@ export class Outbox {
   }
 
   private add(line: Line): Line {
+    if (this.stopped) return line // nothing is kept after a remove, in memory either
     const p = this.path()
     let f = this.files.get(p)
     if (!f) this.files.set(p, (f = { base: null, lines: [], dropped: 0 }))
@@ -270,14 +271,14 @@ export class Outbox {
 
   /** Clear the files older than OUTBOX_KEEP_DAYS (any session). Returns how many were cleared. */
   async sweep(): Promise<number> {
+    let n = await this.sweepLegacy()
     let entries: readonly { name: string; size?: number }[]
     try {
       entries = await this.fs.list(this.dir)
     } catch {
-      return 0
+      return n
     }
     const cutoff = isoTime(this.now() - OUTBOX_KEEP_DAYS * DAY_MS).slice(0, 10)
-    let n = 0
     for (const e of entries) {
       const m = NAME_RX.exec(e.name)
       if (!m || m[1] >= cutoff) continue
@@ -292,5 +293,40 @@ export class Outbox {
       }
     }
     return n
+  }
+
+  /** The request log of the version before the migration, <data dir>/services/outbox.jsonl (one file, never written
+   * now): emptied once it is older than OUTBOX_KEEP_DAYS; until then the secret request fields of its lines (the
+   * sign-in code, token hashes) are blanked in place. 1 when it was changed, else 0. */
+  private async sweepLegacy(): Promise<number> {
+    if (!this.dir.endsWith('/services/outbox')) return 0
+    const parent = this.dir.slice(0, -'/outbox'.length)
+    const p = `${parent}/outbox.jsonl`
+    try {
+      const e = (await this.fs.list(parent)).find((x) => x.name === 'outbox.jsonl')
+      if (!e || e.size === 0) return 0
+      if (typeof e.mtime === 'number' && e.mtime > 0 && e.mtime < this.now() - OUTBOX_KEEP_DAYS * DAY_MS) {
+        await this.fs.write(p, '')
+        return 1
+      }
+      const old = String((await this.fs.read(p)) ?? '')
+      const lines = old.split('\n').map((l) => {
+        let o: unknown
+        try {
+          o = JSON.parse(l)
+        } catch {
+          return l
+        }
+        if (!o || typeof o !== 'object' || Array.isArray(o) || typeof (o as any).body_text !== 'string') return l
+        const b = redactRequest((o as any).body_text)
+        return b === (o as any).body_text ? l : JSON.stringify({ ...(o as any), body_text: b })
+      })
+      const text = lines.join('\n')
+      if (text === old) return 0
+      await this.fs.write(p, text)
+      return 1
+    } catch {
+      return 0 // best effort: again at the next session start
+    }
   }
 }

@@ -50,7 +50,7 @@ function strings(v: unknown): string[] {
 }
 
 function fill(text: unknown, values: Record<string, string>): string {
-  return String(text ?? '').replace(/\{(\w+)\}/g, (all, k: string) => (k in values ? values[k]! : all))
+  return String(text ?? '').replace(/\{(\w+)\}/g, (all, k: string) => (Object.hasOwn(values, k) ? values[k]! : all))
 }
 
 function rx(source: string, flags = ''): RegExp | null {
@@ -194,8 +194,8 @@ export function stepGate(text: string | null, file: string, task: string): { den
   }
   if (!Array.isArray(list)) return null
   const steps = list.filter(isObj).filter((x) => typeof x.id === 'string' || typeof x.id === 'number')
-  const named = /\[step:\s*([A-Za-z0-9_.-]+)\]/i.exec(task)?.[1]
-  const step = named === undefined ? undefined : steps.find((x) => String(x.id) === named)
+  const named = /\[step:\s*([^\]]+?)\s*\]/i.exec(task)?.[1] // any id up to "]", spaces and any script included
+  const step = named === undefined ? undefined : steps.find((x) => String(x.id).trim() === named)
   if (!step) return null
   const override = /\[override:\s*([^\]]+)\]/i.exec(task)?.[1]?.trim()
   if (override) return { override }
@@ -312,7 +312,7 @@ export function demandRefusal(e: Obj, current: unknown, isMain: boolean): string
   let added: string | null = null
   if (e.tool === 'Write' && typeof content === 'string' && lf(content).startsWith(text)) {
     added = lf(content).slice(text.length)
-  } else if (e.tool === 'Edit' && typeof was === 'string' && typeof now === 'string' && was !== '' &&
+  } else if (e.tool === 'Edit' && typeof was === 'string' && typeof now === 'string' && was !== '' && input.replace_all !== true &&
     text.trimEnd().endsWith(lf(was).trimEnd()) && lf(now).startsWith(lf(was))) {
     added = lf(now).slice(lf(was).length)
   }
@@ -381,7 +381,13 @@ export function reportFile(dirs: { home: string; data: string }, session: string
   const clean = (t: string) => String(t).replace(/[^\w.-]/g, '_').replace(/^\.*$/, '_') // never '', '.' or '..'
   const values = { home: dirs.home.replace(/\\/g, '/').replace(/\/+$/, ''), data: dirs.data.replace(/\\/g, '/').replace(/\/+$/, ''), session: clean(session) }
   if ((folder.includes('{home}') && !values.home) || (folder.includes('{data}') && !values.data)) return null
-  return `${fill(folder, values)}/${clean(agentId)}.md`
+  const dir = fill(folder, values).replace(/\\/g, '/').replace(/\/+$/, '')
+  // the folder must stay under the data folder (or the owner's {home}/.claude/agent-reports); else the default one
+  const under = (root: string) => !!root && !/(^|\/)\.{1,2}(\/|$)/.test(dir.slice(root.length)) &&
+    (/^[a-zA-Z]:\//.test(root) ? dir.toLowerCase().startsWith(root.toLowerCase() + '/') : dir.startsWith(root + '/'))
+  const safe = under(values.data) || under(values.home && `${values.home}/.claude/agent-reports`)
+  if (!safe) return values.data ? `${values.data}/agent-reports/${values.session}/${clean(agentId)}.md` : null
+  return `${dir}/${clean(agentId)}.md`
 }
 
 /** The text the conversation gets in place of a report over the cap: its opening and the pointer; null keeps it. */

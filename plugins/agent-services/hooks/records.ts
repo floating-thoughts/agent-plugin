@@ -10,6 +10,7 @@ import { sha256 } from './noble.js'
 import type { KV, Random, Transport } from './engine_types'
 import { noteBrief } from './flow_state'
 import { routingLevel } from './routing_level'
+import { scrub } from './redact'
 
 /** Two more routing facts (0.6.0): the main session's model id (for the cap) and whether the person's latest message
  * asked for a review (only the boolean is sent). Absent: the fields are not sent. */
@@ -59,9 +60,12 @@ export function hmacSha256(key: Uint8Array, msg: Uint8Array): Uint8Array {
   return sha256(outer)
 }
 
+/** The description's first word (at most 32 characters), as the router takes it; '' when there is none, and '' when
+ * the whole word looks like a secret (redact.ts scrub would mask any of it), so no part of a key leaves the computer. */
 export function typeWord(description: unknown): string {
   const parts = typeof description === 'string' ? description.split(PY_SPACE).filter((x) => x) : []
-  return parts.length ? [...parts[0]!].slice(0, 32).join('') : ''
+  if (!parts.length || scrub(parts[0]!) !== parts[0]) return ''
+  return [...parts[0]!].slice(0, 32).join('')
 }
 
 function base(word: string): string {

@@ -172,8 +172,9 @@ function metricsOn(status: unknown, settings: unknown): boolean | null {
   return null
 }
 
-type Sav = Obj & { by_day: Obj[] }
-function savingsPart(s: unknown): Sav | null {
+export type Sav = Obj & { by_day: Obj[] }
+/** The savings body cleaned for the page: numbers or null, by_day rows with a valid day, sorted by day. */
+export function savingsPart(s: unknown): Sav | null {
   if (!isObj(s) || 'error' in s || num(s.usd) === null) return null
   const levers: Obj = {}
   for (const name of LEVERS) {
@@ -208,7 +209,9 @@ function peer(report: unknown): [number | null, number | null] {
   return [null, null]
 }
 
-function weeks(sav: Sav | null, today: string): [number | null, number | null] {
+/** Saved in the last 7 days (today included) and in the 7 before: the one computation behind the compare card,
+ * the weekly lines and the band. [null, null] without any day row; the second is null without a row in its window. */
+export function weeks(sav: Sav | null, today: string): [number | null, number | null] {
   if (!sav || !sav.by_day.length) return [null, null]
   const cut1 = plusDays(today, -6)
   const cut2 = plusDays(today, -13)
