@@ -87,6 +87,8 @@ export type ToolDeps = {
   outbox?: { tool(name: string, args: unknown): void } | null
   harness?: string
   budgetMs?: number
+  /** phase.ts lessonHold: a lesson_lookup held while planning (its answer), or null to answer it as before. */
+  lessonHold?: ((args: Obj, cwd: string | null) => Promise<Obj | null>) | null
 }
 
 export type ToolContext = { session: string; cwd: string | null }
@@ -137,6 +139,8 @@ async function respond(deps: ToolDeps, name: string, args: unknown, ctx: ToolCon
   } catch (err) {
     return { result: `bad_request: ${err instanceof Error ? err.message : 'arguments'}`, isError: true }
   }
+  const held = name === 'lesson_lookup' && deps.lessonHold ? await deps.lessonHold(args as Obj, ctx.cwd) : null
+  if (held) return { result: render(held) }
   const ask = () => deps.core.ask(name, args, { session: ctx.session, harness: deps.harness ?? HARNESS, cwd: ctx.cwd })
   let ans = await ask()
   const after = await deps.authLine(true) // a 401 or 423 during this call that did not recover

@@ -116,7 +116,7 @@ export const SERVICE_DEFAULTS: Record<string, boolean> = {
   health: true,
   updates: true,
   incidents: false,
-  metrics: false,
+  metrics: true, // on by default since 2026-10-31; settings() keeps an explicit off (metricsDefault)
   router: true,
   checkpoint: true,
   limits: true,
@@ -587,11 +587,15 @@ export class Svc {
       served: { channel: 'stable', pins: Object.fromEntries(SERVED_ROLES.map((r) => [r, null])) },
     }
     const d = await safeGet(this.kv, KEYS.settings)
-    if (!isObj(d)) return s
+    if (!isObj(d)) {
+      s.services.metrics = await this.metricsDefault({})
+      return s
+    }
     if (typeof d.offline === 'boolean') s.offline = d.offline
     if (isObj(d.services)) {
       for (const [k, v] of Object.entries(d.services)) if (k in SERVICE_DEFAULTS && typeof v === 'boolean') s.services[k] = v
     }
+    s.services.metrics = await this.metricsDefault(d)
     const sv = isObj(d.served) ? d.served : {}
     if (typeof sv.channel === 'string' && SERVED_CHANNELS.includes(sv.channel)) s.served.channel = sv.channel
     if (isObj(sv.pins)) {
@@ -601,10 +605,27 @@ export class Svc {
     }
     return s
   }
-  private async saveSettings(f: (s: Settings) => void): Promise<boolean> {
+  /**
+   * The daily metrics upload is on unless the user chose off. A choice made with the savings commands is kept as
+   * metrics_set; before that switch existed an explicit off was a stored metrics false after the upload had been on
+   * (an enabled_day), or a "Not now" to the savings question. A stored false without either was only the old default.
+   */
+  private async metricsDefault(d: Record<string, any>): Promise<boolean> {
+    const stored = isObj(d.services) ? d.services.metrics : undefined
+    if (d.metrics_set === true && typeof stored === 'boolean') return stored
+    if (stored === true) return true
+    const prompt = await safeGet(this.kv, KEYS.savingsPrompt)
+    if (isObj(prompt) && prompt.answer === 'not_now') return false
+    const state = await safeGet(this.kv, KEYS.metricsState)
+    if (stored === false && isObj(state) && typeof state.enabled_day === 'string' && state.enabled_day) return false
+    return true
+  }
+  private async saveSettings(f: (s: Settings) => void, choseMetrics = false): Promise<boolean> {
     const s = await this.settings()
     f(s)
-    return safeSet(this.kv, KEYS.settings, s)
+    const raw = await safeGet(this.kv, KEYS.settings)
+    const set = choseMetrics || (isObj(raw) && raw.metrics_set === true)
+    return safeSet(this.kv, KEYS.settings, set ? { ...s, metrics_set: true } : s)
   }
   async setOffline(on: boolean): Promise<boolean> {
     const ok = await this.saveSettings((s) => void (s.offline = Boolean(on)))
@@ -613,7 +634,7 @@ export class Svc {
   }
   async setService(name: string, on: boolean): Promise<boolean> {
     if (!(name in SERVICE_DEFAULTS)) throw new Error(`unknown service ${name}`)
-    return this.saveSettings((s) => void (s.services[name] = Boolean(on)))
+    return this.saveSettings((s) => void (s.services[name] = Boolean(on)), name === 'metrics')
   }
   async setServedPin(role: string, version: string | null): Promise<boolean> {
     if (!SERVED_ROLES.includes(role)) throw new Error('bad role')

@@ -15,7 +15,7 @@
 //   dailyRequest(day, input)       -> { method, route, body_text } or { error }: the exact text a send carries, so
 //                                  a preview and the upload are the same string.
 //   uploadDays(state, today, active)  the days Metrics.tick would build, in order (dueDays: with active()).
-//   optIn(state, today)            the opt-in rule: only after a preview (consent comes from the user's command).
+//   optIn(state, today)            turning the upload back on: only after a preview (the user's own command).
 //
 // Python parity limits (stated, tested where it matters): JSON numbers lose the int/float distinction, so a
 // value Python keeps as 5.0 prints as 5 here (bodies are compared as parsed JSON); the 64 KiB size check counts

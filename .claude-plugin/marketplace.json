@@ -1,11 +1,14 @@
 {
   "name": "agent-plugin",
-  "owner": { "name": "agent-plugin" },
+  "owner": {
+    "name": "agent-plugin"
+  },
   "plugins": [
     {
       "name": "agent-services",
       "source": "./plugins/agent-services",
-      "description": "Advice for Claude Code sessions from the agent-services server, run in the hooks module with no local process; services need a signed-in account; see the README for install"
+      "description": "Advice for Claude Code sessions from the agent-services server, run in the hooks module with no local process; services need a signed-in account; see the README for install",
+      "version": "0.2.0-beta.1"
     }
   ]
 }

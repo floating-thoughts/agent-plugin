@@ -7,7 +7,7 @@ export type ToolSpec = {
   input_schema: Record<string, unknown>
 }
 
-export const CONTRACT_SHA256 = "bcee0ca74c3efd0e8d95297193f83e782594c0e5a11ce173146c39ae7293ff5b"
+export const CONTRACT_SHA256 = "f30e46ef5c6691811bc17ef77199ad57010ccad5ff73e4dcb86b2e430e98137c"
 
 export const API = "svc/1" as const
 export const PREFIX = "/svc/v1" as const
@@ -2431,7 +2431,7 @@ export const CONTRACT = {
    "x-inventory": {
     "service": "metrics",
     "purpose": "one usage summary per day (numbers and hashes only); in return: cross-customer reports, savings amounts computed by the server, and tuning advice",
-    "default": "off (the customer turns it on; the exact JSON is shown before the first upload)",
+    "default": "on (owner decision 2026-10-31; an earlier explicit Not now or off stays off; /agent-services savings off turns it off; /agent-services savings preview shows the exact JSON of one upload)",
     "retention": "13 months; deleted within 30 days of being turned off, or immediately from the settings page (DELETE /metrics)",
     "sent_to": [
      "our_service"
@@ -2634,7 +2634,7 @@ export const CONTRACT = {
    "x-inventory": {
     "service": "metrics",
     "purpose": "turn the weekly savings email on or off",
-    "default": "off; sent only when the customer turns the weekly savings email off or back on (the email itself is on by default for customers who turned the usage upload on)",
+    "default": "off; sent only when the customer turns the weekly savings email off or back on (the email itself is on by default for customers with the usage upload on)",
     "retention": "the setting and the time it changed, kept while the account exists; audit record 13 months",
     "sent_to": [
      "our_service"

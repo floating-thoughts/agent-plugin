@@ -37,7 +37,7 @@ export const AUTH_FAIL_REASONS = ['login', 'locked'] // plan 3.9
 export const CHECKPOINT_MARK = 'Checkpoint reached:'
 export const CHECKPOINT_NOW = '[agent-services server note, not written by the user] The server suggests a checkpoint now: once this ' +
   'stretch is done, call the checkpoint tool and keep the items below in the summary.'
-export const SAVINGS_OFF_NEXT = 'The savings report is off on this machine (it is opt-in): run /agent-services savings preview ' +
+export const SAVINGS_OFF_NEXT = 'The savings report is turned off on this machine: run /agent-services savings preview ' +
   'to see what it sends, then /agent-services savings on.' // the savings tool's `next` when reason is service_off
 export const DENY_TEXT = 'This subagent dispatch did not pass the routing check. Rewrite it as the hint says, then dispatch again.'
 

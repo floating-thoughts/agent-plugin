@@ -40,7 +40,10 @@ export const KEYS = {
   block: 'block', // { code, until, token_sha256 }: 401 / 423 / locked_out block shared by all sessions
   cool: 'cool', // { until, since }: shared cool-down (Retry-After), ms since the epoch
   badEnvelope: 'bad_envelope', // { n, at }: bad_envelope answers in a row, shared, so the IP budget is spared
-  settings: 'settings', // { offline, services, served }: the user's switches (port of settings.json)
+  settings: 'settings', // { offline, services, served, metrics_set }: the user's switches (port of settings.json)
+  sharing: 'sharing', // { on, at }: the one savings-record choice (command.ts); its parts keep their own switches
+  savingsPrompt: 'savings_prompt', // { answer: 'not_now', at }: an earlier "Not now" to the savings question
+  metricsState: 'metrics_state', // { previewed_day, enabled_day, last_uploaded_day } (command.ts, wiring.ts)
 } as const
 
 /** What a sign-out drops (the sign-in and the device binding); logout keeps the device. */

@@ -35,7 +35,7 @@ import { ESTIMATE_ROUTE, estimateRequest } from './estimate'
 import { BodyTooLarge, DAILY_ROUTE, dailyBody, isDay, isLong, normModel, optIn, plusDays, READ_LIMIT, scan, uploadDays, walkOrder } from './metrics'
 import { SALT_KEY } from './records'
 import { collect, pageChanged, publishedUrlOk, render as renderPage, renderDue } from './render'
-import { savingsDue, statusText, updateCommand, updateHintDue } from './status'
+import { DEFAULT_ON_NOTICE, savingsDue, statusText, updateCommand, updateHintDue, weeklyText } from './status'
 import { HOOK_BUDGET_MS, TIMEOUTS_MS } from './svc'
 
 // Store keys of this module (shared by every session; nothing secret: numbers and days only).
@@ -45,6 +45,8 @@ export const METRICS_STATE_KEY = 'metrics_state' // { previewed_day, enabled_day
 export const METRICS_LEASE_KEY = 'metrics_lease' // { holder, until }: best-effort, one uploading session
 export const ESTIMATE_KEY = 'estimate_answer' // { made_at, estimate }: the last estimate answer, for the dashboard
 export const UPDATE_HINT_KEY = 'update_hint_at' // ms of the last time the status line showed the update command
+export const SAVINGS_NOTICE_KEY = 'savings_notice_at' // ms of the one time DEFAULT_ON_NOTICE was shown
+export const WEEKLY_KEY = 'weekly_savings' // { week, start, usd }: the first cumulative savings figure of a week
 export const METRICS_LEASE_MS = 120_000
 export const REPORT_TTL_MS = 600_000
 export const ESTIMATE_PREVIEW_TTL_MS = 3_600_000 // an estimate preview older than this must be shown again
@@ -434,8 +436,10 @@ export class Wiring {
     }
   }
 
-  /** The status line after session_start and turn_end: the cached figure at once, then again after a due fetch. */
-  async refreshStatus(): Promise<string> {
+  /** The status line after session_start and turn_end: the cached figure at once, then again after a due fetch.
+   *  `first` runs right after the first line is shown, so a hanging fetch never delays it; when it shows a line
+   *  of its own (answers true), the fetched figure does not overwrite that line in this refresh. */
+  async refreshStatus(first?: () => Promise<boolean>): Promise<string> {
     if (!(await this.authOk())) {
       const text = await this.line(null, null)
       this.show(text)
@@ -450,13 +454,45 @@ export class Wiring {
     const before = await this.savingsBody(false)
     let text = await this.line(before, update)
     this.show(text)
+    const held = first ? await first().catch(() => false) : false
     if (update !== null) return text // the update line stays until the next refresh
     const after = await this.savingsBody(true)
-    if (JSON.stringify(after) !== JSON.stringify(before)) {
+    if (!held && JSON.stringify(after) !== JSON.stringify(before)) {
       text = await this.line(after, null)
       this.show(text)
     }
     return text
+  }
+
+  // ---------------- the one-time and weekly lines at session start (log line and toast)
+
+  /** The lines to show at session start: DEFAULT_ON_NOTICE once, then the weekly summary. Nothing while auth fails. */
+  async startNotices(): Promise<string[]> {
+    if (!(await this.authOk()) || !(await this.metricsOnNow())) return []
+    const out: string[] = []
+    if (num(await get(this.d.store, SAVINGS_NOTICE_KEY)) === null && (await put(this.d.store, SAVINGS_NOTICE_KEY, this.now()))) {
+      out.push(DEFAULT_ON_NOTICE)
+    }
+    const weekly = await this.weeklySummary()
+    if (weekly) out.push(weekly)
+    return out
+  }
+
+  /**
+   * The first session of an ISO week (UTC) with a savings figure: "Last week agent-services saved you $X." from the
+   * cumulative figure now less the one stored in an earlier week ("So far ..." the first time). Once per week; null
+   * when there is nothing to say, auth fails or the upload is off.
+   */
+  async weeklySummary(): Promise<string | null> {
+    if (!(await this.authOk()) || !(await this.metricsOnNow())) return null
+    const prev = await get(this.d.store, WEEKLY_KEY)
+    if (weeklyText(prev, this.now(), 0).mark === null) return null // already done this week
+    const r = await this.d.svc.call('GET', '/metrics/savings', undefined, { kind: 'daily', hook: 'background' })
+    if (!r.ok || !isObj(r.body)) return null
+    await put(this.d.store, SAVINGS_CACHE_KEY, { tried_at: this.now(), body: r.body })
+    const w = weeklyText(prev, this.now(), r.body.usd)
+    if (!w.mark || !(await put(this.d.store, WEEKLY_KEY, w.mark))) return null
+    return w.text
   }
 
   // ---------------- the dashboard (3.8)

@@ -7,10 +7,12 @@
 //
 // statusText(input) takes:
 //   auth       'ok' | 'signed_out' | 'auth_failed' | 'locked' (the 3.9 state from $.store)
-//   metricsOn  the daily-metrics opt-in;  saved  the last good GET /metrics/savings body ({ usd, pct, first_day })
+//   metricsOn  the daily metrics upload (on unless the user turned it off);  saved  the last good GET /metrics/savings body ({ usd, pct, first_day })
 //              or null (refresh it when savingsDue says so, keep the old one when a fetch fails)
 //   counts     today's counts { route, compact_start, index } (todayCounts builds them from savings events)
 //   update     optional: the update command line (updateCommand) when updateHintDue says it is time
+// The readers are not technical: the line says what was saved in dollars and what was done today in plain words.
+// weeklyText is the once-a-week summary line (wiring.ts weeklySummary keeps the figure it compares against).
 import { pyFixed } from './metrics'
 
 export const NAME = 'agent-services'
@@ -21,19 +23,23 @@ export const SAVINGS_TTL_MS = 600_000 // plan 3.8: the $ figure is cached 10 min
 // /agent-services:agent-services; the registered one answers only to /agent-services (smoke test 2026-10-31).
 export const COMMAND = '/agent-services'
 export const UPDATE_HINT_MS = 7 * 86_400_000 // plan 3.8: the update line at most once per 7 days
-export const HINT_OFF = `run ${COMMAND} savings on to see dollars saved`
-export const HINT_OFF_SHORT = `dollars saved: ${COMMAND} savings on`
-export const HINT_WAIT = 'savings show after the first daily upload'
-export const HINT_WAIT_SHORT = 'savings after the first upload'
+export const HINT_OFF = `to see how much it saves you, run ${COMMAND} savings on`
+export const HINT_OFF_SHORT = `see savings: ${COMMAND} savings on`
+export const HINT_WAIT = 'savings appear after the first day'
+export const HINT_WAIT_SHORT = 'savings after day one'
+// Shown once (log line and toast) where the daily upload is on by default (wiring.ts startNotices).
+export const DEFAULT_ON_NOTICE =
+  `${NAME} now shows how much it saves you. To do that it uploads a daily summary of usage counts, never your code ` +
+  `or chats. To turn it off: ${COMMAND} savings off`
 // The status line while signed out or after an auth fail (plan 3.9).
 export const SIGN_IN_LINE = `${NAME}${SEP}signed out: ${COMMAND} login <email>`
 export const LOCKED_LINE = `${NAME}${SEP}paused: this account is locked; contact support, then ${COMMAND} login <email>`
-export const COUNTED: [string, string][] = [
-  ['route', 'routed'],
-  ['compact_start', 'compacted'],
-  ['index', 'indexed reads'],
+// today's counts: [event kind, one, many]
+export const COUNTED: [string, string, string][] = [
+  ['route', 'job on a cheaper model', 'jobs on a cheaper model'],
+  ['compact_start', 'memory cleanup', 'memory cleanups'],
 ]
-const DAY_RX = /^\p{Nd}{4}-(\p{Nd}{2}-\p{Nd}{2})\n?$/u
+const DAY_RX = /^[0-9]{4}-([0-9]{2})-([0-9]{2})\n?$/
 
 export type Counts = Record<string, number>
 export type Auth = 'ok' | 'signed_out' | 'auth_failed' | 'locked'
@@ -52,40 +58,40 @@ export function fixed(x: number, n: number, commas = false): string {
 }
 
 export function todayText(counts: Counts): string | null {
-  const parts = COUNTED.filter(([k]) => counts[k]).map(([k, label]) => `${counts[k]} ${label}`)
+  const parts = COUNTED.filter(([k]) => num(counts[k]) && counts[k]! > 0).map(([k, one, many]) => `${counts[k]} ${counts[k] === 1 ? one : many}`)
   return parts.length ? 'today: ' + parts.join(', ') : null
 }
 
-/** status_line.py render(): the line for the opt-in, the last server figure (or null) and today's counts. */
+/** "2026-10-01" as "Oct 1"; null for anything else. */
+export function shortDay(first: unknown): string | null {
+  const m = typeof first === 'string' ? DAY_RX.exec(first) : null
+  if (!m) return null
+  const month = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'][Number(m[1]) - 1]
+  const day = Number(m[2])
+  return month && day >= 1 && day <= 31 ? `${month} ${day}` : null
+}
+
+/** The line for the upload switch, the last server figure (or null) and today's counts, at most MAX_LEN. */
 export function render(metricsOn: boolean, saved: unknown, counts: Counts): string {
   const today = todayText(counts)
   const head = [NAME]
   let tail: string | null = null
+  let short: string | null = null
   const usd = isObj(saved) ? saved.usd : undefined
   if (!metricsOn) {
-    head.push('on')
     tail = HINT_OFF
-  } else if (num(usd) && usd > 0) {
-    let s = `saved $${fixed(usd, 2, true)}`
-    const pct = (saved as Record<string, unknown>).pct
-    if (num(pct) && pct >= 0) s += ` (${fixed(pct * 100, 1)}%)`
-    const first = (saved as Record<string, unknown>).first_day
-    const m = typeof first === 'string' ? DAY_RX.exec(first) : null
-    if (m) s += ` since ${m[1]}`
-    head.push(s)
+    short = HINT_OFF_SHORT
+  } else if (num(usd) && usd >= 0.005) {
+    const since = shortDay((saved as Record<string, unknown>).first_day)
+    head.push(`saved you $${fixed(usd, 2, true)} ${since ? `since ${since}` : 'so far'}`)
   } else {
-    head.push('on')
     tail = HINT_WAIT
+    short = HINT_WAIT_SHORT
   }
-  const short = tail === HINT_OFF ? HINT_OFF_SHORT : tail === HINT_WAIT ? HINT_WAIT_SHORT : null
-  const leanCounts: Counts = {}
-  for (const [k, v] of Object.entries(counts)) if (k !== 'index') leanCounts[k] = v
-  const lean = todayText(leanCounts)
   let text = ''
   for (const [t, end] of [
     [today, tail],
     [today, short],
-    [lean, short],
     [null, short],
     [null, tail],
   ] as (string | null)[][]) {
@@ -119,7 +125,7 @@ export function todayCounts(events: unknown[], nowSec: number): Counts {
     }
     if (isObj(e) && typeof e.ts === 'string' && e.ts.slice(0, 10) === day) {
       const k = e.kind
-      if (COUNTED.some(([c]) => c === k)) out[k] = (out[k] ?? 0) + 1
+      if (k === 'route' || k === 'compact_start' || k === 'index') out[k] = (out[k] ?? 0) + 1 // index: kept, not shown
     }
   }
   return out
@@ -136,3 +142,34 @@ export const updateHintDue = (lastShown: number | null, now: number): boolean =>
 /** The one terminal line that updates the plugin, with the installed marketplace name filled in (plan 3.8). */
 export const updateCommand = (marketplace: string): string =>
   `claude plugin marketplace update ${marketplace} && claude plugin update agent-services@${marketplace}`
+
+/** The Monday 00:00 UTC (ms) that starts the ISO week of a ms clock, and the week's name ("2026-W44"). */
+export function isoWeek(ms: number): { week: string; start: number } {
+  const t = new Date(Math.floor(ms))
+  const start = Date.UTC(t.getUTCFullYear(), t.getUTCMonth(), t.getUTCDate()) - ((t.getUTCDay() + 6) % 7) * 86_400_000
+  const thursday = new Date(start + 3 * 86_400_000)
+  const year = thursday.getUTCFullYear()
+  const n = Math.floor((thursday.getTime() - Date.UTC(year, 0, 1)) / (7 * 86_400_000)) + 1
+  return { week: `${year}-W${String(n).padStart(2, '0')}`, start }
+}
+
+export type WeekMark = { week: string; start: number; usd: number }
+
+/**
+ * The weekly summary line: `usd` is this week's first cumulative server figure, `prev` the stored mark of an
+ * earlier week (or null the first time). `mark` is what to store (null: store nothing, try again later); `text` is
+ * null when there is nothing to say (no figure, or nothing saved since the mark).
+ */
+export function weeklyText(prev: unknown, nowMs: number, usd: unknown): { text: string | null; mark: WeekMark | null } {
+  if (!num(usd)) return { text: null, mark: null }
+  const { week, start } = isoWeek(nowMs)
+  const mark = { week, start, usd }
+  const p = isObj(prev) && typeof prev.week === 'string' && num(prev.start) && num(prev.usd) ? prev : null
+  if (p && p.week === week) return { text: null, mark: null }
+  if (!p) return { text: usd >= 0.005 ? `So far ${NAME} has saved you $${fixed(usd, 2, true)}.` : null, mark }
+  const diff = usd - p.usd
+  if (!(diff >= 0.005)) return { text: null, mark }
+  const weeks = Math.max(1, Math.round((start - p.start) / (7 * 86_400_000)))
+  const when = weeks === 1 ? 'Last week' : `In the last ${weeks} weeks`
+  return { text: `${when} ${NAME} saved you $${fixed(diff, 2, true)}.`, mark }
+}
