@@ -3,7 +3,7 @@ import { dataDir, declareCommand, denyReason, engineClaudeHash, engineDirs, isRe
 import { Core, type Answer } from './core'
 import { dashboardGrant, GRANT_REASON, PUBLISH_START_WAIT_MS } from './dashboard'
 import { publishBoards } from './boss'
-import { briefed, flowAfter, flowLock, flowPrompt, flowStart, flowTurnEnd, installFlow, withPending } from './flow'; import { installConcurrency } from './concurrency'
+import { briefed, flowAfter, flowLock, flowPrompt, flowStart, flowTurnEnd, installFlow, withPending } from './flow'; import { installConcurrency, stepWatch } from './concurrency'
 import { Guard } from './guard'
 import { FLUSH_EVERY_MS, Outbox } from './outbox'; import { PANEL_EVERY_MS } from './panel'
 import { gatePlaces, holdWrite, methodsStart, planExit, planModeSeen, pushAgain, pushLessons, pushStart } from './phase'
@@ -266,7 +266,7 @@ export const register: Register = (on) => {
     const model = e.model ?? null
     const a = await send($, 'step', agent, { model })
     show($, a?.notice)
-    const se: Ev = a?.action === 'rewrite' && a.set ? { ...e, ...a.set } : e; cacheStepStart(se); const step: Ev = yield* next(se); cacheStep(se, step)
+    const se: Ev = a?.action === 'rewrite' && a.set ? { ...e, ...a.set } : e; cacheStepStart(se); const step: Ev = yield* stepWatch($, se, next); cacheStep(se, step)
     show($, (await send($, 'step_end', agent, { model, usage: usage(step?.usage) }))?.notice)
     return step
   }).catch(async function* ($, e, next) {
