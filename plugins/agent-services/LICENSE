@@ -5,7 +5,8 @@ COPYRIGHT AND OWNERSHIP
 This software, including its source code, hooks, prompts, texts, rule tables, documentation, dashboard, design and
 the services it connects to, is the property of Yi Zhang and is protected by copyright law and international
 treaties. All rights not expressly granted below are reserved by Yi Zhang. "agent-services" and "agent-plugin" are
-names used by Yi Zhang for this software.
+names used by Yi Zhang for this software. The working methods the services provide to this software, including its
+step-by-step hand-over of the actions only the user can take, are protected texts and methods of Yi Zhang.
 
 PERMITTED USE
 You may install this software and run it unmodified, inside Claude Code, together with an account created for you by
