@@ -111,15 +111,17 @@ export function costOf(entry: { model: string; isFast?: boolean; counts: Counts 
 }
 
 export function usageOf(u: Obj): Counts {
-  const created = u.cache_creation || {}
-  const total = u.cache_creation_input_tokens || 0
-  const w1h = created.ephemeral_1h_input_tokens || 0
-  let w5m = created.ephemeral_5m_input_tokens
-  if (w5m === undefined || w5m === null) w5m = Math.max(0, total - w1h)
+  // a count that is not a finite number of zero or more counts as 0 (a string never joins a sum as text)
+  const n = (v: unknown): number => (typeof v === 'number' && Number.isFinite(v) && v >= 0 ? v : 0)
+  const created = isObj(u.cache_creation) ? u.cache_creation : {}
+  const total = n(u.cache_creation_input_tokens)
+  const w1h = n(created.ephemeral_1h_input_tokens)
+  const w5m = created.ephemeral_5m_input_tokens === undefined || created.ephemeral_5m_input_tokens === null
+    ? Math.max(0, total - w1h) : n(created.ephemeral_5m_input_tokens)
   return {
-    input: u.input_tokens || 0,
-    output: u.output_tokens || 0,
-    cacheRead: u.cache_read_input_tokens || 0,
+    input: n(u.input_tokens),
+    output: n(u.output_tokens),
+    cacheRead: n(u.cache_read_input_tokens),
     cacheWrite5m: w5m,
     cacheWrite1h: w1h,
   }
@@ -218,7 +220,10 @@ function collectLine(seen: Map<string, Entry>, raw: string, rel: string): void {
   if (!isObj(usage) || !stamp || model.startsWith('<')) return
   const moment = parseIso(stamp, 'local')
   if (moment === null) return
-  const key = JSON.stringify([message.id ?? null, row.requestId ?? null])
+  // a row without either id is its own row (by its uuid, else alone), never merged with every other such row
+  const key = message.id == null && row.requestId == null
+    ? JSON.stringify(['row', typeof row.uuid === 'string' && row.uuid ? row.uuid : `${rel}:${seen.size}`])
+    : JSON.stringify([message.id ?? null, row.requestId ?? null])
   const counts = usageOf(usage)
   const held = seen.get(key)
   if (!held) {
@@ -229,7 +234,8 @@ function collectLine(seen: Map<string, Entry>, raw: string, rel: string): void {
 }
 
 export const normModel = (model: unknown): string => {
-  const name = typeof model === 'string' ? bare(model) : ''
+  // Bedrock ("...claude-x-20250929-v1:0") and Vertex ("claude-x@20250929") spellings as the plain id
+  const name = typeof model === 'string' ? bare(model).replace(/@(\d{8})$/, '-$1').replace(/-v\d+:\d+$/, '') : ''
   return MODEL_ID.test(name) ? name : 'other'
 }
 

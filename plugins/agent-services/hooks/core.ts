@@ -550,8 +550,12 @@ export class Core {
     if (kind === 'session_start') this.startHello(sid)
     else if (this.helloDue(st)) this.startHello(null)
     if (!st.open) {
+      if (kind === 'session_start') this.sweepOnce() // local upkeep: also while the gate is unknown or closed
       const out = this.closedAnswer(sid, st)
-      if (kind === 'session_end') this.dropSession(sid)
+      if (kind === 'session_end') {
+        this.dropSession(sid)
+        this.endCounters(sid) // the local counts still end with the session
+      }
       return out
     }
     const raw = await this.run(kind, event)
@@ -624,9 +628,12 @@ export class Core {
     const k = sid + '\n' + role
     let p = this.guardSessions.get(k)
     if (!p) {
-      p = this.guard!.open(role)
-      this.guardSessions.set(k, p)
-      p.catch(() => this.guardSessions.delete(k))
+      const q = this.guard!.open(role)
+      this.guardSessions.set(k, q)
+      q.catch(() => {
+        if (this.guardSessions.get(k) === q) this.guardSessions.delete(k) // never a newer open of the same key
+      })
+      p = q
     }
     return p
   }
@@ -675,11 +682,15 @@ export class Core {
   }
 
   private onSessionStart(): Answer {
+    this.sweepOnce()
+    return answer()
+  }
+
+  private sweepOnce(): void {
     if (!this.swept) {
       this.swept = true
       this.spawn(() => sweep(this.store, this.clock()))
     }
-    return answer()
   }
 
   private async onDispatch(e: Ev): Promise<Answer> {
@@ -698,7 +709,9 @@ export class Core {
     const fb = r.fallback
     noteCallBrief(e.call, r.brief_rule) // flow.ts briefed(): this spawn's own rule
     if (r.decision === 'route') {
+      // a spawn denied after this answer never reports back: its row stays, so the oldest rows go
       s.dispatches.push([e.call, r.effort ?? null])
+      if (s.dispatches.length > 64) s.dispatches.splice(0, s.dispatches.length - 64)
       return answer('rewrite', { set: { model: r.model ?? null, effort: r.effort ?? null }, notice, fallback: fb })
     }
     if (r.decision === 'deny') {
@@ -714,7 +727,7 @@ export class Core {
 
   private onDispatched(e: Ev): Answer {
     const s = this.state(e)
-    const i = s.dispatches.findIndex(([c]) => c === e.call)
+    const i = s.dispatches.findIndex(([c]) => c === e.call) // without call ids: first in, first out (golden p4_core)
     if (i >= 0) {
       const [, effort] = s.dispatches[i]!
       s.dispatches.splice(i, 1)
@@ -942,13 +955,17 @@ export class Core {
     } finally {
       this.sessionsMap.delete(sid)
       this.closeGuard(sid)
-      // the session's open compaction count ends with it (a later resume adds no steps to an old compaction)
-      this.spawn(async () => {
-        await this.counters.stop(sid).catch(() => undefined)
-        await this.counters.flush()
-      })
+      this.endCounters(sid)
     }
     return answer()
+  }
+
+  // the session's open compaction count ends with it (a later resume adds no steps to an old compaction)
+  private endCounters(sid: string): void {
+    this.spawn(async () => {
+      await this.counters.stop(sid).catch(() => undefined)
+      await this.counters.flush()
+    })
   }
 
   // ---------------- tools

@@ -86,7 +86,8 @@ async function readState($: EngineInterface, dir: string, board: Board = MAIN_BO
     if (!s || typeof s !== 'object') {
       return null
     }
-    const url = typeof s.url === 'string' && URL_RX.test(s.url) ? s.url : null
+    // the whole value is the link (URL_RX alone finds one inside a tool's answer text)
+    const url = typeof s.url === 'string' && /^https:\/\/claude\.ai\/(?:code\/)?artifact\/[A-Za-z0-9_-]+$/.test(s.url) ? s.url : null
     return { changed_at: num(s.changed_at), url, published_at: num(s.published_at), denied: s.denied === true, publishing_at: num(s.publishing_at) }
   } catch {
     return null
@@ -152,11 +153,16 @@ async function writeLive($: EngineInterface, dir: string, board: Board, live: Li
   }
 }
 
-async function call($: EngineInterface, input: Record<string, unknown>): Promise<Res> {
+/** The calls one attempt made: only its first surely starts inside the turn.complete hook (publishDashboard denied). */
+type Count = { n: number }
+
+async function call($: EngineInterface, input: Record<string, unknown>, c?: Count): Promise<Res> {
+  if (c) c.n += 1
   return (await $.tool.call({ tool: TOOL, ...input } as any)) as Res
 }
 
-async function callData($: EngineInterface, input: Record<string, unknown>): Promise<Res> {
+async function callData($: EngineInterface, input: Record<string, unknown>, c?: Count): Promise<Res> {
+  if (c) c.n += 1
   return (await $.tool.call({ tool: DATA_TOOL, ...input } as any)) as Res
 }
 
@@ -179,20 +185,20 @@ function docVersion(r: Res): number | null {
  * version is unknown or changed, or this session has not read the artifact), a `get` (after an Artifact read when
  * the get is refused as unread), then the `set` once more. Resolves to the deciding answer and the new version.
  */
-async function writeData($: EngineInterface, url: string, data: Record<string, unknown>, known: number | null): Promise<{ res: Res; done: boolean; version: number | null }> {
-  const set = (v: number | null) => callData($, { action: 'set', url, ...DOC, data, ...(v === null ? {} : { if_version: v }) })
+async function writeData($: EngineInterface, url: string, data: Record<string, unknown>, known: number | null, c?: Count): Promise<{ res: Res; done: boolean; version: number | null }> {
+  const set = (v: number | null) => callData($, { action: 'set', url, ...DOC, data, ...(v === null ? {} : { if_version: v }) }, c)
   const end = (res: Res) => ({ res, done: wrote(res), version: wrote(res) ? docVersion(res) : null })
   let res = await set(known)
   if (res.deny !== undefined || wrote(res)) {
     return end(res)
   }
-  let got = await callData($, { action: 'get', url, ...DOC })
+  let got = await callData($, { action: 'get', url, ...DOC }, c)
   if (got.deny === undefined && got.isError === true && UNREAD_RX.test(textOf(got))) {
-    const read = await call($, { action: 'read', url })
+    const read = await call($, { action: 'read', url }, c)
     if (!ok(read)) {
       return { res: read, done: false, version: null }
     }
-    got = await callData($, { action: 'get', url, ...DOC })
+    got = await callData($, { action: 'get', url, ...DOC }, c)
   }
   if (got.deny === undefined && got.isError === true && /not found|does not exist|no such/i.test(textOf(got))) {
     return end(await set(null)) // the document is gone: create it again
@@ -263,7 +269,14 @@ export async function publishDashboard($: EngineInterface, report?: Report, opts
       await markPublishing($, dir, board, now)
     }
     lastAttempt.set(board.page, now)
+    const c: Count = { n: 0 }
     const denied = async (res: Res): Promise<string> => {
+      if (c.n > 1) {
+        // a later call may start after the hook returned, where the engine skips this plugin's grant and denies
+        // without asking: not the user's answer, so the next turn tries again (audit 2026-11-12)
+        lastAttempt.delete(board.page)
+        return 'failed'
+      }
       deniedIn.set(board.page, session)
       try {
         opts.note?.({ reason: typeof res.deny === 'string' ? res.deny : undefined })
@@ -273,13 +286,16 @@ export async function publishDashboard($: EngineInterface, report?: Report, opts
       await send(report, session, 'dashboard_denied')
       return 'denied'
     }
-    const live = page.data !== null && st.url !== null && tools.includes(DATA_TOOL) ? await readLive($, dir, board) : null
+    const live = page.data !== null && st.url !== null ? await readLive($, dir, board) : null
     const data = page.data
     let version = live && live.url === st.url ? live.version : null
-    if (data !== null && st.url !== null && live !== null && live.url === st.url) {
+    if (data !== null && live !== null && live.url === st.url && live.format === page.format && !tools.includes(DATA_TOOL)) {
+      return 'no_tool' // the page is live in its format; without the data tool only a publish (shown to the user) could update it
+    }
+    if (data !== null && st.url !== null && live !== null && live.url === st.url && tools.includes(DATA_TOOL)) {
       // the board's page is published already: write its figures; publish the page only when its format changed
       sending.set(board.page, encode(data))
-      const w = await writeData($, st.url, data, version)
+      const w = await writeData($, st.url, data, version, c)
       if (w.res.deny !== undefined) {
         return await denied(w.res)
       }
@@ -303,13 +319,13 @@ export async function publishDashboard($: EngineInterface, report?: Report, opts
       ...(st.url ? { url: st.url } : { icon: board.icon }),
       ...(data !== null ? { capabilities: DB_CAPS } : {}),
     }
-    let res = await call($, input)
+    let res = await call($, input, c)
     if (res.deny === undefined && res.isError === true && st.url && UNREAD_RX.test(textOf(res))) {
-      const read = await call($, { action: 'read', url: st.url })
+      const read = await call($, { action: 'read', url: st.url }, c)
       if (read.deny !== undefined) {
         res = read
       } else {
-        res = await call($, input)
+        res = await call($, input, c)
       }
     }
     if (res.deny !== undefined) {

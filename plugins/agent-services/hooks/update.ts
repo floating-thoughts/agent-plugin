@@ -56,17 +56,20 @@ export function listedVersion(manifest: string, plugin: string): string {
   return typeof row?.version === 'string' ? row.version.slice(0, 40) : ''
 }
 
-/** Whether `latest` is newer than `installed`: dotted numbers compare by number, anything else when it differs. */
+/** Whether `latest` is newer than `installed`: their leading dotted numbers compare by number; with equal numbers a
+ * release is newer than a prerelease of it ("0.6.0" over "0.6.0-beta"); a version without leading numbers is never
+ * newer, and never older. */
 export function isNewer(latest: string, installed: string): boolean {
   if (!latest || !installed || latest === installed) return false
-  const dotted = /^\d+(\.\d+)*$/
-  if (!dotted.test(latest) || !dotted.test(installed)) return true
-  const a = latest.split('.').map(Number)
-  const b = installed.split('.').map(Number)
+  const pa = /^\d+(?:\.\d+)*/.exec(latest)?.[0]
+  const pb = /^\d+(?:\.\d+)*/.exec(installed)?.[0]
+  if (!pa || !pb) return false
+  const a = pa.split('.').map(Number)
+  const b = pb.split('.').map(Number)
   for (let i = 0; i < Math.max(a.length, b.length); i++) {
     if ((a[i] ?? 0) !== (b[i] ?? 0)) return (a[i] ?? 0) > (b[i] ?? 0)
   }
-  return false
+  return latest === pa && installed !== pb
 }
 
 // `claude plugin update --json`: its result line, or the message an older Claude Code prints.
@@ -147,8 +150,9 @@ async function findExe($: EngineInterface): Promise<{ exe: string; listed: strin
     `${home}/.local/bin/claude.exe`, `${home}/.claude/local/claude`, '/opt/homebrew/bin/claude', '/usr/local/bin/claude']
   for (const at of tried.filter((p, i, all) => p && !p.startsWith('/.') && all.indexOf(p) === i)) {
     try {
-      const listed = String((await $.process.run([at, 'plugin', 'list', '--json'], { timeoutMs: 60_000, cwd: $.plugin.root })).stdout ?? '')
-      return { exe: at, listed }
+      const r = await $.process.run([at, 'plugin', 'list', '--json'], { timeoutMs: 60_000, cwd: $.plugin.root })
+      const listed = String(r.stdout ?? '')
+      if (r.exitCode === 0 && Array.isArray(parse(listed))) return { exe: at, listed } // else not a working claude: the next
     } catch {}
   }
   return { exe: '', listed: '' }
@@ -197,6 +201,8 @@ async function run($: EngineInterface, interactive: boolean): Promise<void> {
   const now = await $.clock.now()
   const path = await statePath($)
   const shared = await readShared($, path)
+  // a checkedAt that is not a number, or lies in the future (a clock set back), never holds the check off
+  if (typeof shared.checkedAt !== 'number' || !Number.isFinite(shared.checkedAt) || shared.checkedAt > now) shared.checkedAt = 0
   if (now - (shared.checkedAt ?? 0) < UPDATE_EVERY_MS) {
     // another session (or this one) checked lately: its answer stands
     if (shared.latest !== undefined) remember(shared.installed ?? '', shared.latest, shared.noted, await ownVersion($))

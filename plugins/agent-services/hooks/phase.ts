@@ -204,7 +204,15 @@ export async function lessonGate(phase: unknown, cwd: string | null, read: Read)
 export const lessonHold = (read: Read) => async (args: Obj, cwd: string | null): Promise<Obj | null> => {
   const level = await levelNow()
   if (level === 'off') return { ...heldLesson(args, LESSON_OFF), fallback: 'off' }
-  if (level === 'on' && args.event === undefined) return { ...heldLesson(args, LESSON_ON), fallback: 'claude_md' } // just-in-time items by name pass
+  if (level === 'on' && args.event === undefined) {
+    // just-in-time items by name pass; "already loaded" only when CLAUDE.md really brought them to this session
+    if (methodsActive()) return { ...heldLesson(args, LESSON_ON), fallback: 'claude_md' }
+    return {
+      ...heldLesson(args, 'the working methods you approved are not loaded in this session (the CLAUDE.md section or ' +
+        'its file is missing or expired); /agent-services methods shows what to do'),
+      fallback: 'claude_md',
+    }
+  }
   return null // suggest: the text served now, never held (lessonGate stays for a caller that wants the planning hold)
 }
 
@@ -215,8 +223,12 @@ const lines = (v: unknown): number => (typeof v === 'string' && v ? v.split(/\r?
 export function smallEdit(tool: unknown, input: Obj, max: number | null): boolean {
   if (typeof max !== 'number') return false
   const one = (e: unknown) => (e && typeof e === 'object' ? Math.max(lines((e as Obj).old_string), lines((e as Obj).new_string)) : Infinity)
-  if (tool === 'Edit') return one(input) <= max
-  if (tool === 'MultiEdit') return Array.isArray(input.edits) && input.edits.reduce((n: number, e) => n + one(e), 0) <= max
+  // replace_all changes every occurrence: its line count says nothing about the size of the change
+  const all = (e: unknown) => !!e && typeof e === 'object' && (e as Obj).replace_all === true
+  if (tool === 'Edit') return !all(input) && one(input) <= max
+  if (tool === 'MultiEdit') {
+    return Array.isArray(input.edits) && !input.edits.some(all) && input.edits.reduce((n: number, e) => n + one(e), 0) <= max
+  }
   return false
 }
 

@@ -571,20 +571,39 @@ export class Wiring {
   // ---------------- the dashboard
 
   private async readState(path = this.statePath): Promise<Obj> {
+    return (await this.stateOrNull(path)) ?? { changed_at: null, url: null, published_at: null, denied: false }
+  }
+
+  /** The state, or null when the file is listed but its read failed: a write then would erase the page's url. */
+  private async stateOrNull(path: string): Promise<Obj | null> {
     const out: Obj = { changed_at: null, url: null, published_at: null, denied: false }
+    let text: string
     try {
-      const got = JSON.parse(String(await this.d.fs.read(path)))
+      text = String(await this.d.fs.read(path))
+    } catch {
+      const cut = path.search(/[\\/][^\\/]*$/)
+      try {
+        const there = cut > 0 && typeof this.d.fs.list === 'function' && (await this.d.fs.list(path.slice(0, cut))).some((e) => e.name === path.slice(cut + 1))
+        return there ? null : out
+      } catch {
+        return out // no folder to list: nothing there yet
+      }
+    }
+    try {
+      const got = JSON.parse(text)
       if (isObj(got)) for (const k of Object.keys(out)) if (k in got) out[k] = got[k]
       // dashboard.ts markPublishing: another session's first publish is under way; kept so this write does not erase it
       if (isObj(got) && typeof got.publishing_at === 'number') out.publishing_at = got.publishing_at
     } catch {
-      // none yet
+      // not JSON: nothing to keep
     }
     return out
   }
 
   private async updateState(fields: Obj): Promise<void> {
-    const st = { ...(await this.readState()), ...fields }
+    const old = await this.stateOrNull(this.statePath)
+    if (old === null) return // unreadable, not missing: keep the file as it is
+    const st = { ...old, ...fields }
     try {
       await this.d.fs.write(this.statePath, JSON.stringify(st, null, 2))
     } catch {
@@ -965,12 +984,14 @@ export class Wiring {
    * oldest first. */
   async metricsTick(): Promise<TickResult> {
     this.tickedDay = this.today()
-    if (!(await this.authOk())) return { skipped: 'auth_failed' }
+    // skipped before signing in: the day is not done, so a sign-in later in this session still uploads it
+    const notYet = (skipped: string): TickResult => ((this.tickedDay = null), { skipped })
+    if (!(await this.authOk())) return notYet('auth_failed')
     try {
       const g = this.d.svc.gateState()
-      if (!g.open && g.reason !== 'unknown') return { skipped: 'inactive' }
+      if (!g.open && g.reason !== 'unknown') return notYet('inactive')
     } catch {
-      return { skipped: 'inactive' }
+      return notYet('inactive')
     }
     const settings = await this.settings()
     const { entry } = await readEntry(this.d.store)

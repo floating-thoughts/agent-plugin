@@ -819,13 +819,16 @@ export class Svc {
       if (ist === 401 && o.signed) break // recovered (or not) by the caller
       if (ist === 423) {
         const paused = code === 'org_paused' // the org's admin paused it; the sign-in stays
-        await this.setBlock(code, paused ? BLOCK_SECONDS.org_paused : BLOCK_SECONDS.account_locked, o.token ?? null)
+        // an unsigned answer (a sign-in for some email) never blocks a sign-in that is already stored
+        if (o.signed || !(await getText(this.kv, KEYS.token))) {
+          await this.setBlock(code, paused ? BLOCK_SECONDS.org_paused : BLOCK_SECONDS.account_locked, o.token ?? null)
+        }
         this.notice(code)
         if (o.signed) this.setGate(paused ? 'paused' : 'locked')
         break
       }
       if (ist === 429 && code === 'locked_out') {
-        await this.setBlock(code, BLOCK_SECONDS.locked_out, o.token ?? null)
+        if (o.signed || !(await getText(this.kv, KEYS.token))) await this.setBlock(code, BLOCK_SECONDS.locked_out, o.token ?? null)
         this.notice(code)
         if (o.signed) this.setGate('locked')
         break
@@ -870,7 +873,8 @@ export class Svc {
       const was = this.claudeSent
       this.claude = null
       const now = await this.claudeNow()
-      if (now === null) return first // unreadable now: never a sign-out on a read that failed
+      // unreadable now (also past CLAUDE_UNREADABLE_MS, sent as ""): never a sign-out on a read that failed
+      if (now === null || this.claudeBadSince !== null) return first
       if (now !== was) {
         const r = await this.attempt(method, wire, body, service, deadline, { ...o, token: sent })
         attempts += r.attempts

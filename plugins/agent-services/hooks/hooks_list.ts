@@ -168,10 +168,12 @@ export const HOOKS: readonly HookRow[] = [
   },
   {
     event: 'ui.render', matcher: 'component: AbovePrompt', file: 'band.ts', does: ['ui'],
-    what: 'Draws one dim line above the prompt (sign-in state, savings). While setup questions are open it says ' +
-      'how many and names /agent-services setup instead (at most once every 7 days after that command ran); the ' +
-      'questions are asked only when you run it.',
-    shown: 'The line itself.',
+    what: 'Draws above the prompt: a top row with the decisions waiting for you (.agent/pending.md) and the ' +
+      'connection state, one dim line (sign-in state, savings) and, while figures show, a usage panel (tokens, quota ' +
+      'and context, time saved). While setup questions are open the line says how many and ' +
+      'names /agent-services setup instead (at most once every 7 days after that command ran); the questions are ' +
+      'asked only when you run it.',
+    shown: 'The band itself.',
   },
   {
     event: 'tool.call', matcher: 'tool: mcp__agent-services__checkpoint', file: 'flow.ts', does: ['answer', 'ui', 'context'],
@@ -238,7 +240,8 @@ export const HOOKS: readonly HookRow[] = [
 
 export const HOOKS_ALSO =
   'Not hooks, also used: the status line ($.ui.status; with the count of open lines in .agent/pending.md), timers (the request log is written every 5 seconds; the ' +
-  'update check), and questions in Claude Code\'s own dialog when you run a command (sign-in, /agent-services setup).'
+  'update check; with the served rule tables, a check every few seconds that asks the main conversation about ' +
+  'background tasks running past the served time and carries on after a usage limit), and questions in Claude Code\'s own dialog when you run a command (sign-in, /agent-services setup).'
 
 /** The table as text, for /agent-services hooks and the setup tool. */
 export function hooksText(): string {

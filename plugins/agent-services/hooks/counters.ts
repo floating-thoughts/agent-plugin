@@ -150,7 +150,7 @@ export class Counters {
   private readonly random: Random
   private readonly dayOf: (ms: number) => string
   private readonly isLong: (model: string, prompt: number) => boolean
-  private readonly records = new Map<string, Promise<DayRecord>>()
+  private readonly records = new Map<string, Promise<DayRecord | null>>()
   private readonly opens = new Map<string, Promise<string | null>>()
   private readonly writes = new Map<string, Promise<void>>()
 
@@ -162,12 +162,17 @@ export class Counters {
     this.isLong = opts.isLong ?? (() => false)
   }
 
-  private record(session: string, now: number): { key: string; rec: Promise<DayRecord> } {
+  private record(session: string, now: number): { key: string; rec: Promise<DayRecord | null> } {
     const day = this.dayOf(now)
     const key = COUNTER_PREFIX + day + ':' + sessionKey(session)
     let rec = this.records.get(key)
     if (!rec) {
-      rec = this.store.get(key).then((v) => asRecord(v, day), () => emptyRecord(day)) // a resumed session goes on
+      // a resumed session goes on; a failed read is null (never written over) and read again next time
+      const p: Promise<DayRecord | null> = this.store.get(key).then((v) => asRecord(v, day), () => {
+        if (this.records.get(key) === p) this.records.delete(key)
+        return null
+      })
+      rec = p
       this.records.set(key, rec)
     }
     return { key, rec }
@@ -185,6 +190,7 @@ export class Counters {
   private async change(session: string, fn: (r: DayRecord) => void): Promise<void> {
     const { key, rec } = this.record(session, this.clock())
     const r = await rec
+    if (r === null) return // the stored record could not be read: this change is lost, the record kept
     fn(r)
     await this.write(key, r)
   }
@@ -193,10 +199,14 @@ export class Counters {
     const k = sessionKey(session)
     let p = this.opens.get(k)
     if (!p) {
-      p = this.store.get(OPEN_PREFIX + k).then(
+      const q: Promise<string | null> = this.store.get(OPEN_PREFIX + k).then(
         (v) => (v && typeof v === 'object' && typeof (v as { ref?: unknown }).ref === 'string' ? (v as { ref: string }).ref : null),
-        () => null,
+        () => {
+          if (this.opens.get(k) === q) this.opens.delete(k) // a failed read is asked again next time
+          return null
+        },
       )
+      p = q
       this.opens.set(k, p)
     }
     return p

@@ -117,10 +117,16 @@ export async function trimAppend($: EngineInterface, e: Obj): Promise<Obj | null
       await closeRun($)
       const id = ++seq
       run = { seq: id, tokens: 0, rows: 0, on: undefined, lastAt: await $.clock.now() }
-      // nothing else may follow before the session ends: count it anyway
-      $.clock.after(burst * 2, () => {
-        if (run?.seq === id) closeRun($).catch(() => undefined)
-      })
+      // nothing else may follow before the session ends: count it anyway, once the rows stopped for a burst
+      const check = (): void => {
+        if (run?.seq !== id) return
+        Promise.resolve($.clock.now()).then((now) => {
+          if (run?.seq !== id) return
+          if (now - run.lastAt > burst) closeRun($).catch(() => undefined)
+          else $.clock.after(burst * 2, check)
+        }).catch(() => undefined)
+      }
+      $.clock.after(burst * 2, check)
       return null
     }
     if (run) {
@@ -136,8 +142,8 @@ export async function trimAppend($: EngineInterface, e: Obj): Promise<Obj | null
       : Array.isArray(content) ? content.map((b: Obj) => (b?.type === 'text' && typeof b.text === 'string' ? b.text : '')).filter(Boolean).join('\n')
       : ''
     if (m.name === 'file') {
-      const path = filePath(text) ?? ''
-      if (t.keep.some((rx) => rx.test(path))) return null
+      const path = filePath(text)
+      if (path === null || t.keep.some((rx) => rx.test(path))) return null // an unknown path may be a kept file
     }
     const line = lineFor(m.name, text)
     if (line === null || line.length >= text.length) return null
