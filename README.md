@@ -221,7 +221,7 @@ exists (the plugin never writes it).
 - **Test lock.** `.agent/test-lock.json` holds globs (`{"locked": ["tests/**"]}`); a subagent's Edit, Write,
   MultiEdit or NotebookEdit of a matching file is denied, the main conversation may still edit it. Bash is not
   checked.
-- **Pending decisions.** `.agent/pending.md`, one `- [ ] ...` line per decision waiting for you; the working methods
+- **Pending actions.** `.agent/pending.md`, one `- [ ] ...` line per action waiting for you; the working methods
   say when the model writes there, and the status line shows the open count.
 - **Steps.** `.agent/steps.json` (`{"steps": [{"id": "a", "deps": [], "status": "todo"}]}`, status `todo`, `running`
   or `done`): when more steps are ready to start than the last turn dispatched subagents, the model gets a one-line

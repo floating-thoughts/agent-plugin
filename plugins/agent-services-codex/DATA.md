@@ -121,7 +121,7 @@ agent-services writes no file on your computer. Codex itself keeps:
 ## 6. What you can turn off
 
 - Working methods: `setup_methods` with `methods off` (back with `methods on` or `methods suggest`).
-- Codex usage sharing is off unless you answer Yes to "Upload my Codex usage counts?" on the sign-in page; No turns
+- Codex usage sharing is off unless you answer Yes to "Upload your Codex usage counts?" on the sign-in page; No turns
   it off. To change it later, sign in again (`codex mcp logout agent-services`, then `codex mcp login agent-services`)
   and answer again. Your answer counts once you entered the right code, even if Codex then does not finish the
   sign-in.

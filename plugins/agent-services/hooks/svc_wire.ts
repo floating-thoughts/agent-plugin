@@ -23,6 +23,7 @@ export function parseConfig(c: unknown): {
   keys: ServerKeys
   e2eSend: Uint8Array
   fingerprint: string
+  binding: string
 } {
   if (!c || typeof c !== 'object' || Array.isArray(c)) throw new Error('config must be an object')
   const o = c as Record<string, unknown>
@@ -58,7 +59,37 @@ export function parseConfig(c: unknown): {
   }
   // the Python client's client_fingerprint: json.dumps(doc, sort_keys=True, separators=(",", ":"))
   const fingerprint = 'fp1:' + sha256Hex(utf8(JSON.stringify(doc)))
-  return { origin: port === 443 ? `https://${m[1]}` : `https://${m[1]}:${port}`, host: m[1], port, keys, e2eSend, fingerprint }
+  // the sign-in binding (server key ring): the same document in clear (public keys only), so a later
+  // config can be compared key by key (bindingKept)
+  const binding = 'fp2:' + JSON.stringify({ ...doc, e2e_keys: [...ek].sort() })
+  return { origin: port === 443 ? `https://${m[1]}` : `https://${m[1]}:${port}`, host: m[1], port, keys, e2eSend, fingerprint, binding }
+}
+
+/** Server key ring (a key rotation signs nobody out). Does a sign-in bound to `bound` stay with
+ * this config? Yes for the same binding; for the old fp1 fingerprint of this same config (installs bound before the
+ * key ring); and for an fp2 binding with the same endpoint, ca and pins that shares at least one server key and one
+ * e2e key with this config (a rotation step adds the new key next to the old one, the next drops the old one). A
+ * config that shares no key with the bound one (another server on the same name) or names another endpoint does not
+ * keep it. */
+export function bindingKept(bound: string, cfg: { fingerprint: string; binding: string }): boolean {
+  if (bound === cfg.binding || bound === cfg.fingerprint) return true
+  if (!bound.startsWith('fp2:')) return false
+  let a: any, b: any
+  try {
+    a = JSON.parse(bound.slice(4))
+    b = JSON.parse(cfg.binding.slice(4))
+  } catch {
+    return false
+  }
+  const strs = (v: unknown): string[] | null => (Array.isArray(v) && v.every((x) => typeof x === 'string') ? v : null)
+  const shares = (x: unknown, y: unknown): boolean => {
+    const xs = strs(x)
+    const ys = strs(y)
+    return !!xs && !!ys && xs.some((k) => ys.includes(k))
+  }
+  if (!a || typeof a !== 'object' || a.endpoint !== b.endpoint || a.ca !== b.ca) return false
+  if (JSON.stringify(strs(a.pins)) !== JSON.stringify(b.pins)) return false
+  return shares(a.server_keys, b.server_keys) && shares(a.e2e_keys, b.e2e_keys)
 }
 
 const resolve = (s: any): any => {

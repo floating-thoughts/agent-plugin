@@ -35,7 +35,7 @@ import { BodyTooLarge, DAILY_ROUTE, dailyBody, isDay, isLong, normModel, plusDay
 import { SALT_KEY } from './records'
 import { collect, pageChanged, publishedUrlOk, render as renderPage, renderDue } from './render'
 import { savingsDue, statusText, updateCommand, updateHintDue } from './status'
-import { counterDays, countsOf, dayCountsFromStore, dayEmpty, normalizeDay } from './day_counts'
+import { counterDays, countsOf, dayCountsFromStore, dayEmpty, uploadDay } from './day_counts'
 import { boardData, minUsd, readOutboxDay, timelineOf, weeklyOf } from './board_facts'
 import { bandFacts, paused, setBandPanel, type BandFacts, type BandKind, type BandState } from './band'
 import { readOrg } from './org'
@@ -926,7 +926,7 @@ export class Wiring {
 
   /** The savings part of one day's body: the store counters, normalized. */
   async daySavings(day: string): Promise<DayCounters> {
-    return normalizeDay(await readDay(this.d.store, day))
+    return uploadDay(await readDay(this.d.store, day))
   }
 
   /** The POST /metrics/daily body of one local day (the Python client's build_daily); throws BodyTooLarge. */

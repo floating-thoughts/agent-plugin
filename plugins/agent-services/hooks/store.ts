@@ -34,7 +34,7 @@ export const KEYS = {
   accountId: 'account_id',
   plan: 'plan',
   expiresAt: 'expires_at', // unix seconds of the sign-in's expiry, as the server answered it
-  endpoint: 'endpoint', // the client config fingerprint the sign-in is bound to (fp1:...)
+  endpoint: 'endpoint', // the client config the sign-in is bound to (fp2:{...} public keys only; fp1:<sha256> before)
   loginPending: 'login_pending', // { email, until }: a mailed code may be finished by any session for 10 minutes
   rotateLease: 'rotate_lease', // { holder, until }: best-effort rotation lease
   block: 'block', // { code, until, token_sha256 }: 401 / 423 / locked_out block shared by all sessions

@@ -501,7 +501,8 @@ async function readStepsFile($: EngineInterface): Promise<{ text: string; file: 
 }
 
 /** agent.spawn, before anything else: the deny reason (usage line, then steps gate), or null. The usage line holds for
- * every spawn (forks and teammates too, and with routing off: `redlineOnly`); forks and teammates pass the steps gate,
+ * every spawn (forks and teammates too); with routing off register.ts does not call this at all (2026-11-12;
+ * `redlineOnly` is kept for callers that want the usage line alone); forks and teammates pass the steps gate,
  * which is off at methods level off. Without a fresh weekly reading the last one held in this process counts. */
 export async function spawnGate($: EngineInterface, e: Obj, rt?: Ready, redlineOnly = false): Promise<string | null> {
   try {

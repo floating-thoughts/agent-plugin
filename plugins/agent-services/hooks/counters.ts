@@ -40,16 +40,17 @@ type RouteRow = [number, number, number, number, number] // turns, input, output
 export type DayRecord = {
   v: 1
   day: string
-  route: Record<string, RouteRow> // model + '\t' + (long ? '1' : '0')
+  route: Record<string, RouteRow> // model + '\t' + (long ? '1' : '0'), then + '\t' + the main model when one was known
   index: Record<string, number> // model + '\t' + file_tokens -> reads
   compact: Record<string, CompactRow> // ref -> row
   trim?: Record<string, [number, number]> // model -> [tokens, runs]: rows rewritten after a compaction (trim.ts)
 }
 export type DayCounters = {
-  route: { model: string; long: boolean; turns: number; input_tokens: number; output_tokens: number; cache_read_tokens: number; cache_write_tokens: number }[]
+  // main_model: the main conversation's model when the subagent ran (2026-11-12), absent when it was not known
+  route: { model: string; long: boolean; main_model?: string; turns: number; input_tokens: number; output_tokens: number; cache_read_tokens: number; cache_write_tokens: number }[]
   index: { model: string; file_tokens: number; reads: number }[]
   compact: { ref: string; start: CompactStart | null; models: string[]; steps: [number, number][] }[]
-  trim?: { model: string; tokens: number; runs: number }[] // only when the day has any
+  trim?: { model: string; tokens: number; runs: number; net?: boolean }[] // only when the day has any; net: day_counts uploadDay
 }
 
 // Token estimate: CJK characters count one each, the rest a quarter (length in UTF-16 code units).
@@ -124,6 +125,29 @@ export function addTrim(store: KV, session: string, model: string, tokens: numbe
   })
   trimWrites = next.catch(() => undefined)
   return next
+}
+
+/**
+ * Whether the session's open checkpoint compaction has no reported after-size (start after_tokens null), so the
+ * server takes it from the next request's context. That context already lacks the rows trim.ts rewrote, so the
+ * compaction lever counts them and a trim run must not count them again (2026-11-12). `days`: the day records to look
+ * in (today, yesterday). False when nothing is open or the record cannot be read. Never throws.
+ */
+export async function openMeasured(store: KV, session: string, days: string[]): Promise<boolean> {
+  try {
+    const k = sessionKey(session)
+    const open = await store.get(OPEN_PREFIX + k)
+    const ref = open && typeof open === 'object' ? (open as { ref?: unknown }).ref : undefined
+    if (typeof ref !== 'string') return false
+    for (const day of days) {
+      const r = asRecord(await store.get(COUNTER_PREFIX + day + ':' + k), day)
+      const start = r.compact[ref]?.start
+      if (start) return start.after_tokens === null
+    }
+  } catch {
+    // unreadable: counted as before
+  }
+  return false
 }
 
 function addStep(row: CompactRow, context: number, model: string): void {
@@ -219,13 +243,16 @@ export class Counters {
   }
 
   // ---------------------------------------------------------------- events (savings_events.SavingsEvents)
-  async route(session: string, model: string, u: { input: number; output: number; cache_read: number; cache_write: number }): Promise<void> {
+  // mainModel: the main conversation's model, the server's routing baseline when cheaper than Opus (2026-11-12)
+  async route(session: string, model: string, u: { input: number; output: number; cache_read: number; cache_write: number },
+    mainModel: string | null = null): Promise<void> {
     needStr(session, 'session')
     needStr(model, 'model')
     for (const n of ['input', 'output', 'cache_read', 'cache_write'] as const) needCount(u[n], n)
     const long = this.isLong(model, u.input + u.cache_read + u.cache_write)
+    const main = typeof mainModel === 'string' && mainModel && !mainModel.includes('\t') ? '\t' + mainModel : ''
     await this.change(session, (r) => {
-      const k = model + '\t' + (long ? '1' : '0')
+      const k = model + '\t' + (long ? '1' : '0') + main
       let row = r.route[k]
       if (!row) {
         if (Object.keys(r.route).length >= MAX_ROUTE_ROWS) return
@@ -365,13 +392,14 @@ export async function readDay(store: KV, day: string): Promise<DayCounters> {
   const cmp = (a: string, b: string): number => (a < b ? -1 : a > b ? 1 : 0)
   const routeRows = [...route.entries()]
     .map(([k, row]) => {
-      const t = k.lastIndexOf('\t')
-      return { model: k.slice(0, t), long: k.slice(t + 1) === '1', row }
+      const [model = '', long = '', main = ''] = k.split('\t') // model, long, then the main model (absent in older keys)
+      return { model, long: long === '1', main, row }
     })
-    .sort((a, b) => cmp(a.model, b.model) || Number(a.long) - Number(b.long))
+    .sort((a, b) => cmp(a.model, b.model) || Number(a.long) - Number(b.long) || cmp(a.main, b.main))
     .slice(0, MAX_ROUTE_ROWS)
-    .map(({ model, long, row }) => ({
-      model, long, turns: row[0], input_tokens: row[1], output_tokens: row[2], cache_read_tokens: row[3], cache_write_tokens: row[4],
+    .map(({ model, long, main, row }) => ({
+      model, long, ...(main ? { main_model: main } : {}),
+      turns: row[0], input_tokens: row[1], output_tokens: row[2], cache_read_tokens: row[3], cache_write_tokens: row[4],
     }))
   const indexRows = [...index.entries()]
     .map(([k, reads]) => {
