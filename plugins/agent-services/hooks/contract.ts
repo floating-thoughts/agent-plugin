@@ -6,7 +6,7 @@ export type ToolSpec = {
   input_schema: Record<string, unknown>
 }
 
-export const CONTRACT_SHA256 = "b5de8c87b48d811d7697abdd795e5b07dcb99cedad289cb5d1530f9d564fca0d"
+export const CONTRACT_SHA256 = "e3d6f22731e47fe9642bc53b3eb0ed514b538d1f2b98d599e6b924ca7c3d91e2"
 
 export const API = "svc/1" as const
 export const PREFIX = "/svc/v1" as const
@@ -825,6 +825,125 @@ export const CONTRACT = {
     "savings",
     "summary_mail",
     "mail_to"
+   ],
+   "additionalProperties": false
+  },
+  "OrgMe": {
+   "type": "object",
+   "description": "A member's own view (R064): what the company admin's board (OrgSummary) shows about the caller, taken from that same answer, and the company settings that apply to them; never another member's row. in_org false (and every other field null, admin false) = the account is in no company account. you = the caller's row of OrgSummary.people (usd null = no data yet), null only if the board has no row for the caller; week = OrgSummary.week; admin = the caller is an active admin of the company",
+   "properties": {
+    "in_org": {
+     "type": "boolean"
+    },
+    "org": {
+     "anyOf": [
+      {
+       "type": "string",
+       "maxLength": 200
+      },
+      {
+       "type": "null"
+      }
+     ]
+    },
+    "admin": {
+     "type": "boolean"
+    },
+    "week": {
+     "anyOf": [
+      {
+       "type": "object",
+       "properties": {
+        "first_day": {
+         "type": "string",
+         "pattern": "^\\d{4}-\\d{2}-\\d{2}$",
+         "maxLength": 10
+        },
+        "last_day": {
+         "type": "string",
+         "pattern": "^\\d{4}-\\d{2}-\\d{2}$",
+         "maxLength": 10
+        }
+       },
+       "required": [
+        "first_day",
+        "last_day"
+       ],
+       "additionalProperties": false
+      },
+      {
+       "type": "null"
+      }
+     ]
+    },
+    "you": {
+     "anyOf": [
+      {
+       "type": "object",
+       "properties": {
+        "email": {
+         "type": "string",
+         "maxLength": 254
+        },
+        "usd": {
+         "anyOf": [
+          {
+           "type": "number",
+           "minimum": -1000000000,
+           "maximum": 1000000000
+          },
+          {
+           "type": "null"
+          }
+         ]
+        },
+        "devices": {
+         "type": "integer",
+         "minimum": 0,
+         "maximum": 100000
+        }
+       },
+       "required": [
+        "email",
+        "usd",
+        "devices"
+       ],
+       "additionalProperties": false
+      },
+      {
+       "type": "null"
+      }
+     ]
+    },
+    "paused": {
+     "anyOf": [
+      {
+       "type": "boolean"
+      },
+      {
+       "type": "null"
+      }
+     ]
+    },
+    "savings": {
+     "anyOf": [
+      {
+       "$ref": "#/definitions/OrgSavings"
+      },
+      {
+       "type": "null"
+      }
+     ]
+    }
+   },
+   "required": [
+    "in_org",
+    "org",
+    "admin",
+    "week",
+    "you",
+    "paused",
+    "savings"
    ],
    "additionalProperties": false
   },
@@ -2857,6 +2976,30 @@ export const CONTRACT = {
     "purpose": "the company admin turns the weekly company summary email on or off",
     "default": "off; sent only when the company admin turns the summary email off or back on",
     "retention": "the setting, kept while the company exists; audit record 13 months",
+    "sent_to": [
+     "our_service"
+    ]
+   }
+  },
+  {
+   "method": "GET",
+   "path": "/org/me",
+   "request": null,
+   "responses": {
+    "200": {
+     "$ref": "#/definitions/OrgMe"
+    }
+   },
+   "errors": {
+    "403": [
+     "not_in_plan"
+    ]
+   },
+   "x-inventory": {
+    "service": "metrics",
+    "purpose": "a member sees what the company admin's board shows about them: their own email address, device count and weekly savings figure, and the company settings that apply to them; sends no content",
+    "default": "off; sent only when the person runs /agent-services company (and is not the company admin)",
+    "retention": "nothing stored; access log 30 days",
     "sent_to": [
      "our_service"
     ]

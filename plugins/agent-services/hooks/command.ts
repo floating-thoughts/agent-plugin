@@ -59,14 +59,14 @@ import type { Result, Svc } from './svc'
 import { ASKED_FILE, askDue, askedFrom, canAsk, dashboardUrl, readEntry, recordState, savingsOpen, uploadOn,
   writeEntry } from './choice'
 import { dataDir, engineDirs, envOf, readTextOf } from './engine_env'
-import { companyCommand } from './boss'
+import { COMPANY_VIEW_LINE, companyCommand } from './boss'
 import { hasTrust, type TrustFile, unbalancedTrust, withoutTrust, withTrust } from './trust'
 import { approveMethods, importLine, LEVEL_KEY, type Level, levelOf, methodsDiff, methodsNoted, methodsNotes,
   previewMethods, readLevel, seenDiff, settlePending, syncMethodsNow } from './methods'
 import { AUTONOMY_LINE, AUTONOMY_SET, readAutonomy, setAutonomy } from './autonomy'
 import { framing, lineDiff, NOTE_LABEL, pendingNoteText, updateNoteText } from './review'
 import { bandSetup } from './band'
-import { ORG_PAUSED_LINE, ORG_SAVINGS_TEXT, ORG_SET_TEXT, orgChoice, orgNotice, sharingQuestion } from './org'
+import { ORG_PAUSED_LINE, ORG_SAVINGS_TEXT, ORG_SET_TEXT, orgChoice, orgNotice, readOrg, sharingQuestion } from './org'
 import { hooksText } from './hooks_list'
 import { removeAll, removedMarker, resetRemoved, type RemoveDeps } from './remove'
 import { levelOf as routingLevelOf, ROUTING_KEY, ROUTING_LEVELS, routingLevel, routingRecord, type RoutingLevel } from './routing_level'
@@ -683,7 +683,7 @@ export class Command {
         return this.info(rest)
       case 'remove':
         return rest.length ? USAGE : this.remove()
-      case 'company': // the company admin's board and weekly summary email
+      case 'company': // the company admin's board and weekly summary email; a member's own view
         return companyCommand({ svc, store: this.d.store, url: () => this.d.bossUrl?.() ?? Promise.resolve(null) }, rest)
       default:
         return this.served(rest)
@@ -741,6 +741,8 @@ export class Command {
     if (auth === 'ok') {
       lines.push(await this.recordLine(), await this.methodsLine(), await this.routingLine(),
         AUTONOMY_LINE[(await readAutonomy(this.d.store)) ?? 'none']!)
+      const member = await readOrg(this.d.store)
+      if (member && member.admin !== true) lines.push(COMPANY_VIEW_LINE) // a member's own view of the admin's board
       const n = (await this.safe(() => this.openQuestions(), [] as Question[])).length
       if (n) lines.push(`${n} question${n === 1 ? '' : 's'} waiting: run ${COMMAND} setup.`)
     }

@@ -59,7 +59,7 @@ compactions). It holds no prompt text, file contents, file paths or session ids.
 shows exactly what one upload sends.
 
 **Only when you run a command:** the weekly-email switch (`sharing mail on|off`, `sharing on_backfill|on_from_now|off|not_now`); the
-company-email switch (company admins); and the one-time savings estimate (`estimate send`, only exactly what
+company-email switch (company admins); `company` for a member of a company account who is not its admin (nothing but the signed request: the service answers only your own row of the admin's board, the week and the company settings that apply to you, and stores nothing new); and the one-time savings estimate (`estimate send`, only exactly what
 `estimate preview` showed you: token and cost totals per model, dispatch counts per task type from a fixed list,
 compaction counts and a session-length histogram).
 
@@ -96,7 +96,7 @@ delivery service.
 
 ## 3. What a company admin sees about each member
 
-If your account belongs to a company account, its admin sees, in the admin's private board and weekly email: each
+If your account belongs to a company account, its admin sees, in the admin's private board (the weekly email shows the same except the device count): each
 member's email address, how many devices each member is signed in on, and each member's weekly savings figure ("no
 data yet" while a member uploads nothing), plus the company totals, the seats, and the company's settings. The admin
 does not see token counts, costs, task types, project ids, session counts, times of use, IP addresses, prompts or
@@ -110,6 +110,11 @@ answer (the admin sees "no data yet" for you meanwhile). Your private savings pa
 (`/agent-services sharing page on|off`), for an admin too. `/agent-services sharing off` stops your upload unless the
 company set it off. Your
 email address and device count stay visible to the admin while you are a member.
+
+`/agent-services company` shows you exactly what the admin's private board shows about you: your email
+address, your device count and your weekly savings figure (or "no data yet"), for the same week and with the same
+values, plus whether the company paused agent-services and how it set the savings record. Only your own row is
+fetched, never another member's. For the admin, the same command still shows the company board and the email switch.
 
 ## 4. Files on this computer
 

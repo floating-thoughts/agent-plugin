@@ -9,6 +9,7 @@
 //
 // The summary-mail switch: `/agent-services company mail on|off` (POST /org/summary-mail); `/agent-services company`
 // tells where the board is and how the weekly email is set.
+// For anyone else `/agent-services company` shows the member's own view (memberView, GET /org/me).
 import type { EngineInterface } from 'claude-code'
 import { BOSS_BOARD, publishDashboard } from './dashboard'
 import type { Report } from './dashboard'
@@ -324,10 +325,59 @@ export async function publishBoards($: EngineInterface, w: Boards, report: Repor
   return w.publish((note) => publishDashboard($, w.boss.report, { interactive, note, board: BOSS_BOARD }), BOSS_BOARD)
 }
 
-/** `/agent-services company [mail on|off]` for the company admin. */
+// A member's own view (`/agent-services company` for anyone but the company admin): GET /org/me answers the row the
+// admin's board shows for this account, taken by the service from the board's own answer, and the company settings
+// that apply. Only this account's row comes back; nothing is uploaded or stored.
+export const MEMBER_HEAD = 'What your company admin sees about you'
+export const MEMBER_NOT_SEEN = 'The admin does not see token counts, costs, task types, project ids, session counts, ' +
+  'times of use, IP addresses, prompts or code.'
+export const NOT_IN_COMPANY_TEXT = 'You are not in a company account, so no company admin sees anything about you.'
+export const COMPANY_VIEW_LINE = `To see what your company admin sees about you: ${COMMAND} company.`
+
+/** The member's view in plain sentences, from a GET /org/me answer. */
+export function memberText(m: Obj): string {
+  if (m.in_org !== true) return NOT_IN_COMPANY_TEXT
+  const week = isObj(m.week) ? ` for the week of ${span(String(m.week.first_day), String(m.week.last_day))}` : ''
+  const lines = [MEMBER_HEAD, `Your admin's private board for ${String(m.org ?? 'your company')} shows this about you${week}:`]
+  const you = isObj(m.you) ? m.you : null
+  if (you) {
+    lines.push(
+      `Your email address: ${String(you.email)}.`,
+      `Devices you are signed in on: ${Number(you.devices)}.`,
+      typeof you.usd === 'number'
+        ? `Your savings figure: ${money(you.usd)}.`
+        : 'Your savings figure: no data yet (the service has no usage figures of yours for that week).',
+    )
+  } else {
+    lines.push('Your admin\'s board has no row for you yet.')
+  }
+  lines.push(
+    "Your company's settings that apply to you:",
+    m.paused === true ? 'agent-services is paused for everyone in your company.' : 'agent-services is not paused for your company.',
+    m.savings === 'on'
+      ? 'Savings record: your admin turned it on for the company and recommends it; nothing of yours is uploaded until you choose.'
+      : m.savings === 'off'
+        ? 'Savings record: your company turned it off for everyone, so nothing of yours is uploaded.'
+        : `Savings record: your company leaves it to each person, so your own choice applies (${COMMAND} setup).`,
+    'The weekly company email to your admin, when one is sent, shows your email address and savings figure (not the device count).',
+    "The admin also sees the company totals, the seats and the company's settings.",
+    MEMBER_NOT_SEEN,
+  )
+  return lines.join('\n')
+}
+
+/** `/agent-services company` for a member who is not the company admin: one GET /org/me, nothing kept. */
+export async function memberView(d: { svc: { call: Call } }): Promise<string> {
+  const r = await d.svc.call('GET', '/org/me')
+  if (r.error === 'not_in_plan') return 'Your plan does not include this view. Your company admin still sees your email address and device count; ask your agent-services contact for the details.'
+  if (!r.ok || !isObj(r.body)) return `Could not get what your company admin sees about you (${r.error ?? 'failed'}). Try again later.`
+  return memberText(r.body)
+}
+
+/** `/agent-services company [mail on|off]`: the company admin's board and email switch; a member's own view. */
 export async function companyCommand(d: { svc: { call: Call }; store: KV; url: () => Promise<string | null> }, rest: string[]): Promise<string> {
   const admin = await orgAdmin(d.store).catch(() => false)
-  if (!admin) return NOT_ADMIN_TEXT
+  if (!admin) return rest.length === 0 ? memberView(d) : NOT_ADMIN_TEXT
   const sub = (rest[0] ?? '').toLowerCase()
   if (rest.length === 0) {
     const url = await d.url().catch(() => null)
