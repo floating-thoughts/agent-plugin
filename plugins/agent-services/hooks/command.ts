@@ -66,7 +66,7 @@ import { approveMethods, importLine, LEVEL_KEY, type Level, levelOf, methodsDiff
 import { AUTONOMY_LINE, AUTONOMY_SET, readAutonomy, setAutonomy } from './autonomy'
 import { framing, hasUpdateNote, lineDiff, NOTE_LABEL, pendingNoteText, updateNoteText } from './review'
 import { bandSetup } from './band'
-import { durationText } from './panel'
+import { durationText, methodLine, timeOf, USAGE_DAYS_KEY, type TimeFigures } from './panel'
 import { ORG_PAUSED_LINE, ORG_SAVINGS_TEXT, ORG_SET_TEXT, orgChoice, orgNotice, readOrg, sharingQuestion } from './org'
 import { hooksText } from './hooks_list'
 import { removeAll, removedMarker, resetRemoved, type RemoveDeps } from './remove'
@@ -1171,8 +1171,11 @@ export class Command {
       const yes = 'Send the weekly email'
       const a = await this.dialog('Also send you a weekly email that sums up your estimated savings? You can stop it ' +
         'from any email with one click.', [yes, 'No email'], 'Weekly email')
-      mailError = await this.mail(a === yes) // "No email" also turns off an email that an older version turned on
-      mailAsk = a === yes && !mailError ? ' The weekly email is on.' : ` No weekly email is sent (${COMMAND} sharing mail on turns it on).`
+      // a dismissed dialog (no answer) changes nothing; "No email" also turns off an email an older version turned on
+      if (a === yes || a === 'No email') mailError = await this.mail(a === yes)
+      mailAsk = a === yes && !mailError ? ' The weekly email is on.'
+        : a === 'No email' ? ` No weekly email is sent (${COMMAND} sharing mail on turns it on).`
+          : ` The weekly email setting was left as it was (${COMMAND} sharing mail on or off changes it).`
     } else if (on) {
       mailAsk = ` No weekly email is sent unless you turn it on: ${COMMAND} sharing mail on.`
     }
@@ -1400,7 +1403,13 @@ export class Command {
         'turn it on.'
     }
     const r = await this.d.svc.call('GET', '/metrics/savings')
-    return r.ok ? savingsText(r.body) : `Savings could not be read: ${errorText(r.error)}`
+    if (!r.ok) return `Savings could not be read: ${errorText(r.error)}`
+    // the time figures from the same stored days as the panel (panel.ts timeOf), never the service's
+    let held: unknown = null
+    try {
+      held = await this.d.store.get(USAGE_DAYS_KEY)
+    } catch {}
+    return savingsText(r.body, isObj(held) && isObj(held.days) ? timeOf(held.days) : null)
   }
 
   // ---------------- estimate (preview, then send only what was previewed)
@@ -1560,7 +1569,7 @@ export function outboxLineText(l: Record<string, unknown>): string {
 }
 
 /** GET /metrics/savings (Savings) as two sentences. */
-export function savingsText(b: unknown): string {
+export function savingsText(b: unknown, time: TimeFigures | null = null): string {
   if (!isObj(b) || num(b.days) === null) return errorText('bad_response')
   if (!b.days) return 'No savings yet: they appear once a day or more has been uploaded.'
   const lever = (k: string) => (isObj(b[k]) ? usd(b[k].usd) : '$?')
@@ -1569,16 +1578,14 @@ export function savingsText(b: unknown): string {
     `day${b.days === 1 ? '' : 's'}` +
     (b.first_day && b.last_day ? ` (${b.first_day} to ${b.last_day})` : '') +
     `: routing ${lever('route')}, compaction ${lever('compact')}, index reads ${lever('index')}.` +
-    timeText(b.time)
+    timeText(time)
   )
 }
 
-/** The service's time figures (GET /metrics/savings `time`) as one sentence plus its disclosure; empty without them. */
-function timeText(t: unknown): string {
-  if (!isObj(t) || num(t.agent_seconds) === null || t.agent_seconds <= 0) return ''
-  const you = t.agent_seconds as number
-  return ` Spent by you: ${durationText(num(t.typing_seconds) ?? 0)}; saved for you: ${durationText(you)}; concurrency save: ${durationText(num(t.concurrent_seconds) ?? 0)}.` +
-    (typeof t.method === 'string' && t.method ? ` ${t.method}` : '')
+/** The local time figures (panel.ts timeOf over the stored days) as one sentence plus its disclosure; empty without them. */
+function timeText(t: TimeFigures | null): string {
+  if (!t || !(t.agent_seconds > 0)) return ''
+  return ` Spent by you: ${durationText(t.typing_seconds)}; saved for you: ${durationText(t.agent_seconds)}; concurrency save: ${durationText(t.concurrent_seconds)}. ${methodLine()}`
 }
 
 export function estimateError(code: string | null): string {

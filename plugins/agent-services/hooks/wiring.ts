@@ -467,6 +467,17 @@ export class Wiring {
     }
   }
 
+  /** The periodic redraw (register.ts, every PANEL_EVERY_MS): the stored days scanned again when due and the band
+   *  redrawn, so reset countdowns and figures move during a long turn, not only at its end. Never throws. */
+  async tick(): Promise<void> {
+    try {
+      if (await this.authOk()) this.refreshPanel()
+      await this.band()
+    } catch {
+      // the band never breaks a hook
+    }
+  }
+
   /** The band's state after a status-line refresh (nothing when no band is wired). */
   private async band(): Promise<void> {
     if (!this.d.setBand) return
@@ -676,6 +687,11 @@ export class Wiring {
     const facts = s.finish()
     // usage_tool.ts: the local scan tool, when it is on this computer and due, writes the days file first
     await refreshToolDays({ fs: this.d.fs, store: this.d.store, dataDir: this.d.dataDir, projectsRoot: this.d.projectsRoot ?? null, prices: this.d.prices, run: this.d.run ?? null, now: this.now() })
+    return this.withToolDays(facts)
+  }
+
+  /** The tool's days file (when there is one) laid over the scan: its time figures and full days replace the scan's. */
+  private async withToolDays(facts: Facts): Promise<Facts> {
     const file = await this.timeDays()
     if (file) {
       facts.full_days = file
@@ -717,8 +733,10 @@ export class Wiring {
     // the week's counts for the Stats column: the last 7 local days of the store counters, summed
     const week: Record<string, number> = {}
     const now = this.now()
+    const today = this.today()
     for (let i = 0; i < 7; i++) {
-      for (const [k, v] of Object.entries(countsOf(await readDay(this.d.store, localDay(now - i * 86_400_000))))) week[k] = (week[k] ?? 0) + v
+      // calendar days back from today (a DST change makes a day 23 or 25 hours: now - i*24h would skip or repeat one)
+      for (const [k, v] of Object.entries(countsOf(await readDay(this.d.store, plusDays(today, -i))))) week[k] = (week[k] ?? 0) + v
     }
     return panelOf(days, heldPlan(), savings, this.today(), now, week)
   }
@@ -803,7 +821,8 @@ export class Wiring {
    * figures are those of a full scan: an entry of the day was written after the day began. */
   async previewBody(day: string): Promise<Obj> {
     const since = new Date(`${day}T00:00:00`).getTime()
-    return this.dailyBody(day, await this.facts({ since, maxBytes: 384 * 1024 * 1024 }))
+    // the tool's days file as the upload has it (withToolDays), without running the tool inside the hook
+    return this.dailyBody(day, await this.withToolDays(await this.facts({ since, maxBytes: 384 * 1024 * 1024 })))
   }
 
   /** The savings part of one day's body: the store counters, normalized. */

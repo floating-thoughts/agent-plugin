@@ -318,7 +318,7 @@ class Session {
 
   reset(now: number): void {
     this.turns = this.toolCalls = this.todosDone = this.commits = 0
-    this.todosLast = 0
+    // todosLast stays: the todo list outlives a compaction, so its done items are not counted again
     this.base = now
     this.pendingContext = null
     this.advised = false
@@ -969,7 +969,12 @@ export class Core {
         : { saved: null, fallback: 'local_only', reason }
     }
     const counts: Record<string, unknown> = { context_pct: args.context_pct }
-    for (const k of COUNTER_ARGS) counts[k] = has(args, k) ? args[k] : 0
+    // the session's own counters for what the model left out (never a zero that hides real work)
+    const s = this.sessionsMap.get(session)
+    const own: Record<string, number> = s
+      ? { turns: s.turns, tool_calls: s.toolCalls, todos_done: s.todosDone, commits: s.commits, minutes: Math.max(0, Math.floor((this.now() - s.base) / 60)) }
+      : {}
+    for (const k of COUNTER_ARGS) counts[k] = has(args, k) ? args[k] : own[k] ?? 0
     const r = await this.records.checkpoint(session, counts as never, left())
     return { now: r.now, keep_lines: r.keep_lines, fallback: r.fallback }
   }

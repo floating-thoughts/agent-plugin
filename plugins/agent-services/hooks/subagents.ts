@@ -19,7 +19,7 @@
 import type { EngineInterface } from 'claude-code'
 import { dataDir, engineDirs } from './engine_env'
 import { methodsLevel } from './methods_level'
-import { planOf } from './panel'
+import { expired, heldPlan, planOf } from './panel'
 import { rulesLive, rulesTable } from './rules'
 import { engineStore } from './store'
 import { toolInput } from './tools'
@@ -239,7 +239,7 @@ export function redlineRefusal(week: Week, isModule: boolean): string | null {
 export async function redlineOverride($: EngineInterface, text: unknown): Promise<void> {
   try {
     const r = part('redline')
-    if (!r || typeof text !== 'string' || !rx(String(r.override_rx ?? '(?!)'), 'i')?.test(text.slice(0, 2000))) return
+    if (!r || typeof text !== 'string' || text.length > 2000 || !rx(String(r.override_rx ?? '(?!)'), 'i')?.test(text)) return
     const week = planOf(await $.session.usage()).week
     // only once the line is reached: the word before that grants nothing (no silent override for the rest of the week)
     if (!week || !week.resets_at || redlineRefusal(week, true) === null) return
@@ -446,13 +446,16 @@ async function readStepsFile($: EngineInterface): Promise<{ text: string; file: 
   return null
 }
 
-/** agent.spawn, before anything else: the deny reason (usage line, then steps gate), or null. Forks and teammates
- * pass. The steps gate is off at methods level off. Fails open. */
-export async function spawnGate($: EngineInterface, e: Obj, rt?: Ready): Promise<string | null> {
+/** agent.spawn, before anything else: the deny reason (usage line, then steps gate), or null. The usage line holds for
+ * every spawn (forks and teammates too, and with routing off: `redlineOnly`); forks and teammates pass the steps gate,
+ * which is off at methods level off. Without a fresh weekly reading the last one held in this process counts. */
+export async function spawnGate($: EngineInterface, e: Obj, rt?: Ready, redlineOnly = false): Promise<string | null> {
   try {
-    if (!table() || !isObj(e) || e.fork === true || e.isTeammate === true || !(await signedIn(rt))) return null
+    if (!table() || !isObj(e) || !(await signedIn(rt))) return null
     if (part('redline')) {
-      const week = planOf(await $.session.usage()).week
+      const live = planOf(await Promise.resolve().then(() => $.session.usage()).catch(() => null)).week
+      const held = heldPlan().week
+      const week = live && !expired(live, Date.now()) ? live : held && !expired(held, Date.now()) ? held : null
       let refusal = redlineRefusal(week, isModuleSpawn(e.description, e.parentAgentId))
       // the user said to go past the line: allowed until this weekly reset (redlineOverride)
       if (refusal && week?.resets_at && (await engineStore($).get('redline_override')) === week.resets_at) refusal = null
@@ -463,6 +466,7 @@ export async function spawnGate($: EngineInterface, e: Obj, rt?: Ready): Promise
         return refusal
       }
     }
+    if (redlineOnly || e.fork === true || e.isTeammate === true) return null
     if (!part('steps') || (await methodsLevel(engineStore($))) === 'off') return null
     const found = await readStepsFile($)
     if (!found) return null

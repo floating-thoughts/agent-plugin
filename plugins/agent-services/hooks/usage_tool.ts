@@ -137,7 +137,7 @@ export async function refreshToolDays(d: ToolDeps): Promise<string> {
     const t0 = Date.now()
     let r: { exitCode?: number | null; stdout?: string; stderr?: string }
     try {
-      r = await d.run([...l, tool, '--days'], { timeoutMs: USAGE_TOOL_TIMEOUT_MS, stdin })
+      r = await d.run([...l, '-I', tool, '--days'], { timeoutMs: USAGE_TOOL_TIMEOUT_MS, stdin })
     } catch {
       if (Date.now() - t0 > 5000) {
         error = 'failed' // it ran (a timeout, a crash): another launcher would only run it again
