@@ -1,13 +1,13 @@
 // Ed25519 signatures of the svc channel, harness-neutral (clock, random and key
 // material are passed in; nothing here touches the engine).
 //
-// 1. verifyResponse: a port of host/services.py `_verify_response`. The server signs every answer with its own key
+// 1. verifyResponse: a port of the Python client `_verify_response`. The server signs every answer with its own key
 //    (its response signer); the message is
 //      "agent-svc-response/1\n<status>\n<METHOD>\n<outer path without query>\n<challenge>\n<ts>\n<sha256 hex of body>"
 //    and the header is X-Agent-Server-Signature: v=1; kid=<16 hex>; ts=<digits>; sig=<base64 of 64 bytes>.
 //    The body is the bytes actually sent: for a base64 answer, the ASCII of the text. The signature is checked before
 //    any decode or AEAD open; an answer that fails is never used (fail closed).
-// 2. signedHeaders: the device request signature that the server request auth verifies (as host/services.py
+// 2. signedHeaders: the device request signature that the server request auth verifies (as the Python client
 //    `_signed_headers`): Ed25519 over "METHOD\n<inner path without query>\n<sha256 hex of body>\n<ts>\n<nonce>".
 //    These headers travel only inside the envelope.
 //
@@ -145,7 +145,7 @@ export type DeviceAuth = {
   claudeHash: string
 }
 
-/** host/services.py `_signed_headers`: the inner headers of a signed request (same names and order). */
+/** the Python client `_signed_headers`: the inner headers of a signed request (same names and order). */
 export function signedHeaders(
   method: string,
   wirePath: string,

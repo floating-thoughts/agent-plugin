@@ -1,4 +1,4 @@
-// The minimized route and checkpoint records, ported from host/conclusions.py. The routing table, the checkpoint
+// The minimized route and checkpoint records, ported from the Python client. The routing table, the checkpoint
 // rule and the run-limit table live on the server; this file only builds the minimal records, sends them through
 // the svc channel and falls back to open defaults. What leaves the machine: the first word of a subagent
 // description, its length, a per-session dispatch number, a salted project hash, the command head (only from the
@@ -8,6 +8,12 @@
 
 import { sha256 } from './noble.js'
 import type { KV, Random, Transport } from './engine_types'
+import { noteBrief } from './flow_state'
+import { routingLevel } from './routing_level'
+
+/** Two more routing facts (0.6.0): the main session's model id (for the cap) and whether the person's latest message
+ * asked for a review (only the boolean is sent). Absent: the fields are not sent. */
+export type RouteFlags = { main_model?: unknown; user_asked_review?: unknown }
 
 export const OPEN_DEFAULTS = { idle_seconds: 180, max_seconds: 3600 }
 // Public list of common developer commands. A privacy filter: any other name is sent as "other".
@@ -20,7 +26,7 @@ export const KNOWN_HEADS: ReadonlySet<string> = new Set([
 export const ROUTER_NOTICE =
   'The routing service is temporarily unavailable; this subagent dispatch runs as written, with the model and effort the caller set.'
 export const SALT_KEY = 'salt'
-export const ROUTE_DEADLINE_MS = 1000 // agent.spawn (plan 3.3 item 3)
+export const ROUTE_DEADLINE_MS = 1000 // agent.spawn
 export const BACKGROUND_DEADLINE_MS = 30000 // turn_end checkpoint timing runs in the background
 
 const PYTHONS = /^(python|python3|python3\.\d+|py|pythonw)$/
@@ -199,7 +205,7 @@ export class Records {
   }
 
   private async post(path: string, body: Record<string, unknown>, kind: string, deadlineMs: number,
-    errors?: (string | null)[]): Promise<Record<string, unknown> | null> {
+    errors?: (string | null)[], statuses?: (number | null)[]): Promise<Record<string, unknown> | null> {
     let r
     try {
       r = await this.svc.call('POST', path, body, { kind, deadlineMs })
@@ -208,6 +214,7 @@ export class Records {
     }
     if (!r || !r.ok || !r.body || typeof r.body !== 'object' || Array.isArray(r.body)) {
       if (errors) errors.push(r ? r.error : null)
+      if (statuses) statuses.push(r ? r.status : null)
       return null
     }
     return r.body as Record<string, unknown>
@@ -215,7 +222,7 @@ export class Records {
 
   // ---------------- router
   async route(session: unknown, subagentType: unknown, description: unknown, model: unknown = null, effort: unknown = null,
-    projectDir: unknown = null, harness: unknown = null, deadlineMs = ROUTE_DEADLINE_MS): Promise<RouteAnswer> {
+    projectDir: unknown = null, harness: unknown = null, deadlineMs = ROUTE_DEADLINE_MS, flags: RouteFlags | null = null): Promise<RouteAnswer> {
     const key = typeof session === 'string' ? session : null
     const ref = this.ref(session)
     const n = (this.dispatch.get(key) ?? 0) + 1
@@ -234,11 +241,27 @@ export class Records {
       dispatch_no: Math.min(n, CAP),
       project_hash: await this.phash(projectDir),
     }
+    if (flags) {
+      const mm = flags.main_model
+      body.main_model = typeof mm === 'string' && mm && [...mm].length <= 64 && MODEL_RX.test(mm) ? mm : null
+      body.user_asked_review = flags.user_asked_review === true
+      // 0.6.2: only at routing strict; at suggest the field is not sent and the service never refuses a missing word
+      if ((await routingLevel(this.store)) === 'strict') body.strict = true
+    }
     let ans: Record<string, unknown> | null = null
     const errors: (string | null)[] = []
     const rm = body.requested_model as string | null
     if (SUBTYPE_RX.test(body.subagent_type as string) && (rm === null || ([...rm].length <= 64 && MODEL_RX.test(rm)))) {
-      ans = await this.post('/router/decide', body, 'router', deadlineMs, errors)
+      const statuses: (number | null)[] = []
+      ans = await this.post('/router/decide', body, 'router', deadlineMs, errors, statuses)
+      if (ans === null && flags && statuses.includes(422)) {
+        // a server older than 0.6.0 refuses the two new fields (older than 0.6.2: strict): ask once more without them
+        delete body.main_model
+        delete body.user_asked_review
+        delete body.strict
+        errors.length = 0
+        ans = await this.post('/router/decide', body, 'router', deadlineMs, errors)
+      }
     }
     if (ans !== null && ['route', 'pass', 'deny'].includes(ans.decision as string)) {
       // brief_rule / brief_forward: served rule text, passed through as the server wrote it (absent when not sent)
@@ -248,6 +271,7 @@ export class Records {
       }
       if (typeof ans.brief_rule === 'string') out.brief_rule = ans.brief_rule
       if (typeof ans.brief_forward === 'string') out.brief_forward = ans.brief_forward
+      noteBrief(out.brief_rule) // flow.ts adds it to the routed subagent's brief
       return out
     }
     const pass: RouteAnswer = { decision: 'pass', model: null, effort: null, reason: null, hint: null, fallback: 'pass_through', notice: null }

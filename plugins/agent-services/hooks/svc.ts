@@ -1,4 +1,4 @@
-// The svc channel, harness-neutral: a port of host/services.py Connector (plan 3.3, 3.4, 3.9).
+// The svc channel, harness-neutral: a port of the Python client's Connector.
 // Fetch-as-text, the store, the clock, sleep, random, the outbox and the Claude account hash are passed in; nothing
 // here touches the engine.
 //
@@ -19,11 +19,13 @@
 // - Several sessions share one store with no atomic read-modify-write: the credential is read on every request,
 //   rotation runs under a best-effort lease with per-session token_next keys, and a 401 deletes the token only after
 //   the re-read, token_prev grace and token_next steps, and only if the stored token is still one that got the 401.
-// - Auth fail (3.9): with no valid sign-in, or after a 401 or 423 that does not recover, nothing is sent but
+// - Auth fail: with no valid sign-in, or after a 401 or 423 that does not recover, nothing is sent but
 //   GET /health and the login routes, in every session (the state is derived from the store, re-read at most every
 //   5 s by hooks).
 // - Production ignores overrides: the endpoint and keys are DEFAULT_CONFIG unless the caller (a staging build)
 //   passes its own config; nothing is ever read from the store for them.
+// The stateless helpers (config parse, schema check and filter, route table, redaction, Deadline) are svc_wire.ts
+// the ones exported before are re-exported here.
 import { API, BODY_LIMIT, CONTRACT, E2E_CONTENT_TYPE_B64, PREFIX } from './contract'
 import {
   answerEncoding,
@@ -39,8 +41,8 @@ import {
 import type { Random } from './e2e'
 import { Outbox } from './outbox'
 import type { RequestLine } from './outbox'
-import { devicePublicKey, newDeviceSeed, serverKeys, signedHeaders, verifyResponse } from './sig'
-import type { ServerKeys } from './sig'
+import { keepOrg, ORG_PAUSED_LINE, validOrg } from './org'
+import { devicePublicKey, newDeviceSeed, signedHeaders, verifyResponse } from './sig'
 import {
   CREDENTIAL_KEYS,
   getText,
@@ -53,10 +55,34 @@ import {
   tokenNextKeys,
 } from './store'
 import type { KV } from './store'
+import {
+  b64url,
+  checkSchema,
+  Deadline,
+  dec,
+  defaultKind,
+  errorCode,
+  filterBody,
+  hashStrings,
+  isObj,
+  limitProblems,
+  lower,
+  matchRoute,
+  num,
+  parseConfig,
+  redactFields,
+  retrySeconds,
+  servedProps,
+  servedSummary,
+  throttled,
+  ungated,
+} from './svc_wire'
+
+export { checkSchema, Deadline, defaultKind, errorCode, filterBody, matchRoute, parseConfig, retrySeconds }
 
 // ------------------------------------------------------------------ constants
 
-/** The shipped client config (host/client_defaults.json; a test keeps them equal). */
+/** The shipped client config (a copy of the client defaults file; a test keeps them equal). */
 export const DEFAULT_CONFIG = {
   endpoint: 'https://svc.yzcanadianholdings.com',
   pin: { kind: 'ca' },
@@ -67,7 +93,7 @@ export const DEFAULT_CONFIG = {
 export type Kind = 'router' | 'checkpoint' | 'served' | 'run_limits' | 'daily' | 'auth' | 'health'
 export type Hook = 'tool' | 'spawn' | 'prompt' | 'background'
 
-/** Per-kind deadlines (host/services.py TIMEOUTS, in ms); dist_token is gone (A23). */
+/** Per-kind deadlines (the Python client's TIMEOUTS, in ms); dist_token is gone. */
 export const TIMEOUTS_MS: Record<Kind, number> = {
   router: 1000,
   checkpoint: 5000,
@@ -86,13 +112,13 @@ export const FALLBACKS: Record<Kind, string | null> = {
   auth: null,
   health: null,
 }
-/** The whole budget of one call, by the hook it runs in (plan 3.3 item 3); a call gets the smaller of this and its
+/** The whole budget of one call, by the hook it runs in; a call gets the smaller of this and its
  * kind's deadline. prompt.submit sends nothing. */
 export const HOOK_BUDGET_MS: Record<Hook, number> = { tool: 8000, spawn: 1000, prompt: 0, background: 25000 }
 
 export const ROTATE_MARGIN_S = 7 * 86400
 export const MAX_ATTEMPTS = 3
-export const BLOCK_SECONDS = { locked_out: 900, account_locked: 3600 } as const
+export const BLOCK_SECONDS = { locked_out: 900, account_locked: 3600, org_paused: 60 } as const // org_paused: short so an unpause is seen soon
 export const THROTTLE_MAX_SECONDS = 300 // the longest signed Retry-After honored
 export const THROTTLE_NOTICE_AFTER = 120
 export const NOTICE_EVERY_MS = 3600000
@@ -116,7 +142,7 @@ export const SERVICE_DEFAULTS: Record<string, boolean> = {
   health: true,
   updates: true,
   incidents: false,
-  metrics: true, // on by default since 2026-10-31; settings() keeps an explicit off (metricsDefault)
+  metrics: true, // the transport switch of the metrics routes; the savings record (choice.ts) decides the upload
   router: true,
   checkpoint: true,
   limits: true,
@@ -128,18 +154,19 @@ export const SERVED_CHANNELS = ['stable', 'beta']
 export const CONSENT_ROUTES = ['POST /diagnostic/estimate']
 export const PLAN_VALUES = ['diagnostic', 'guard', 'full']
 
-/** The one line every tool answers while auth has failed (3.9). */
-export const PAUSED_LINE = 'agent-services is paused: sign in with /agent-services login'
+/** The one line every tool answers while auth has failed. */
+export const PAUSED_LINE = 'agent-services is signed out: sign in with /agent-services login'
 export const LOCKED_LINE =
   'agent-services is paused: this account is locked; contact support, then sign in with /agent-services login'
 export const GATE_NOTICES: Record<string, string> = {
   login: PAUSED_LINE,
   locked: LOCKED_LINE,
-  upgrade: 'agent-services is paused: this plugin version is no longer accepted; update the plugin (minimum {min_shell}).',
-  offline: 'agent-services is paused: offline mode is on.',
-  unavailable: 'agent-services is paused: the server could not be reached; it tries again at the next session.',
+  paused: ORG_PAUSED_LINE,
+  upgrade: 'agent-services needs an update: this plugin version is no longer accepted; update the plugin (minimum {min_shell}).',
+  offline: 'agent-services is offline: offline mode is on, so nothing is sent.',
+  unavailable: "agent-services can't reach its server; it tries again at the next session.",
   unverified:
-    "agent-services is paused: an answer claiming to come from the server was not signed by the server's key (a " +
+    "agent-services can't verify its server: an answer claiming to come from the server was not signed by the server's key (a " +
     'proxy or a fake server may be in the way); nothing it said was used. It tries again at the next session.',
 }
 export const NOTICE_TEXT: Record<string, string> = {
@@ -147,6 +174,7 @@ export const NOTICE_TEXT: Record<string, string> = {
   session_replaced: 'Your account signed in on another device; sign in again here with /agent-services login.',
   claude_account_mismatch: 'The Claude account changed since sign-in; sign in again to re-pair this device.',
   account_locked: 'Your agent-services account is locked; contact support.',
+  org_paused: ORG_PAUSED_LINE,
   locked_out: 'Too many failed requests; agent-services paused for 15 minutes.',
   rate_limited:
     'agent-services is busy and is slowing requests down; the plugin keeps working on its defaults and retries on its own.',
@@ -158,11 +186,7 @@ export const NOTICE_TEXT: Record<string, string> = {
     'agent-services stopped sending: the server could not open two requests in a row; it tries again in 10 minutes.',
 }
 
-const HOST_RX =
-  /^https:\/\/((?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)*[a-z](?:[a-z0-9-]{0,61}[a-z0-9])?)(?::(\d{1,5}))?$/
-const KEY_RX = /^[A-Za-z0-9+/]{43}=$/
 const ROUTE_KEY_RX = /^(GET|POST|PUT|DELETE) \/\S+$/
-const CODE_RX = /^[a-z][a-z0-9_]{0,63}$/
 const RELEASE_RX = /^\d+\.\d+\.\d+$/
 
 // ------------------------------------------------------------------ types
@@ -205,7 +229,7 @@ export type Result = {
 type Res = Result & { sent?: string }
 
 export type GateState = { open: boolean; reason: string | null; min_shell: string | null }
-export type AuthState = 'ok' | 'login' | 'locked'
+export type AuthState = 'ok' | 'login' | 'locked' | 'paused'
 type Block = { code: string; until: number | null; token_sha256: string | null }
 type Settings = {
   offline: boolean
@@ -224,296 +248,11 @@ const R = (ok: boolean, p: Partial<Result> = {}): Res => ({
   attempts: p.attempts ?? 0,
 })
 
-// ------------------------------------------------------------------ helpers (ports of host/services.py)
-
-/** client.json -> the parsed config, or an Error. Only https hostname endpoints (CA trust by the engine's TLS);
- * server_keys and e2e_keys are always required; an IPv4 endpoint with a pinned certificate is refused. */
-export function parseConfig(c: unknown): {
-  origin: string
-  host: string
-  port: number
-  keys: ServerKeys
-  e2eSend: Uint8Array
-  fingerprint: string
-} {
-  if (!c || typeof c !== 'object' || Array.isArray(c)) throw new Error('config must be an object')
-  const o = c as Record<string, unknown>
-  const extra = Object.keys(o).filter((k) => !['endpoint', 'pin', 'server_keys', 'e2e_keys', 'client_id'].includes(k))
-  if (extra.length) throw new Error('config has unknown fields: ' + extra.sort().join(', '))
-  const ep = o.endpoint
-  if (typeof ep !== 'string') throw new Error('config endpoint missing')
-  const m = HOST_RX.exec(ep)
-  if (!m || m[1].length > 253) throw new Error('config endpoint must be https://<hostname>[:<port>]')
-  const port = m[2] ? Number(m[2]) : 443
-  if (!(port > 0 && port < 65536)) throw new Error('config endpoint port is out of range')
-  const pin = o.pin as Record<string, unknown> | undefined
-  if (!pin || typeof pin !== 'object' || Object.keys(pin).length !== 1 || pin.kind !== 'ca') {
-    throw new Error('a hostname endpoint needs pin {"kind": "ca"}')
-  }
-  const list = (v: unknown, what: string): string[] => {
-    if (!Array.isArray(v) || v.length < 1 || v.length > 2 || new Set(v).size !== v.length) {
-      throw new Error(`config ${what} must be one or two base64 public keys`)
-    }
-    if (!v.every((k) => typeof k === 'string' && KEY_RX.test(k))) throw new Error(`config ${what} must be base64 keys`)
-    return v as string[]
-  }
-  const sk = list(o.server_keys, 'server_keys')
-  const ek = list(o.e2e_keys, 'e2e_keys')
-  const keys = serverKeys(sk)
-  const e2eSend = b64Decode(ek[0])
-  const doc = {
-    ca: true,
-    e2e_keys: ek,
-    endpoint: `https://${m[1]}:${port}`,
-    pins: [] as string[],
-    server_keys: [...sk].sort(),
-  }
-  // host/services.py client_fingerprint: json.dumps(doc, sort_keys=True, separators=(",", ":"))
-  const fingerprint = 'fp1:' + sha256Hex(utf8(JSON.stringify(doc)))
-  return { origin: port === 443 ? `https://${m[1]}` : `https://${m[1]}:${port}`, host: m[1], port, keys, e2eSend, fingerprint }
-}
-
-const resolve = (s: any): any => {
-  while (s && typeof s === 'object' && typeof s.$ref === 'string') {
-    let node: any = CONTRACT
-    for (const part of s.$ref.slice(2).split('/')) node = node?.[part]
-    s = node
-  }
-  return s
-}
-
-const isObj = (v: unknown): v is Record<string, unknown> => !!v && typeof v === 'object' && !Array.isArray(v)
-const cps = (s: string): number => Array.from(s).length
-const sortedJson = (v: unknown): string =>
-  JSON.stringify(v, (_k, x) =>
-    isObj(x) ? Object.fromEntries(Object.keys(x).sort().map((k) => [k, (x as any)[k]])) : x,
-  )
-const TYPES: Record<string, (v: unknown) => boolean> = {
-  object: isObj,
-  array: Array.isArray,
-  string: (v) => typeof v === 'string',
-  integer: (v) => typeof v === 'number' && Number.isInteger(v),
-  number: (v) => typeof v === 'number' && Number.isFinite(v),
-  boolean: (v) => typeof v === 'boolean',
-  null: (v) => v === null,
-}
-
-/** host/jsonschema_lite.py check_schema: the problems of `value` against the contract's schema subset. */
-export function checkSchema(value: unknown, schema: unknown, where = '$'): string[] {
-  const s = resolve(schema)
-  if (!isObj(s)) return []
-  if (Array.isArray(s.anyOf)) {
-    const branches = s.anyOf.map((b: unknown) => checkSchema(value, b, where))
-    if (!branches.some((b: string[]) => b.length === 0)) return [`${where}: does not match any anyOf branch`]
-  }
-  if (s.type !== undefined) {
-    const ts = Array.isArray(s.type) ? s.type : [s.type]
-    if (!ts.some((t: string) => TYPES[t]?.(value))) return [`${where}: type should be ${String(s.type)}`]
-  }
-  const out: string[] = []
-  if ('const' in s && sortedJson(value) !== sortedJson(s.const)) out.push(`${where}: should be the constant`)
-  if (Array.isArray(s.enum) && !s.enum.some((e: unknown) => sortedJson(e) === sortedJson(value))) {
-    out.push(`${where}: not in the enum`)
-  }
-  if (typeof value === 'string') {
-    if (typeof s.pattern === 'string' && !new RegExp(s.pattern).test(value)) out.push(`${where}: does not match`)
-    if (typeof s.maxLength === 'number' && cps(value) > s.maxLength) out.push(`${where}: too long`)
-    if (typeof s.minLength === 'number' && cps(value) < s.minLength) out.push(`${where}: too short`)
-  }
-  if (typeof value === 'number') {
-    if (typeof s.minimum === 'number' && value < s.minimum) out.push(`${where}: below the minimum`)
-    if (typeof s.maximum === 'number' && value > s.maximum) out.push(`${where}: above the maximum`)
-  }
-  if (isObj(value)) {
-    const props = isObj(s.properties) ? s.properties : {}
-    for (const k of Array.isArray(s.required) ? s.required : []) if (!(k in value)) out.push(`${where}: missing ${k}`)
-    for (const [k, v] of Object.entries(value)) {
-      if (k in props) out.push(...checkSchema(v, props[k], `${where}.${k}`))
-      else if (s.additionalProperties === false) out.push(`${where}: unexpected field ${k}`)
-    }
-  }
-  if (Array.isArray(value)) {
-    if (typeof s.maxItems === 'number' && value.length > s.maxItems) out.push(`${where}: too many items`)
-    if (typeof s.minItems === 'number' && value.length < s.minItems) out.push(`${where}: too few items`)
-    if (s.uniqueItems && new Set(value.map(sortedJson)).size < value.length) out.push(`${where}: duplicate items`)
-    if (s.items !== undefined) value.forEach((v, i) => out.push(...checkSchema(v, s.items, `${where}[${i}]`)))
-  }
-  return out
-}
-
-/** host/services.py _filter: drop properties the schema does not have (objects with additionalProperties false). */
-export function filterBody(value: unknown, schema: unknown): unknown {
-  const s = resolve(schema)
-  if (!isObj(s)) return value
-  if (isObj(value) && s.type === 'object') {
-    const props = isObj(s.properties) ? s.properties : {}
-    const out: Record<string, unknown> = {}
-    for (const [k, v] of Object.entries(value)) {
-      if (k in props) out[k] = filterBody(v, props[k])
-      else if (s.additionalProperties !== false) out[k] = v
-    }
-    return out
-  }
-  if (Array.isArray(value) && s.type === 'array' && s.items !== undefined) return value.map((v) => filterBody(v, s.items))
-  return value
-}
-
-function limitProblems(route: any, body: unknown): string[] {
-  const lim = route['x-limits'] ?? {}
-  const out: string[] = []
-  if (!isObj(body)) return out
-  if (typeof lim.external_excerpts_total_chars === 'number') {
-    const ex = Array.isArray(body.external_excerpts) ? body.external_excerpts : []
-    if (ex.reduce((n: number, x: unknown) => n + (typeof x === 'string' ? cps(x) : 0), 0) > lim.external_excerpts_total_chars) {
-      out.push('external_excerpts total too long')
-    }
-  }
-  if (typeof lim.excerpt_total_chars === 'number') {
-    const items = Array.isArray(body.items) ? body.items : []
-    const total = items.reduce(
-      (n: number, i: any) => n + (isObj(i) && typeof i.excerpt === 'string' ? cps(i.excerpt) : 0),
-      0,
-    )
-    if (total > lim.excerpt_total_chars) out.push('excerpt total too long')
-  }
-  return out
-}
-
-const escapeRx = (s: string): string => s.replace(/[.*+?^${}()|[\]\\/]/g, '\\$&')
-
-const ROUTES: { r: any; rx: RegExp }[] = (CONTRACT as any).routes.map((r: any) => {
-  const params = r['x-params'] ?? {}
-  let pat = ''
-  for (const part of String(r.path).split(/(\{[a-z_]+\})/)) {
-    if (part.startsWith('{') && part.endsWith('}')) {
-      const p = String(params[part.slice(1, -1)] ?? '^[^/]+$')
-      pat += '(' + p.replace(/^\^/, '').replace(/\$$/, '') + ')'
-    } else pat += escapeRx(part)
-  }
-  return { r, rx: new RegExp('^' + pat + '$') }
-})
-
-export function matchRoute(method: string, path: string): any | null {
-  for (const { r, rx } of ROUTES) if (r.method === method && rx.test(path)) return r
-  return null
-}
-
-export function defaultKind(path: string): Kind {
-  if (path === '/health') return 'health'
-  if (path === '/updates/check' || path.startsWith('/packs/') || path === '/incidents' || path.startsWith('/metrics') || path === '/report') {
-    return 'daily'
-  }
-  if (path.startsWith('/auth/')) return 'auth'
-  if (path.startsWith('/router/')) return 'router'
-  if (path.startsWith('/checkpoint/')) return 'checkpoint'
-  if (path.startsWith('/limits/')) return 'run_limits'
-  if (path.startsWith('/served/')) return 'served'
-  return 'daily'
-}
-
-/** Metrics routes that upload nothing stay usable with the metrics switch off. */
-function ungated(route: any): boolean {
-  if (route['x-inventory']?.service !== 'metrics') return false
-  return route.method === 'GET' || route.method === 'DELETE' || (route.method === 'POST' && route.path === '/metrics/weekly-mail')
-}
-
-function servedProps(route: any): string[] {
-  const s = resolve(route?.responses?.['200'] ?? {})
-  const props = isObj(s) && isObj(s.properties) ? s.properties : {}
-  return Object.entries(props)
-    .filter(([, v]) => isObj(v) && v['x-served'] === true)
-    .map(([k]) => k)
-}
-
-const hashStrings = (v: unknown): unknown =>
-  typeof v === 'string'
-    ? 'sha256:' + sha256Hex(utf8(v))
-    : Array.isArray(v)
-      ? v.map(hashStrings)
-      : isObj(v)
-        ? Object.fromEntries(Object.entries(v).map(([k, x]) => [k, hashStrings(x)]))
-        : v
-
-function servedSummary(text: string): string | null {
-  let b: unknown
-  try {
-    b = JSON.parse(text)
-  } catch {
-    return null
-  }
-  if (!isObj(b)) return null
-  const items = Array.isArray(b.items) ? b.items : []
-  return JSON.stringify({
-    role: b.role ?? null,
-    phase: b.phase ?? null,
-    version: b.version ?? null,
-    channel: b.channel ?? null,
-    pinned: b.pinned ?? null,
-    items: items.filter(isObj).map((i: any) => ({ id: i.id ?? null, sha256: i.sha256 ?? null })),
-  })
-}
-
-function redactFields(text: string | null, fields: readonly string[] | null | undefined): string | null {
-  if (text == null || !fields || !fields.length) return text
-  let o: unknown
-  try {
-    o = JSON.parse(text)
-  } catch {
-    return null
-  }
-  if (!isObj(o)) return null
-  for (const f of fields) if (f in o) o[f] = '[redacted]'
-  return JSON.stringify(o)
-}
-
-export function errorCode(parsed: unknown, status: number): string {
-  if (isObj(parsed)) {
-    let e: unknown = parsed.error
-    if (isObj(e)) e = e.code
-    if (typeof e === 'string' && CODE_RX.test(e)) return e
-  }
-  return `http_${status}`
-}
-
-const throttled = (status: number | null, code: string | null): boolean =>
-  (status === 429 && code === 'rate_limited') || (status === 503 && code === 'busy')
-
-/** A Retry-After in seconds, clamped to [1, cap]; `dflt` when absent or not a number. */
-export function retrySeconds(value: unknown, dflt: number, cap: number): number {
-  let secs = value == null || value === '' ? dflt : Number(value)
-  if (!Number.isFinite(secs)) secs = dflt
-  return Math.min(Math.max(secs, 1), cap)
-}
-
 /** The one notice for a closed gate; null when open or the reason is unknown. */
 export function gateNotice(state: GateState): string | null {
   if (!state || state.open) return null
   const t = GATE_NOTICES[state.reason ?? '']
   return t ? t.replace('{min_shell}', state.min_shell || 'unknown') : null
-}
-
-const b64url = (b: Uint8Array): string => b64Encode(b).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '')
-const dec = new TextDecoder('utf-8')
-const lower = (h: Record<string, string>): Record<string, string> =>
-  Object.fromEntries(Object.entries(h ?? {}).map(([k, v]) => [k.toLowerCase(), String(v)]))
-const num = (v: unknown): number | null => {
-  const n = typeof v === 'number' ? v : typeof v === 'string' && v.trim() ? Number(v) : NaN
-  return Number.isFinite(n) ? n : null
-}
-
-/** A total budget in ms on the injected clock (sleeping on the injected sleep counts against it). */
-export class Deadline {
-  private t0: number
-  private now: () => number
-  readonly total: number
-  constructor(now: () => number, total: number) {
-    this.now = now
-    this.total = total
-    this.t0 = now()
-  }
-  remaining(): number {
-    return this.total - (this.now() - this.t0)
-  }
 }
 
 // ------------------------------------------------------------------ the channel
@@ -559,7 +298,7 @@ export class Svc {
     return Math.trunc(this.d.now() / 1000)
   }
 
-  // ---------------- binding (host/services.py _bind_endpoint), once per instance
+  // ---------------- binding (the Python client's _bind_endpoint), once per instance
   private init(): Promise<void> {
     if (!this.ready) {
       this.ready = (async () => {
@@ -605,20 +344,11 @@ export class Svc {
     }
     return s
   }
-  /**
-   * The daily metrics upload is on unless the user chose off. A choice made with the savings commands is kept as
-   * metrics_set; before that switch existed an explicit off was a stored metrics false after the upload had been on
-   * (an enabled_day), or a "Not now" to the savings question. A stored false without either was only the old default.
-   */
+  /** The metrics routes' transport switch: a value set through setService (metrics_set) holds, else on. Whether
+   * anything is uploaded is the savings record's (choice.ts uploadOn), not this switch's. */
   private async metricsDefault(d: Record<string, any>): Promise<boolean> {
     const stored = isObj(d.services) ? d.services.metrics : undefined
-    if (d.metrics_set === true && typeof stored === 'boolean') return stored
-    if (stored === true) return true
-    const prompt = await safeGet(this.kv, KEYS.savingsPrompt)
-    if (isObj(prompt) && prompt.answer === 'not_now') return false
-    const state = await safeGet(this.kv, KEYS.metricsState)
-    if (stored === false && isObj(state) && typeof state.enabled_day === 'string' && state.enabled_day) return false
-    return true
+    return d.metrics_set === true && typeof stored === 'boolean' ? stored : true
   }
   private async saveSettings(f: (s: Settings) => void, choseMetrics = false): Promise<boolean> {
     const s = await this.settings()
@@ -695,7 +425,7 @@ export class Svc {
     return b.code
   }
 
-  /** 3.9: "login" (no valid sign-in), "locked" (a 423 or locked_out block in force), else "ok". Read from the store,
+  /** The auth state: "login" (no valid sign-in), "locked" (a 423 or locked_out block in force), else "ok". Read from the store,
    * at most every AUTH_STATE_TTL_MS unless `fresh`. */
   async authState(fresh = false): Promise<AuthState> {
     const now = this.d.now()
@@ -709,16 +439,17 @@ export class Svc {
     else {
       const code = await this.blocked()
       if (code === 'account_locked' || code === 'locked_out') value = 'locked'
+      else if (code === 'org_paused') value = 'paused'
       else if (code) value = 'login'
     }
     this.authCache = { at: now, value }
     return value
   }
 
-  /** The line tools answer in auth fail (3.9), or null while signed in. */
+  /** The line tools answer in auth fail, or null while signed in. */
   async authLine(): Promise<string | null> {
     const st = await this.authState()
-    return st === 'ok' ? null : st === 'locked' ? LOCKED_LINE : PAUSED_LINE
+    return st === 'ok' ? null : st === 'locked' ? LOCKED_LINE : st === 'paused' ? ORG_PAUSED_LINE : PAUSED_LINE
   }
 
   async status(): Promise<Record<string, unknown>> {
@@ -976,11 +707,12 @@ export class Svc {
         }
         break
       }
-      if (ist === 401 && o.signed) break // recovered (or not) by the caller: 3.3 item 4
+      if (ist === 401 && o.signed) break // recovered (or not) by the caller
       if (ist === 423) {
-        await this.setBlock(code, BLOCK_SECONDS.account_locked, o.token ?? null)
+        const paused = code === 'org_paused' // the org's admin paused it; the sign-in stays
+        await this.setBlock(code, paused ? BLOCK_SECONDS.org_paused : BLOCK_SECONDS.account_locked, o.token ?? null)
         this.notice(code)
-        if (o.signed) this.setGate('locked')
+        if (o.signed) this.setGate(paused ? 'paused' : 'locked')
         break
       }
       if (ist === 429 && code === 'locked_out') {
@@ -1009,7 +741,7 @@ export class Svc {
     return last
   }
 
-  // ---------------- signed exchange with the 401 rules of 3.3 item 4
+  // ---------------- signed exchange with the 401 rules
   private async exchange(method: string, wire: string, body: string | null, service: string, deadline: Deadline, o: Omit<XOpts, 'token'> & { token?: string }): Promise<Res> {
     if (!o.signed) return this.attempt(method, wire, body, service, deadline, o)
     const tok = o.token ?? (await getText(this.kv, KEYS.token))
@@ -1117,7 +849,7 @@ export class Svc {
     return this.rotate(deadline)
   }
 
-  /** Rotation under a best-effort lease (3.3 item 4). The new token waits under token_next:<session> until the
+  /** Rotation under a best-effort lease. The new token waits under token_next:<session> until the
    * server confirms it, so two sessions rotating at once never overwrite each other's unconfirmed token. */
   private async rotate(deadline: Deadline): Promise<string | null> {
     const lease = await safeGet(this.kv, KEYS.rotateLease)
@@ -1198,7 +930,7 @@ export class Svc {
     if (await this.cooling()) return R(false, { error: 'rate_limited' }) // the gate stays as it is
     const err = await this.ensureFresh(d, rotate)
     if (err) {
-      this.setGate(err === 'account_locked' || err === 'locked_out' ? 'locked' : 'login')
+      this.setGate(err === 'account_locked' || err === 'locked_out' ? 'locked' : err === 'org_paused' ? 'paused' : 'login')
       return R(false, { error: err })
     }
     const res = await this.exchange('POST', PREFIX + HELLO_PATH, JSON.stringify({ shell: this.d.shellVersion, contract: API }), 'auth', d, {
@@ -1210,13 +942,15 @@ export class Svc {
       if (
         res.status === 200 &&
         isObj(b) &&
-        Object.keys(b).sort().join(',') === 'accept,plan,routes' &&
+        ['accept,plan,routes', 'accept,org,plan,routes'].includes(Object.keys(b).sort().join(',')) &&
+        (b.org === undefined || validOrg(b.org)) &&
         b.accept === true &&
         PLAN_VALUES.includes(b.plan as string) &&
         Array.isArray(b.routes) &&
         b.routes.every((r) => typeof r === 'string' && ROUTE_KEY_RX.test(r))
       ) {
         await safeSet(this.kv, KEYS.plan, b.plan)
+        await keepOrg(this.kv, b.org, this.d.now(), (on) => this.setService('metrics', on)) // the company's choice
         this.planRoutes = new Set(b.routes as string[])
         this.refused.clear()
         this.setGate(null)
@@ -1228,6 +962,7 @@ export class Svc {
     if (res.status === 426 && res.error === 'upgrade_required') {
       // attempt() closed the gate with the minimum
     } else if (res.status === 401 || res.error === 'not_logged_in') this.setGate('login')
+    else if (res.status === 423 && res.error === 'org_paused') this.setGate('paused')
     else if (res.status === 423 || (res.status === 429 && res.error === 'locked_out')) this.setGate('locked')
     else if (throttled(res.status, res.error)) {
       // rate limited or busy: the server is up; the gate keeps its state
@@ -1272,7 +1007,7 @@ export class Svc {
    * first, inside the caller's deadline. */
   private async ensureOpen(d: Deadline, hook: Hook): Promise<boolean> {
     if (this.gs.open) return true
-    if (!['unknown', 'login', 'locked'].includes(this.gs.reason ?? '')) return false // unverified, unavailable, upgrade, offline
+    if (!['unknown', 'login', 'locked', 'paused'].includes(this.gs.reason ?? '')) return false // unverified, unavailable, upgrade, offline
     const hello = this.handshake(hook)
     const got = await this.within(hello, d.remaining())
     return got !== null && this.gs.open
@@ -1332,7 +1067,7 @@ export class Svc {
       const signed = sub !== '/health'
       const key = `${route.method} ${route.path}`
       if (signed) {
-        if ((await this.authState()) !== 'ok') return fail('auth_failed') // 3.9: nothing is sent
+        if ((await this.authState()) !== 'ok') return fail('auth_failed') // nothing is sent
         if (await this.cooling()) return fail('rate_limited') // shared: every session backs off together
         if (!(await this.ensureOpen(d, hook))) return fail('inactive')
       }
@@ -1400,7 +1135,7 @@ export class Svc {
     for (const k of [...this.servedBind.keys()]) if (k.startsWith(sessionRef + '\n')) this.servedBind.delete(k)
   }
 
-  // ---------------- sign-in (3.4): the login routes, the only signed-out traffic besides /health
+  // ---------------- sign-in: the login routes, the only signed-out traffic besides /health
   private async loginGate(): Promise<Result | null> {
     if ((await this.settings()).offline) return R(false, { error: 'offline' })
     const b = await this.block()

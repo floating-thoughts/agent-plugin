@@ -1,4 +1,4 @@
-// The one-time move from the Python core (plan section 5, item 3), run in the background by the first session.start
+// The one-time move from the Python core, run in the background by the first session.start
 // of this release, after the tools are registered. Harness-neutral: the file access, the loopback fetch, the store,
 // the clock and the log line are passed in; nothing here touches `$`.
 //
@@ -17,7 +17,8 @@ import { sha256 } from './noble.js'
 import { COUNTER_PREFIX, MAX_COMPACT_ROWS, MAX_INDEX_ROWS, MAX_ROUTE_ROWS, MAX_STEP_MODELS, MAX_STEPS, sessionKey } from './counters'
 import type { DayRecord } from './counters'
 import type { KV } from './engine_types'
-import { localDay, normModel, parseIso } from './metrics'
+import { localDay, parseIso } from './pyfmt'
+import { normModel } from './transcripts'
 
 export const MIGRATED_FILE = 'MIGRATED'
 export const MIGRATED_KEY = 'migrated' // { at, daemon, counters }: the same record in the store
@@ -85,7 +86,7 @@ const header = (h: Record<string, string> | undefined, name: string): string | u
   return undefined
 }
 
-// ------------------------------------------------------------------ the counters import (host/metrics.py _event)
+// ------------------------------------------------------------------ the counters import (the Python client's _event)
 
 const FIELDS: Record<string, Record<string, (v: unknown) => boolean>> = {
   route: { model: isStr, input: isCount, output: isCount, cache_read: isCount, cache_write: isCount },
@@ -97,7 +98,7 @@ const FIELDS: Record<string, Record<string, (v: unknown) => boolean>> = {
 
 type Ev = { day: string; moment: number; order: number; e: Obj }
 
-/** The events of the old savings log, as host/metrics.py read_events keeps them (bad lines skipped). */
+/** The events of the old savings log, as the Python client's read_events keeps them (bad lines skipped). */
 export function readEvents(text: string): Ev[] {
   const out: Ev[] = []
   let order = 0
@@ -124,7 +125,7 @@ export function readEvents(text: string): Ev[] {
   return out
 }
 
-/** The day records (counters.ts DayRecord) of the old events, folded as host/metrics.py _counters folds them. */
+/** The day records (counters.ts DayRecord) of the old events, folded as the Python client's _counters folds them. */
 export function foldEvents(events: Ev[], isLong: (model: string, prompt: number) => boolean = () => false): Map<string, DayRecord> {
   const days = new Map<string, DayRecord>()
   const rec = (day: string): DayRecord => {

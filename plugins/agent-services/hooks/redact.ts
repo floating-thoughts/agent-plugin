@@ -1,5 +1,5 @@
-// Secret redaction, harness-neutral: a port of host/explain.py (redact, scrub, clean_description) with the same
-// patterns (A22 item 2). Applied to every text the hooks module shows, logs or writes: status line, notices,
+// Secret redaction, harness-neutral: a port of the Python client (redact, scrub, clean_description) with the same
+// patterns. Applied to every text the hooks module shows, logs or writes: status line, notices,
 // receipts, command answers, outbox lines and tool answers.
 //
 // Parity with Python's re: the patterns run with the u and i flags where Python has (?i), so case folding is
@@ -9,7 +9,7 @@
 const EDGE = '(?<![A-Za-z0-9_])'
 const D = '\\p{Nd}'
 
-/** [pattern, keeps its first group] in the order host/explain.py applies them. */
+/** [pattern, keeps its first group] in the order the Python client's applies them. */
 export const SECRET_RES: readonly (readonly [RegExp, boolean])[] = [
   [/-----BEGIN [A-Z ]*PRIVATE KEY-----[\s\S]+?-----END [A-Z ]*PRIVATE KEY-----/gu, false],
   [new RegExp(EDGE + 'sk-ant-[A-Za-z0-9_-]{16,}', 'gu'), false],

@@ -1,14 +1,14 @@
-// The in-process core (plan 3.1, module P4): the port of host/core.py. One neutral event (core/1) in, one answer
+// The in-process core: the port of the Python client. One neutral event (core/1) in, one answer
 // out, keyed by session id; per-session state lives in memory only. It talks to the service only through the
 // injected svc channel (engine_types.ts Transport), keeps the savings day counters in the store (counters.ts),
 // builds the minimized route and checkpoint records (records.ts), and adds receipts (receipts.ts) and the session
 // summary (summary.ts) to answers. Harness-neutral: nothing here touches `$`; the store, clock, random and file
-// reads are injected. register.ts runs one Core per Claude Code session (P8).
+// reads are injected. register.ts runs one Core per Claude Code session.
 //
-// Differences from host/core.py, all from the hooks-module plan (section numbers below are its own):
-// - Auth fail (3.9: gate reason 'login' or 'locked'): every event passes through untouched (answer() with every
+// Differences from the Python client, all from the hooks-module plan (section numbers below are its own):
+// - Auth fail (gate reason 'login' or 'locked'): every event passes through untouched (answer() with every
 //   field null, no notice), and no counter, receipt, summary, context injection or dashboard bookkeeping is made.
-// - No hook waits on the network beyond its deadline (3.3 item 3): the hello at session_start and the retry of an
+// - No hook waits on the network beyond its deadline: the hello at session_start and the retry of an
 //   unknown or unreachable gate run in the background, so the event that started them is answered from the gate
 //   as it was; the plan notice of that hello is given once on the session's next answer without a notice. A
 //   dispatch's route call has 1 s, a tool answer 8 s in all; turn_end's checkpoint call is background work.
@@ -23,6 +23,11 @@ import { Receipts } from './receipts'
 import { Records } from './records'
 import { SessionSummary } from './summary'
 import type { Clock, GateState, KV, Random, ReadText, SvcResult, Transport } from './engine_types'
+import { indexed, isAbsPath, joinPath, normpath, normPath } from './paths'
+import { ORG_PAUSED_LINE } from './org'
+import { checkpointToolName, noteRouteHint, userAskedReview } from './flow_state'
+
+export { indexed, normpath, normPath } from './paths'
 
 export const HARNESSES = ['claude-code', 'opencode', 'codex', 'cursor', 'gemini', 'other']
 export const KINDS = ['session_start', 'dispatch', 'dispatched', 'step', 'step_end', 'pre_tool', 'post_tool', 'turn_end',
@@ -30,27 +35,28 @@ export const KINDS = ['session_start', 'dispatch', 'dispatched', 'step', 'step_e
 export const INJECT_POINTS = ['prompt', 'pre_tool', 'post_tool']
 export const GATE_RETRY_SECONDS = 300 // an unreachable server is tried again after this long (and at every session start)
 export const ANSWER_KEYS = ['action', 'reason', 'set', 'context', 'notice', 'fallback'] as const
-export const TOOL_DEADLINE_MS = 8000 // a tool answer in all (plan 3.3 item 3)
+export const TOOL_DEADLINE_MS = 8000 // a tool answer in all
 export const HELLO_DEADLINE_MS = 30000 // background
-export const AUTH_FAIL_REASONS = ['login', 'locked'] // plan 3.9
+export const AUTH_FAIL_REASONS = ['login', 'locked', 'paused'] // paused: the company's admin paused it
 
 export const CHECKPOINT_MARK = 'Checkpoint reached:'
 export const CHECKPOINT_NOW = '[agent-services server note, not written by the user] The server suggests a checkpoint now: once this ' +
   'stretch is done, call the checkpoint tool and keep the items below in the summary.'
-export const SAVINGS_OFF_NEXT = 'The savings report is turned off on this machine: run /agent-services savings preview ' +
-  'to see what it sends, then /agent-services savings on.' // the savings tool's `next` when reason is service_off
+export const SAVINGS_OFF_NEXT = 'The savings record is not on for this account: /agent-services sharing preview shows ' +
+  'what it sends, and /agent-services sharing on turns it on.' // the savings tool's `next` when reason is service_off
 export const DENY_TEXT = 'This subagent dispatch did not pass the routing check. Rewrite it as the hint says, then dispatch again.'
 
-// The sign-in lines of plan 3.9 (the tools answer only these while auth has failed; P5 shows them).
-export const SIGN_IN_LINE = 'agent-services is paused: sign in with /agent-services login'
+// The sign-in lines (the tools answer only these while auth has failed).
+export const SIGN_IN_LINE = 'agent-services is signed out: sign in with /agent-services login'
 export const LOCKED_LINE = 'agent-services is paused: this account is locked; contact support, then sign in with /agent-services login'
 export const GATE_NOTICES: Readonly<Record<string, string>> = {
   login: SIGN_IN_LINE,
   locked: LOCKED_LINE,
-  upgrade: 'agent-services is paused: this plugin version is no longer accepted; update the plugin (minimum {min_shell}).',
-  offline: 'agent-services is paused: offline mode is on.',
-  unavailable: 'agent-services is paused: the server could not be reached; it tries again at the next session.',
-  unverified: "agent-services is paused: an answer claiming to come from the server was not signed by the server's key " +
+  paused: ORG_PAUSED_LINE,
+  upgrade: 'agent-services needs an update: this plugin version is no longer accepted; update the plugin (minimum {min_shell}).',
+  offline: 'agent-services is offline: offline mode is on, so nothing is sent.',
+  unavailable: "agent-services can't reach its server; it tries again at the next session.",
+  unverified: "agent-services can't verify its server: an answer claiming to come from the server was not signed by the server's key " +
     '(a proxy or a fake server may be in the way); nothing it said was used. It tries again at the next session.',
 }
 export const PLAN_NOTICE = "agent-services: this account's plan does not include every service; the others run on their open " +
@@ -256,71 +262,6 @@ export function openAnswer(tool: string, args: unknown): Record<string, unknown>
   throw new ValidationError('unknown tool')
 }
 
-// ------------------------------------------------------------------ paths for indexed reads (Windows semantics)
-
-export function normPath(path: string): string {
-  let s = path.replace(/\\/g, '/')
-  const m = /^\/([a-zA-Z])\//.exec(s)
-  if (m) s = m[1] + ':/' + s.slice(3)
-  if (/^[a-z]:/.test(s)) s = s[0]!.toUpperCase() + s.slice(1)
-  return s
-}
-
-const isAbsPath = (p: string): boolean => /^[A-Za-z]:\//.test(p) || p.startsWith('/')
-
-// ntpath.normpath, written with forward slashes.
-export function normpath(p: string): string {
-  let s = p.replace(/\\/g, '/')
-  let drive = ''
-  if (/^[A-Za-z]:/.test(s)) {
-    drive = s.slice(0, 2)
-    s = s.slice(2)
-  }
-  const root = s.startsWith('/') ? '/' : ''
-  const out: string[] = []
-  for (const c of s.split('/')) {
-    if (c === '' || c === '.') continue
-    if (c === '..') {
-      if (out.length && out[out.length - 1] !== '..') out.pop()
-      else if (!root) out.push('..')
-      continue
-    }
-    out.push(c)
-  }
-  const r = drive + root + out.join('/')
-  return r || '.'
-}
-
-const joinPath = (a: string, b: string): string => (/[\\/]$/.test(a) || a === '' ? a + b : a + '/' + b)
-const inDir = (dir: string, name: string): string => (dir.endsWith('/') ? dir + name : dir + '/' + name)
-
-export async function indexed(file: string, readText: ReadText): Promise<boolean> {
-  const parts = file.split('/')
-  for (let i = parts.length - 1; i > 0; i--) {
-    const d = parts.slice(0, i).join('/')
-    const dd = !d || d.endsWith(':') ? d + '/' : d
-    const rel = file.slice(d.length + 1)
-    let text: string | null = null
-    try {
-      text = await readText(inDir(dd, 'DOCINDEX.md'))
-    } catch {
-      text = null
-    }
-    if (text !== null) {
-      const t = text.replace(/\\/g, '/')
-      if (t.includes(rel) || t.includes(file)) return true
-    }
-    let page: string | null = null
-    try {
-      page = await readText(inDir(dd, 'codeindex/files/' + rel.split('/').join('__') + '.md'))
-    } catch {
-      page = null
-    }
-    if (page !== null) return true
-  }
-  return false
-}
-
 // ------------------------------------------------------------------ the core
 
 class Session {
@@ -372,10 +313,10 @@ export type CoreOptions = {
   random?: Random
   readText?: ReadText // indexed reads; none: no index-read credit
   gated?: boolean // false: the shell gate is not consulted (local tests, the paused adapters)
-  guard?: Guard | null // served items reach the agent only wrapped by it (P5 guard.ts)
-  metrics?: { savings(): Promise<SvcResult> } | null // P7 metrics.ts; none: savings answers service_off
-  status?: { update(): unknown } | null // P6 status line, refreshed after session_start and turn_end
-  dashboard?: { onTurnEnd(): unknown; published(url: string): unknown; denied(): unknown } | null // P6
+  guard?: Guard | null // served items reach the agent only wrapped by it (guard.ts)
+  metrics?: { savings(): Promise<SvcResult> } | null // metrics.ts; none: savings answers service_off
+  status?: { update(): unknown } | null // the status line, refreshed after session_start and turn_end
+  dashboard?: { onTurnEnd(): unknown; published(url: string): unknown; denied(): unknown } | null // the dashboard
   counters?: Omit<CountersOptions, 'clock' | 'random'>
   harness?: string
 }
@@ -508,6 +449,12 @@ export class Core {
   }
 
   // ---------------- registry
+  /** The model the agent's (null: the main conversation's) last step ran on in this session, or null. */
+  modelOf(session: string, agent: string | null): string | null {
+    const s = this.sessionsMap.get(session)
+    return (agent === null ? s?.mainModel : s?.models.get(agent)) ?? null
+  }
+
   sessions(): { session: string; harness: string; cwd: string | null; transcript: string | null }[] {
     return [...this.sessionsMap.entries()].map(([k, s]) => ({ session: k, harness: s.harness, cwd: s.cwd, transcript: s.transcript }))
   }
@@ -565,7 +512,7 @@ export class Core {
     return out
   }
 
-  // Auth fail (3.9): the event comes back untouched; only local cleanup at session end.
+  // Auth fail: the event comes back untouched; only local cleanup at session end.
   private passThrough(kind: string, sid: string): Answer {
     if (kind === 'session_end') {
       this.dropSession(sid)
@@ -671,7 +618,10 @@ export class Core {
     const s = this.state(e)
     let r
     try {
-      r = await this.records.route(e.session, e.subagent_type, e.description, e.model, e.effort, s.cwd, e.harness)
+      // the main model: the spawn's parent model when the main conversation dispatches, else the last main step's
+      const main = e.agent === null && typeof e.parent_model === 'string' && e.parent_model ? e.parent_model : s.mainModel
+      r = await this.records.route(e.session, e.subagent_type, e.description, e.model, e.effort, s.cwd, e.harness, undefined,
+        { main_model: main, user_asked_review: userAskedReview() })
     } catch {
       return answer('allow', { fallback: 'pass_through' })
     }
@@ -688,6 +638,7 @@ export class Core {
       const reason = (r.hint as string) || DENY_TEXT
       return answer('deny', { reason: reason + (extra ? sep + extra : ''), notice, fallback: fb })
     }
+    if (!fb) noteRouteHint(r.hint) // a pass with a hint (no task type word): flow.ts notes it once per session
     return answer('allow', { notice, fallback: fb })
   }
 
@@ -816,7 +767,9 @@ export class Core {
       const r = await this.records.checkpoint(session, counts as never)
       if (r && r.now === true && !r.fallback) {
         const lines = (r.keep_lines ?? []).filter((x) => typeof x === 'string')
-        if (!s.advised) s.pendingContext = [CHECKPOINT_NOW, ...lines] // once per stretch
+        const tool = checkpointToolName() // the tool this session has (flow.ts), named so the note is checkable
+        const note = tool ? CHECKPOINT_NOW.replace('the checkpoint tool', `the checkpoint tool (${tool})`) : CHECKPOINT_NOW
+        if (!s.advised) s.pendingContext = [note, ...lines] // once per stretch
       }
     } catch {
       // no suggestion
@@ -923,7 +876,7 @@ export class Core {
     left: () => number): Promise<Record<string, unknown>> {
     if (tool === 'router_advice') {
       const r = await this.records.route(session, args.subagent_type, args.description, args.model ?? null, args.effort ?? null,
-        cwd, harness, left())
+        cwd, harness, left(), { main_model: this.sessionsMap.get(session)?.mainModel ?? null, user_asked_review: userAskedReview() })
       const out: Record<string, unknown> = {
         decision: r.decision, model: r.model ?? null, effort: r.effort ?? null, reason: r.reason ?? null, hint: r.hint ?? null,
         fallback: r.fallback ?? null,

@@ -1,7 +1,7 @@
 // The customer dashboard, harness-neutral: numbers-only facts (collect) and the page that shows them (render).
 //
-// A port of host/dashboard.py (collect, render, _stable, write's change test) and the pure parts of
-// host/dashboard_state.py (the render interval and the published-url check). Nothing here touches the engine:
+// A port of the Python client (collect, render, _stable, write's change test) and the pure parts of
+// the Python client (the render interval and the published-url check). Nothing here touches the engine:
 // every source is passed in, nothing is fetched, written or published. The page is written by the wiring (phase 2)
 // to <data dir>/dashboard/index.html and published by the existing dashboard.ts.
 //
@@ -15,10 +15,10 @@
 //               there is no event record at all
 //   estimate    the last estimate answer kept locally (as estimate.json);  servedFetch  the latest served_fetch
 //               record ({ role, version, items, ts })
-// The result holds exactly DATA_FIELDS: no text from a session, no path, id or host name (plan 3.8).
+// The result holds exactly DATA_FIELDS: no text from a session, no path, id or host name.
 import { sha256 } from './noble.js'
 import { hex, pyJson, utf8 } from './e2e'
-import { localDay, parseIso, plusDays, pyRound, pySum } from './metrics'
+import { localDay, parseIso, plusDays, pyRound, pySum } from './pyfmt'
 
 export const VERSION = 1
 export const RENDER_INTERVAL_S = 600 // between two renders (dashboard_state.py INTERVAL)
@@ -405,9 +405,9 @@ export const publishedUrlOk = (url: unknown): url is string =>
   typeof url === 'string' && url.startsWith('https://') && url.length <= URL_MAX
 
 /**
- * The local log line of one dashboard publish attempt (plan 3.7, kind "artifact_publish"): the Artifact input
+ * The local log line of one dashboard publish attempt (kind "artifact_publish"): the Artifact input
  * fields as dashboard.ts passes them, the page's sha256 and size, and the outcome. Publishing is never attempted
- * while auth has failed (3.9): mayPublish is false then.
+ * while auth has failed: mayPublish is false then.
  */
 export function publishRecord(ts: string, input: { file_path: string; url?: string; icon?: string }, page: string, outcome: string): Obj {
   const bytes = utf8(page)
