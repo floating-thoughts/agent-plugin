@@ -1,7 +1,7 @@
 import type { EngineInterface } from 'claude-code'
 import { ensureAgentIgnore } from './agent_files'
 import { sha256Hex, utf8 } from './e2e'
-import { getJob, jobOpen, listJobs, setJobStatus, upsertJob, type Job } from './jobs'
+import { fitLines, getJob, jobOpen, listJobs, setJobStatus, upsertJob, type Job } from './jobs'
 import { redact } from './redact'
 import { relNum, relText } from './reliability'
 import { NOTE_PREFIX, SUGGESTION_PREFIX } from './review'
@@ -401,8 +401,9 @@ export async function handoverNote($: EngineInterface, first: boolean): Promise<
     if (!dir) return null
     const lines: string[] = []
     const jobs = await listJobs($)
-    const cut = jobs.filter((j) => j.status === 'stalled' && (interrupted.includes(j.id) || j.note === RESUME_GONE_NOTE))
-      .sort((a, b) => Number(b.last_activity_at) - Number(a.last_activity_at)).slice(0, 10)
+    const cutAll = jobs.filter((j) => j.status === 'stalled' && (interrupted.includes(j.id) || j.note === RESUME_GONE_NOTE))
+      .sort((a, b) => Number(b.last_activity_at) - Number(a.last_activity_at))
+    const cut = cutAll.slice(0, 10)
     const cutHead = T('note_interrupted')
     if (cut.length && cutHead !== undefined) {
       lines.push(cutHead)
@@ -420,7 +421,7 @@ export async function handoverNote($: EngineInterface, first: boolean): Promise<
       : undefined
     if (pointer !== undefined) lines.unshift(pointer)
     if (!lines.length) return null
-    return [`${NOTE_PREFIX}: ${head0}`, ...lines].join('\n').slice(0, 1500)
+    return fitLines(`${NOTE_PREFIX}: ${head0}`, lines, 1500, cutAll.length - cut.length)
   } catch {
     return null
   }

@@ -62,7 +62,7 @@ export async function readLevel(kv: Store, now: number): Promise<{ level: Level;
 export type MethodsRuntime = {
   session: string
   dir: string
-  svc: { authState(): Promise<string> }
+  svc: { authState(): Promise<string>; authUnsure?(): boolean }
   core: { ask(tool: string, args: unknown, o: { session: unknown; harness?: unknown }): Promise<Obj> }
 }
 
@@ -285,7 +285,7 @@ async function dropServedTexts(): Promise<void> {
 
 async function sync($: EngineInterface, r: MethodsRuntime): Promise<void> {
   const state = await r.svc.authState()
-  if (state === 'login') await dropServedTexts()
+  if (state === 'login' && r.svc.authUnsure?.() !== true) await dropServedTexts()
   const md = await claudeMd($)
   if (!hasTrust(md) && !unbalancedTrust(md)) return
   if ((await levelNow()) === 'off') {
@@ -360,10 +360,19 @@ export async function methodsDiff(diff: (a: string, b: string) => string, shown 
   if (!files) return null
   const pending = await files.read(PENDING_FILE)
   if (blank(pending)) return null
-  const out = diff(bodyOf(await approved()), bodyOf(pending))
+  const base = bodyOf(await approved())
+  const out = base ? diff(base, bodyOf(pending)) : bodyOf(pending)
   if (shown) shownBody = flatBody(pending!)
   if (toModel) modelShownBody = flatBody(pending!)
   return out
+}
+
+export async function approvedStored(): Promise<boolean> {
+  try {
+    return files !== null && bodyOf(await approved()) !== ''
+  } catch {
+    return false
+  }
 }
 
 const flatBody = (text: string): string => bodyOf(text).replace(/\s+/g, ' ')

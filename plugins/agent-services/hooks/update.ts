@@ -113,6 +113,13 @@ async function noted($: EngineInterface, what: string): Promise<void> {
 }
 
 const safe = <T>(f: () => Promise<T> | T, d: T): Promise<T> => Promise.resolve().then(f).catch(() => d)
+const clip = (text: string, n: number): string => {
+  if (text.length <= n) return text
+  const cut = /[\uD800-\uDBFF]/.test(text.charAt(n - 1)) ? n - 1 : n
+  const c = text.slice(0, cut)
+  const at = c.lastIndexOf(' ')
+  return `${(at > n / 2 ? c.slice(0, at) : c).trimEnd()}...`
+}
 const text = async (read: () => Promise<unknown>) => String((await safe(read, '')) ?? '').trim()
 function sleep($: EngineInterface, ms: number): Promise<void> {
   return new Promise<void>(done => void $.clock.after(ms, () => done()))
@@ -152,12 +159,12 @@ async function findExe($: EngineInterface): Promise<{ exe: string; listed: strin
   return { exe: '', listed: '' }
 }
 
-async function manifestOf($: EngineInterface, marketplace: string): Promise<string> {
+async function manifestOf($: EngineInterface, marketplace: string): Promise<string | null> {
   const cfg = (await engineDirs($)).configDir
   const known = parse(await safe(() => $.fs.read(`${cfg}/plugins/known_marketplaces.json`), null)) as Row | null
   const entry = known && typeof known[marketplace] === 'object' ? (known[marketplace] as Row) : null
   const loc = typeof entry?.installLocation === 'string' ? entry.installLocation : `${cfg}/plugins/marketplaces/${marketplace}`
-  return String((await safe(() => $.fs.read(`${loc.replace(/\\/g, '/')}/.claude-plugin/marketplace.json`), '')) ?? '')
+  return safe(async () => String((await $.fs.read(`${loc.replace(/\\/g, '/')}/.claude-plugin/marketplace.json`)) ?? ''), null)
 }
 
 async function ownVersion($: EngineInterface): Promise<string> {
@@ -200,6 +207,7 @@ async function run($: EngineInterface, interactive: boolean): Promise<void> {
   const lease = await takeLease($, path, now)
   if (!lease) return noted($, 'another session is checking')
   let surfaceless = false
+  let unread = false
   try {
     const { exe, listed } = await findExe($)
     if (!exe) {
@@ -215,7 +223,12 @@ async function run($: EngineInterface, interactive: boolean): Promise<void> {
     const market = id.slice(id.lastIndexOf('@') + 1)
     await $.process.run([exe, 'plugin', 'marketplace', 'update', market], { timeoutMs: RUN_TIMEOUT_MS, cwd: $.plugin.root })
     const installed = versionIn(listed, id)
-    const latest = listedVersion(await manifestOf($, market), $.plugin.name)
+    const manifest = await manifestOf($, market)
+    if (manifest === null) {
+      unread = true
+      return noted($, 'could not read the marketplace listing; the next check tries again')
+    }
+    const latest = listedVersion(manifest, $.plugin.name)
     if (isRemoved()) return
     const s = await readShared($, path)
     await writeShared($, path, { ...s, checkedAt: now, installed, latest, lease: null })
@@ -227,7 +240,7 @@ async function run($: EngineInterface, interactive: boolean): Promise<void> {
   } finally {
     const s = isRemoved() ? {} : await readShared($, path)
     if (s.lease?.owner === lease.owner) {
-      await writeShared($, path, surfaceless ? { ...s, lease: null } : { ...s, checkedAt: Math.max(s.checkedAt ?? 0, now), lease: null })
+      await writeShared($, path, surfaceless || unread ? { ...s, lease: null } : { ...s, checkedAt: Math.max(s.checkedAt ?? 0, now), lease: null })
     }
   }
 }
@@ -281,7 +294,7 @@ async function autoApply($: EngineInterface, path: string, exe: string, id: stri
   } else if (out.kind === 'current') {
     lastAuto = `nothing to install at ${hhmm(now)} UTC`
   } else {
-    const reason = out.reason.slice(0, 200)
+    const reason = clip(out.reason, 200)
     const count = (failed?.count ?? 0) + 1
     await writeShared($, path, { ...s2, autoFailed: { version: latest, count, at: now, reason } })
     lastAuto = `the update to ${latest} failed (${count} of ${AUTO_FAIL_LIMIT}): ${reason}`
@@ -295,7 +308,7 @@ async function autoApply($: EngineInterface, path: string, exe: string, id: stri
 function check($: EngineInterface, interactive: boolean): Promise<void> {
   if (isRemoved()) return Promise.resolve()
   running ??= run($, interactive)
-    .catch(err => noted($, `the check failed: ${String(err instanceof Error ? err.message : err).slice(0, 200)}`))
+    .catch(err => noted($, `the check failed: ${clip(String(err instanceof Error ? err.message : err), 200)}`))
     .finally(() => void (running = null))
   return running
 }
@@ -343,9 +356,9 @@ export async function applyUpdate($: EngineInterface, marketplace = 'agent-plugi
       answer = `Updated agent-services to ${out.to}. Run /reload-plugins to use it in this session (in the desktop ` +
         'app, start a new session).'
     } else if (out.kind === 'current') answer = 'agent-services is already the latest version; nothing was changed.'
-    else answer = `The update failed: ${out.reason.slice(0, 200)}. To update by hand, ${by}.`
+    else answer = `The update failed: ${clip(out.reason, 200)}. To update by hand, ${by}.`
   } catch (err) {
-    answer = `The update could not run (${String(err instanceof Error ? err.message : err).slice(0, 120)}). To update ` +
+    answer = `The update could not run (${clip(String(err instanceof Error ? err.message : err), 120)}). To update ` +
       `by hand, ${by}.`
   }
   return (applied = answer)

@@ -9,6 +9,7 @@ export const EXPLAIN: Readonly<Record<string, string>> = {
 }
 
 export const EXPLAIN_KEY = 'band_explain'
+export const EXPLAIN_POLL_MS = 5000
 
 export function explainOn(value: unknown): boolean {
   return !(typeof value === 'object' && value !== null && (value as Record<string, unknown>).on === false)

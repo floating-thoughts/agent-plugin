@@ -21,6 +21,7 @@ export const NO_LICENSE_NOTICE =
 export const SALT_KEY = 'salt'
 export const ROUTE_DEADLINE_MS = 1000
 export const BACKGROUND_DEADLINE_MS = 30000
+export const TABLE_MAX = 8000
 
 const PYTHONS = /^(python|python3|python3\.\d+|py|pythonw)$/
 const SUFFIXES = ['.exe', '.cmd', '.bat', '.ps1', '.sh', '.py']
@@ -242,7 +243,7 @@ export class Records {
     }
     await this.addFlags(req, { ...flags, want_table: true })
     const ans = await this.post('/router/decide', req, 'router', 8000)
-    return typeof ans?.table === 'string' ? ans.table : null
+    return typeof ans?.table === 'string' ? capTable(ans.table) : null
   }
 
   async route(session: unknown, subagentType: unknown, description: unknown, model: unknown = null, effort: unknown = null,
@@ -357,6 +358,26 @@ export class Records {
     }
     return { source: 'default', fallback: 'open_defaults' }
   }
+}
+
+export function capTable(table: string): string {
+  if (table.length <= TABLE_MAX) return table
+  const lines = table.split('\n')
+  const mark = (n: number): string => `[table truncated, ${n} more lines]`
+  const room = TABLE_MAX - mark(lines.length).length - 1
+  let out = ''
+  let kept = 0
+  for (const l of lines) {
+    const next = kept ? `${out}\n${l}` : l
+    if (next.length > room) break
+    out = next
+    kept++
+  }
+  if (!kept) {
+    out = lines[0]!.slice(0, room)
+    kept = 1
+  }
+  return kept < lines.length ? `${out}\n${mark(lines.length - kept)}` : out
 }
 
 const DAILY_PATH = '/metrics/daily'

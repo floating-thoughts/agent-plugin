@@ -46,7 +46,7 @@ export function session8(session: string): string {
   return h.length >= 8 ? h.slice(0, 8) : sha256Hex(utf8(String(session ?? ''))).slice(0, 8)
 }
 
-const cut = (s: string, n: number): string => (s.length > n ? s.slice(0, n) : s)
+const cut = (s: string, n: number): string => (s.length > n ? s.slice(0, n > 0 && /[\uD800-\uDBFF]/.test(s[n - 1]!) ? n - 1 : n) : s)
 const clean = (s: string | null | undefined, n: number): string | null => (s == null ? null : cut(redact(String(s)), n))
 
 export function redactRequest(text: string | null | undefined): string | null {

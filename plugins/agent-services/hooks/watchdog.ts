@@ -37,7 +37,7 @@ export type StallPlan = {
   ledger: StallLedger
 }
 
-export type KeepGoingLedger = { prompt_at: number | null; prompt_rounds: number; session_rounds: number; idle_count: number }
+export type KeepGoingLedger = { prompt_at: number | null; prompt_rounds: number; session_rounds: number; idle_count: number; last_work?: string | null }
 export type KeepGoingInput = {
   entry: 'stop' | 'idle'
   at: number
@@ -255,7 +255,30 @@ function freshLedger(l: unknown): KeepGoingLedger {
     prompt_rounds: countOf(x.prompt_rounds, 0),
     session_rounds: countOf(x.session_rounds, 0),
     idle_count: countOf(x.idle_count, 0),
+    last_work: typeof x.last_work === 'string' ? x.last_work : null,
   }
+}
+
+export function actionableWork(state: unknown): { items: string[]; mark: string } {
+  const answered = (a: unknown): boolean => !(a === undefined || a === null || a === '')
+  const s = (state && typeof state === 'object' ? state : {}) as Obj
+  const kg = (s.keep_going && typeof s.keep_going === 'object' ? s.keep_going : {}) as Obj
+  const said = new Set((Array.isArray(kg.waiting) ? kg.waiting : []).flatMap((w: unknown) => String(w ?? '').split(/[\s,:;()]+/)).filter(Boolean))
+  const steps = openWork(s).steps.filter((id) => !said.has(id))
+  const questions = Array.isArray(s.questions) ? s.questions : []
+  const fills = (Array.isArray(s.placeholders) ? s.placeholders : [])
+    .filter((p: Obj) => p && p.status === 'open' && typeof p.id === 'string')
+    .filter((p: Obj) => {
+      const qid = typeof p.question === 'string' && p.question ? p.question : (/^([A-Za-z][A-Za-z0-9_]{0,39})-[1-9][0-9]{0,3}$/.exec(p.id)?.[1] ?? '')
+      const q = questions.find((x: Obj) => x && String(x.id) === qid)
+      return !!q && answered(q.answer)
+    })
+    .map((p: Obj) => `placeholder ${p.id}`)
+  const items = [...steps, ...fills]
+  const tasks = (Array.isArray(s.tasks) ? s.tasks : []).filter((t: Obj) => t && steps.includes(String(t.id)))
+    .map((t: Obj) => `${t.id}:${t.status}:${t.updated ?? ''}`)
+  const mark = JSON.stringify([items, tasks, s.steps?.done ?? null, s.steps?.total ?? null])
+  return { items, mark }
 }
 
 export function openWork(state: unknown): { steps: string[]; waiting: string[]; placeholders: number } {
@@ -302,7 +325,8 @@ export function keepGoingDue(input: KeepGoingInput): KeepGoingPlan {
       if (!reopened) return none()
     }
     const work = openWork(state)
-    if (!work.steps.length && !work.placeholders) return none()
+    const act = actionableWork(state)
+    if (!act.items.length || act.mark === ledger.last_work) return none()
     if (input.entry === 'stop') {
       if (input.stopHookActive === true || input.blocked === true || input.endedNormally === false) return none()
     } else if (input.entry === 'idle') {
@@ -310,9 +334,10 @@ export function keepGoingDue(input: KeepGoingInput): KeepGoingPlan {
       const wait = Math.min(minutesOf(k.idle_minutes, 20) * 2 ** ledger.idle_count, minutesOf(k.idle_max_minutes, 120))
       if (at - input.lastTurnEndAt < wait) return none()
     } else return none()
-    const question = fill(text, { steps: listOf(work.steps, k), waiting: listOf(work.waiting, k), placeholders: work.placeholders })
+    const question = fill(text, { steps: listOf(act.items, k), waiting: listOf(work.waiting, k), placeholders: work.placeholders })
     ledger = {
       ...ledger,
+      last_work: act.mark,
       prompt_rounds: ledger.prompt_rounds + 1,
       session_rounds: ledger.session_rounds + 1,
       idle_count: input.entry === 'idle' ? ledger.idle_count + 1 : ledger.idle_count,

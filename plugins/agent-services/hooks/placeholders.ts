@@ -40,7 +40,9 @@ function openIds(state: unknown): string[] {
 
 export function oneLine(text: string, cap: number): string {
   const flat = String(text).replace(/[\s\u0000-\u001f\u007f-\u009f]+/g, ' ').trim()
-  return flat.length > cap ? `${flat.slice(0, cap)}...` : flat
+  if (flat.length <= cap) return flat
+  const end = cap > 0 && /[\uD800-\uDBFF]/.test(flat[cap - 1]!) ? cap - 1 : cap
+  return `${flat.slice(0, end)}...`
 }
 
 function masked(text: string): string {

@@ -8,7 +8,8 @@ import { rulesTable } from './rules'
 import { setBandPending } from './band'
 import { acceptanceCheck } from './evidence'
 import { engineStore } from './store'
-import { authorCheck, ownerCheck, redlineOverride, signedIn, spellPath, stepDone } from './subagents'
+import { ownerCheck, redlineOverride, signedIn, spellPath, stepDone } from './subagents'
+import { unlockGate, unlockPrompt } from './test_unlock'
 import { globsOverlap, ownershipCheck } from './ownership'
 import { toolInput } from './tools'
 import { servedText } from './workflow_table'
@@ -250,7 +251,7 @@ async function lockCheck($: EngineInterface, e: Obj, rt?: Ready): Promise<string
       hide = text !== null && text.length <= 65536 && hideTests(text)
     }
   } catch {}
-  return authorCheck(e, cwd, hide)
+  return unlockGate($, e, cwd, hide)
 }
 
 async function turnEnd($: EngineInterface, e: Obj): Promise<void> {
@@ -291,6 +292,7 @@ export async function flowPrompt($: EngineInterface, e: Obj, rt?: Ready): Promis
       notePersonPrompt(e.text)
       checkpointPersonPrompt()
       await redlineOverride($, e.text)
+      await unlockPrompt($, e)
     }
     void recheckCheckpoint($)
     const advice = takeAdvice()

@@ -3,7 +3,7 @@ import { ensureAgentIgnore } from './agent_files'
 import { sha256Hex, utf8 } from './e2e'
 import { globMatch } from './glob'
 import { relNum } from './reliability'
-import { projectDir } from './task_state_io'
+import { projectWriteDir } from './task_state_io'
 
 export type FactModule = { id: string; globs: string[]; files: number; hash: string }
 export type FactEdge = { a: string; b: string; n: number }
@@ -280,7 +280,7 @@ function serial<T>(fn: () => Promise<T>, fallback: T): Promise<T> {
 async function refresh($: EngineInterface, onlyIfMoved: boolean): Promise<MemoryFacts | null> {
   const lim = factLimits()
   if (!lim || noProcess) return null
-  const dir = await projectDir($)
+  const dir = await projectWriteDir($)
   if (!dir) return null
   const before = await readAt($, dir)
   if (onlyIfMoved) {
@@ -309,7 +309,7 @@ export function stampIntro($: EngineInterface, id: string, globs?: readonly stri
     if (!/^[a-z0-9][a-z0-9_.-]{0,79}$/.test(key) || key.includes('..')) return false
     const lim = factLimits()
     if (!lim || noProcess) return false
-    const dir = await projectDir($)
+    const dir = await projectWriteDir($)
     if (!dir) return false
     let facts = await readAt($, dir)
     const head = await headOf($, dir, lim.timeoutMs)
@@ -333,7 +333,7 @@ export function stampIntro($: EngineInterface, id: string, globs?: readonly stri
 
 export async function readFacts($: EngineInterface): Promise<MemoryFacts | null> {
   try {
-    const dir = await projectDir($)
+    const dir = await projectWriteDir($)
     return dir ? await readAt($, dir) : null
   } catch {
     return null

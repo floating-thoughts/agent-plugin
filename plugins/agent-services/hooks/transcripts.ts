@@ -450,6 +450,7 @@ export class Scanner {
   private readonly turnsSeen = new Set<string>()
   private readonly time: Record<string, { bytes: number; turns: number }> = {}
   private readonly intervals: Interval[] = []
+  private readonly activeDays: Record<string, Set<string>> = {}
 
   constructor(prices: Prices) {
     this.prices = prices
@@ -535,7 +536,11 @@ export class Scanner {
       this.read.bytes += size
       if (isSub) this.read.subagent_bytes += size
       else this.read.main_bytes += size
-      if (isSub) this.intervals.push(...intervalsOf(stamps))
+      const own = (ivs: Interval[]): void => {
+        this.intervals.push(...ivs)
+        if (session) for (const day of Object.keys(byLocalDay(ivs))) (this.activeDays[day] ??= new Set()).add(session)
+      }
+      if (isSub) own(intervalsOf(stamps))
       let turn: { skip: boolean } | null = null
       const active: number[] = []
       for (const r of rows) {
@@ -554,7 +559,7 @@ export class Scanner {
           }
         } else if (!turn?.skip && r.event) active.push(r.moment / 1000)
       }
-      if (active.length) this.intervals.push(...intervalsOf(active))
+      if (active.length) own(intervalsOf(active))
       if (!isSub) {
         let first: number | null = null
         let last: number | null = null
@@ -679,6 +684,7 @@ export class Scanner {
     const sortedDays: Record<string, DayFacts> = {}
     for (const day of Object.keys(this.byDay).sort()) sortedDays[day] = this.byDay[day]
     const md: Record<string, string[]> = {}
+    for (const [day, ids] of Object.entries(this.activeDays)) for (const id of ids) (mainDays[day] ??= new Set()).add(id)
     for (const day of Object.keys(mainDays).sort()) md[day] = [...mainDays[day]].sort()
     const sortedList = [...days].sort()
     return {

@@ -103,13 +103,54 @@ function baseName(path: string): string {
 function elsewhere(command: string, path: string): boolean {
   const re = new RegExp(`([^\\s"'|;&<>()]*)(?<![\\w.-])${escape(baseName(path))}(?![\\w.-])`, 'g')
   const own = spellPath(path).toLowerCase()
+  const ownRel = !/^([a-z]:)?\//i.test(own)
+  const same = (p: string) => p === own || (ownRel && p.endsWith(`/${own}`))
   let seen = false
   for (const m of command.replace(/\\/g, '/').matchAll(re)) {
     const dir = m[1] ?? ''
-    if (!/^([a-z]:)?\//i.test(dir) || spellPath(`${dir}${baseName(path)}`).toLowerCase() === own) return false
+    if (/^([a-z]:)?\//i.test(dir)) {
+      if (same(spellPath(`${dir}${baseName(path)}`).toLowerCase())) return false
+    } else {
+      const rel = `${dir}${baseName(path)}`.replace(/^(\.\/)+/, '').toLowerCase()
+      if (!dir || /^[~$%]/.test(rel) || /(^|\/)\.\.?(\/|$)/.test(rel) || same(rel) || own.endsWith(`/${rel}`)) return false
+    }
     seen = true
   }
   return seen
+}
+
+const COPIERS = ['cp', 'copy', 'copy-item', 'cpi']
+
+function dropCopySources(command: string, path: string): string {
+  const mention = new RegExp(`(?<![\\w.-])${escape(baseName(path))}(?![\\w.-])`, 'i')
+  return command
+    .split(/(\|\||&&|[|;&\n])/)
+    .map((seg) => {
+      const toks = [...seg.matchAll(/"[^"]*"|'[^']*'|\S+/g)].map((m) => ({ text: m[0], at: m.index ?? 0 }))
+      if (!toks.length || !COPIERS.includes(toks[0]!.text.toLowerCase()) || seg.includes('>')) return seg
+      let dest = -1
+      for (let i = 1; i < toks.length; i++) {
+        const t = toks[i]!.text.toLowerCase()
+        if ((/^-de/.test(t) || t === '-t') && i + 1 < toks.length) dest = i + 1
+        else if (t.startsWith('--target-directory=')) dest = i
+      }
+      if (dest < 0) {
+        for (let i = toks.length - 1; i > 0; i--) {
+          if (!toks[i]!.text.startsWith('-') && !/^\/-?[a-z]$/i.test(toks[i]!.text)) {
+            dest = i
+            break
+          }
+        }
+      }
+      let out = seg
+      for (let i = toks.length - 1; i > 0; i--) {
+        const tk = toks[i]!
+        if (i === dest || !mention.test(tk.text.replace(/\\/g, '/'))) continue
+        out = `${out.slice(0, tk.at)}copied-source${out.slice(tk.at + tk.text.length)}`
+      }
+      return out
+    })
+    .join('')
 }
 
 function shellHit(command: string, locked: readonly string[], cased: string[], anyCase: string[]): string | null {
@@ -126,12 +167,19 @@ function shellHit(command: string, locked: readonly string[], cased: string[], a
 
 export function touchedBy(command: string, locked: readonly string[]): string | null {
   const a = part('authors')
-  return a ? shellHit(command, locked, strings(a.shell_writes), strings(a.shell_writes_any_case)) : null
+  if (!a) return null
+  for (const path of locked) {
+    if (shellHit(dropCopySources(command, path), [path], strings(a.shell_writes), strings(a.shell_writes_any_case))) return path
+  }
+  return null
 }
 
 export function readBy(command: string, locked: readonly string[]): string | null {
   const a = part('authors')
-  return a ? shellHit(command.replace(/\\/g, '/'), locked, [], strings(a.shell_reads_any_case)) : null
+  if (!a) return null
+  const hit = shellHit(command.replace(/\\/g, '/'), locked, [], strings(a.shell_reads_any_case))
+  if (hit) return hit
+  return locked.find((path) => !elsewhere(command, path) && dropCopySources(command, path) !== command) ?? null
 }
 
 const writers = new Map<string, string>()
@@ -142,6 +190,10 @@ export function resetSubagentsForTest(): void {
 }
 
 export function authorCheck(e: Obj, cwd: string | null, hideTests = false): string | null {
+  return authorHit(e, cwd, hideTests)?.reason ?? null
+}
+
+export function authorHit(e: Obj, cwd: string | null, hideTests = false, granted: readonly string[] = []): { path: string; reason: string; read: boolean } | null {
   const a = part('authors')
   if (!a || !isObj(e)) return null
   const input = toolInput(e)
@@ -155,14 +207,14 @@ export function authorCheck(e: Obj, cwd: string | null, hideTests = false): stri
   const reason = (key: string, path: string) =>
     fill(a[key], { path, writer: String(writers.get(path) === 'main' ? a.writer_main : a.writer_other) })
   if (agent) {
-    const locked = [...writers].filter(([, by]) => by !== agent).map(([p]) => p)
+    const locked = [...writers].filter(([p, by]) => by !== agent && !granted.includes(p)).map(([p]) => p)
     const hit = target !== null && locked.includes(target) ? target : shell !== null ? touchedBy(shell, locked) : null
-    if (hit) return reason('locked_reason', hit)
+    if (hit) return { path: hit, reason: reason('locked_reason', hit), read: false }
     if (a.hide_reads === true || (a.hide_reads === 'project' && hideTests)) {
       const opened = tool === 'Read' ? input.file_path : tool === 'Grep' ? input.path : undefined
       const opens = typeof opened === 'string' ? spellPath(opened, c) : null
       const peek = opens !== null && locked.includes(opens) ? opens : shell !== null ? readBy(shell, locked) : null
-      if (peek) return reason('hidden_reason', peek)
+      if (peek) return { path: peek, reason: reason('hidden_reason', peek), read: true }
     }
   }
   if (target !== null && isTestPath(target) && (!agent || !writers.has(target))) writers.set(target, agent ?? 'main')

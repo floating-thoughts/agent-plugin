@@ -96,7 +96,7 @@ export function ownsOf(text: unknown): { globs: string[]; dropped: { glob: strin
       const g = cleanGlob(word)
       if (g === null) continue
       const why = globProblem(g)
-      if (why) dropped.push({ glob: g.slice(0, 80), why })
+      if (why) dropped.push({ glob: [...g].length > 80 ? `${[...g].slice(0, 77).join('')}...` : g, why })
       else if (!globs.includes(g) && globs.length < max) globs.push(g)
     }
   }
