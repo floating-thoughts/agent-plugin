@@ -88,7 +88,7 @@ export type MethodsRuntime = {
 const isObj = (v: unknown): v is Obj => !!v && typeof v === 'object' && !Array.isArray(v)
 const unwrap = (t: string) => t.replace(/^<agent-method[^>]*>\n?/, '').replace(/\n?<\/agent-method>\s*$/, '').trim()
 const validLine = (until: string) =>
-  `Valid until ${until}. After that day, ignore this file: it was not renewed, so agent-services is signed out or removed.`
+  `Valid until ${until}. After that day, ignore this file: it was not renewed, which happens when agent-services is signed out, removed, or has not run since.`
 
 /** The served part for one answer per phase (METHODS_PHASES order); null when no answer has items. Pure. */
 export function methodsBody(answers: unknown[]): string | null {
@@ -154,6 +154,11 @@ let pendingTold = false
 let previewed: string | null = null // the text "methods preview" showed in this session
 let levelStore: Store | null = null
 let readClaude: (() => Promise<string | null>) | null = null
+let shownBody: string | null = null // the text the user's own "methods diff" or "methods preview" showed in this session (methods accept takes only it)
+let versioned: (() => Promise<{ text: string | null; version: string }>) | null = null // the served text and its version
+
+/** Whether methodsStart wired the level's reader (levelNow reads "suggest" before that). */
+export const methodsWired = (): boolean => levelStore !== null && readClaude !== null
 
 /** Whether this session loaded the methods through CLAUDE.md (no pushes then). */
 export const methodsActive = (): boolean => active
@@ -192,9 +197,15 @@ const blank = (t: string | null) => t === null || t.trim() === ''
 
 /** The served text now (rendered as the file would be), or null when nothing is served or nothing can be reached. */
 async function served(r: MethodsRuntime): Promise<string | null> {
+  return (await servedVersioned(r)).text
+}
+
+/** The served text now and the version its answers carry ('' when none says). */
+async function servedVersioned(r: MethodsRuntime): Promise<{ text: string | null; version: string }> {
   const ask = (phase: string) => r.core.ask('lesson_lookup', { role: 'auto', phase }, { session: r.session, harness: 'claude-code' })
   const answers = await Promise.all(METHODS_PHASES.map((p) => ask(p).catch(() => null)))
-  return methodsText(answers, until())
+  const v = answers.find((a) => isObj(a) && typeof a.version === 'string' && a.version)
+  return { text: methodsText(answers, until()), version: v ? String((v as Obj).version) : '' }
 }
 
 /** The approved text: methods.approved.md, else (an older version kept it there) methods.md while it holds methods. */
@@ -233,10 +244,11 @@ async function sync($: EngineInterface, r: MethodsRuntime): Promise<void> {
 
 /** "methods preview": the full text that would be added now (the served text, else the approved one); null when
  * nothing can be shown. Kept for `methods on` in this session. */
-export async function previewMethods(): Promise<string | null> {
+export async function previewMethods(shown = false): Promise<string | null> {
   try {
     previewed = (await fetcher?.()) ?? null
     if (previewed === null && files) previewed = await approved()
+    if (shown && previewed !== null) shownBody = flatBody(previewed)
     return previewed
   } catch {
     return null
@@ -264,20 +276,38 @@ export async function approveMethods(): Promise<{ text: string | null; shown: bo
   return out
 }
 
-/** "methods diff": the differences between the approved text and the candidate; null when there is no candidate. */
-export async function methodsDiff(diff: (a: string, b: string) => string): Promise<string | null> {
+/** "methods diff": the differences between the approved text and the candidate; null when there is no candidate.
+ * `shown`: the answer goes to the user, so `methods accept` may take this candidate in this session. */
+export async function methodsDiff(diff: (a: string, b: string) => string, shown = false): Promise<string | null> {
   if (!files) return null
   const pending = await files.read(PENDING_FILE)
   if (blank(pending)) return null
-  return diff(bodyOf(await approved()), bodyOf(pending))
+  const out = diff(bodyOf(await approved()), bodyOf(pending))
+  if (shown) shownBody = flatBody(pending!)
+  return out
+}
+
+// The candidate was shown in this session: by "methods diff", or it is the text "methods preview" showed.
+const flatBody = (text: string): string => bodyOf(text).replace(/\s+/g, ' ')
+const wasShown = (pending: string): boolean => shownBody !== null && shownBody === flatBody(pending)
+
+/** A candidate waits that this session did not show (or that changed since): `methods accept` refuses it. */
+export async function pendingUnseen(): Promise<boolean> {
+  try {
+    const pending = files ? await files.read(PENDING_FILE) : null
+    return !blank(pending) && !wasShown(pending!)
+  } catch {
+    return false
+  }
 }
 
 /** "methods accept" (take the candidate) or "methods keep" (keep the approved text, stop asking about this candidate).
- * False when there is no candidate. */
+ * False when there is no candidate, or (accept) when this session did not show that exact candidate (pendingUnseen). */
 export async function settlePending(accept: boolean): Promise<boolean> {
   if (!files || !kept) return false
   const pending = await files.read(PENDING_FILE)
   if (blank(pending)) return false
+  if (accept && !wasShown(pending!)) return false
   if (accept) await files.write(APPROVED_FILE, pending!)
   else await kept.set(methodsHash(pending!))
   await files.write(PENDING_FILE, '')
@@ -325,6 +355,7 @@ export async function methodsStart($: EngineInterface, r: MethodsRuntime | null,
       delete: async (k) => void (await $.store.delete(k)),
     }
     readClaude = () => claudeMd($)
+    versioned = () => servedVersioned(r)
     const signedIn = (await r.svc.authState()) === 'ok'
     // what CLAUDE.md gave this session, before any rewrite
     active = hasTrust(await claudeMd($)) && signedIn && methodsValid(await files.read(METHODS_FILE), day(Date.now()))
@@ -383,21 +414,40 @@ export async function seenVersion(store: SeenStore, version: string): Promise<st
     const s = await seenEntry(store)
     if (!s || s.entry?.version === version) return null
     const changed = s.entry !== null
+    const oldHash = typeof s.entry?.hash === 'string' ? s.entry.hash : null
     s.map[s.acc] = changed ? { version, previous: s.entry!.version, at: Date.now() } : { version, at: Date.now() }
     await store.set(SEEN_KEY, s.map)
-    void keepSeenText(changed).catch(() => undefined)
+    void keepSeenText(store, version, changed, oldHash).catch(() => undefined)
     return changed ? methodsUpdatedText(version) : null
   } catch {
     return null
   }
 }
 
-/** The served text of the version seen into SEEN_FILE; on a change the text before goes to PREVIOUS_FILE. */
-async function keepSeenText(changed: boolean): Promise<void> {
+/** The served text of the version seen into SEEN_FILE; on a change the text before goes to PREVIOUS_FILE. The entry
+ * keeps the hash of each file it vouches for (hash, previousHash): a text of another version or of another account
+ * on this machine is never shown as this change. */
+async function keepSeenText(store: SeenStore, version: string, changed: boolean, oldHash: string | null): Promise<void> {
   if (!files) return
-  if (changed) await files.write(PREVIOUS_FILE, (await files.read(SEEN_FILE)) ?? '')
-  const now = (await fetcher?.()) ?? null
-  if (now !== null) await files.write(SEEN_FILE, now)
+  let previousHash: string | null = null
+  if (changed) {
+    const before = await files.read(SEEN_FILE)
+    const ok = !blank(before) && oldHash !== null && methodsHash(before!) === oldHash
+    await files.write(PREVIOUS_FILE, ok ? before! : '')
+    previousHash = ok ? oldHash : null
+  }
+  const now = (await versioned?.()) ?? null
+  const text = now !== null && now.version === version ? now.text : null // the service moved on: keep nothing
+  if (text !== null) await files.write(SEEN_FILE, text)
+  const s = await seenEntry(store)
+  if (!s?.entry || s.entry.version !== version) return
+  const e: Obj = { ...s.entry }
+  delete e.hash
+  delete e.previousHash
+  if (text !== null) e.hash = methodsHash(text)
+  if (previousHash !== null) e.previousHash = previousHash
+  s.map[s.acc] = e
+  await store.set(SEEN_KEY, s.map)
 }
 
 /** "methods diff" below level on: the last change of the served version this machine kept, or null when none was
@@ -410,6 +460,7 @@ export async function seenDiff(store: SeenStore, diff: (a: string, b: string) =>
     const before = await files.read(PREVIOUS_FILE)
     const after = await files.read(SEEN_FILE)
     if (blank(before) || blank(after)) return null
+    if (s.entry.previousHash !== methodsHash(before!) || s.entry.hash !== methodsHash(after!)) return null
     return { from: s.entry.previous, to: s.entry.version, text: diff(bodyOf(before), bodyOf(after)) }
   } catch {
     return null

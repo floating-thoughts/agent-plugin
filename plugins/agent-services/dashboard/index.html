@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>agent-services dashboard</title>
+<title>agent-services savings page</title>
 <style>
 :root {
   --bg: #f6f5f1;
@@ -351,7 +351,7 @@ footer { margin-top: 36px; color: var(--faint); font-size: 12.5px; text-align: c
         if (act && isNum(act.active_days)) { stat("Active days", count(act.active_days)); }
         add(wrap, stats);
         add(wrap, how("Our service compares what your sessions actually cost with what the same work would have cost " +
-          "without agent-services: every subagent on the most capable model, the full conversation carried forward " +
+          "without agent-services: every subagent on a top-tier model, the full conversation carried forward " +
           "with no compaction, and whole files read instead of indexed lookups. It is worked out from the usage counts you " +
           "chose to share" + (isNum(sav.days) ? ", over " + count(sav.days) + " day" + (sav.days === 1 ? "" : "s") : "") +
           ". Compaction can occasionally cost more than it saves; those days count against the total.", true));
@@ -374,7 +374,8 @@ footer { margin-top: 36px; color: var(--faint); font-size: 12.5px; text-align: c
         add(wrap, how("This is an estimate, not a measurement. It comes from a look at your recent usage" +
           (isNum(est.basis_days) ? " over " + count(est.basis_days) + " days" : "") +
           (est.made_on ? ", made on " + fmtDay(est.made_on, true) : "") +
-          ", compared with running every subagent on the most capable model. Turn on usage sharing to see the measured figure.", false));
+          ", compared with running every subagent on a top-tier model." +
+          (D.metrics_on === false ? " Turn on usage sharing to see the measured figure." : ""), false));
       } else {
         add(wrap, el("p", "eyebrow", "Saved with agent-services (est.)"));
         add(wrap, el("p", "hero-value num", "$0.00"));
@@ -382,7 +383,7 @@ footer { margin-top: 36px; color: var(--faint); font-size: 12.5px; text-align: c
           ? "Savings are measured from the usage counts you choose to share. Turn on usage sharing and your first figure appears after one full day."
           : "Your first measured savings appear here after your first full day of work."));
         add(wrap, how("Savings are measured, never guessed: once a day the counts of what agent-services did " +
-          "are compared with what the same work would have cost on the most capable model with no compaction and whole-file reads.", true));
+          "are compared with what the same work would have cost on a top-tier model with no compaction and whole-file reads.", true));
       }
       h.appendChild(wrap);
     })();
@@ -466,7 +467,7 @@ footer { margin-top: 36px; color: var(--faint); font-size: 12.5px; text-align: c
       var best = Math.max.apply(null, vals);
       readout.textContent = best > 0 ? "Best day: " + money(best) + ". Hover or tap a bar for the day." : "Hover or tap a bar for the day.";
       document.getElementById("chart-how").appendChild(how("Each bar is one day's savings, worked out by our service from that day's shared usage counts " +
-        "and compared with the same work on the most capable model, with no compaction and whole-file reads. Days with no work show no bar. " +
+        "and compared with the same work on a top-tier model, with no compaction and whole-file reads. Days with no work show no bar. " +
         "A bar below the line means compaction cost a little more than it saved that day.", true));
     })();
 
@@ -546,7 +547,7 @@ footer { margin-top: 36px; color: var(--faint); font-size: 12.5px; text-align: c
       var routeRuns = leverRuns("route", "routed"), compRuns = leverRuns("compact", "compactions"), idxRuns = leverRuns("index", "indexed_reads");
       card({ title: "Cheaper-model routing", icon: "m4 12h10|m10 6l6 6-6 6|m20 4v16", value: count(routeRuns), unit: "tasks",
         today: tc("routed"), usd: lv("route"), noUsd: "Savings appear once measured", measured: true,
-        how: "Counts each subagent task sent to a model that fits the job instead of the most capable one. Savings are compared with running every subagent on the most capable model." + localNote });
+        how: "Counts each subagent task sent to a model that fits the job instead of a top-tier one. Savings are compared with running every subagent on a top-tier model." + localNote });
       card({ title: "Context compaction", icon: "m4 6h16|m7 12h10|m10 18h4", value: count(compRuns), unit: "compactions",
         today: tc("compactions"), usd: lv("compact"), noUsd: "Savings appear once measured", measured: true,
         how: "Counts each time a long conversation was compacted at a good moment. Savings are compared with carrying the full conversation forward; a compaction that cost more than it saved counts against the total." + localNote });

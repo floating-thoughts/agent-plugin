@@ -51,19 +51,28 @@ export function removedMarker(dataDir: string): string {
   return `${dataDir.replace(/[\\/]+$/, '')}/REMOVED`
 }
 
-async function walk(fs: RemoveFs, dir: string, depth: number, out: string[]): Promise<void> {
-  if (depth > REMOVE_MAX_DEPTH || out.length >= REMOVE_MAX_FILES) return
+// The files found: the first REMOVE_MAX_FILES are emptied; past that they are only counted (up to as many again).
+type Found = { files: string[]; seen: Set<string>; over: number }
+
+async function walk(fs: RemoveFs, dir: string, depth: number, out: Found, newestFirst = false): Promise<void> {
+  if (depth > REMOVE_MAX_DEPTH || out.over >= REMOVE_MAX_FILES) return
   let entries: readonly { name: string; kind?: string }[]
   try {
     entries = await fs.list(dir)
   } catch {
     return // not there
   }
+  // the request log's files are named by day: the newest sort last by name
+  if (newestFirst) entries = [...entries].sort((a, b) => (a.name < b.name ? 1 : a.name > b.name ? -1 : 0))
   for (const e of entries) {
-    if (out.length >= REMOVE_MAX_FILES) return
+    if (out.over >= REMOVE_MAX_FILES) return
     const p = `${dir}/${e.name}`
-    if (e.kind === 'dir' || e.kind === 'directory') await walk(fs, p, depth + 1, out)
-    else out.push(p)
+    if (e.kind === 'dir' || e.kind === 'directory') await walk(fs, p, depth + 1, out, newestFirst)
+    else if (!out.seen.has(p)) {
+      out.seen.add(p)
+      if (out.files.length < REMOVE_MAX_FILES) out.files.push(p)
+      else out.over++
+    }
   }
 }
 
@@ -88,8 +97,11 @@ export async function removeAll(d: RemoveDeps): Promise<string> {
   const dirs = (await d.dirs().catch(() => [] as string[])).filter((x, i, a) => x && a.indexOf(x) === i)
   if (!d.fs) lines.push('Local files: this session cannot reach them; delete these folders yourself: ' + dirs.join(', '))
   else {
-    const files: string[] = []
-    for (const dir of dirs) await walk(d.fs, dir, 0, files)
+    const found: Found = { files: [], seen: new Set(), over: 0 }
+    // the request log first (newest first), so a full folder never keeps the latest requests
+    for (const dir of dirs) await walk(d.fs, `${dir}/services/outbox`, 1, found, true)
+    for (const dir of dirs) await walk(d.fs, dir, 0, found)
+    const files = found.files
     let emptied = 0
     const left: string[] = []
     for (const p of files) {
@@ -105,7 +117,8 @@ export async function removeAll(d: RemoveDeps): Promise<string> {
         'plugins no way to delete a file) in ' + (dirs.length ? dirs.join(' and ') : 'no folder') + '. ' +
         'You can delete these folders yourself.' +
         (left.length ? ` ${left.length} could not be emptied, for example ${left[0]}.` : '') +
-        (files.length >= REMOVE_MAX_FILES ? ` Only the first ${REMOVE_MAX_FILES} files were emptied.` : ''),
+        (found.over ? ` Only ${REMOVE_MAX_FILES} files are emptied in one run (the request log first): ${found.over}` +
+          `${found.over >= REMOVE_MAX_FILES ? ' or more' : ''} were left as they were; delete the folders yourself.` : ''),
     )
     if (dirs[0]) {
       try {
@@ -136,7 +149,7 @@ export async function removeAll(d: RemoveDeps): Promise<string> {
       (gone < keys.length ? ' Some could not be deleted; uninstalling the plugin removes its store.' : ''),
   )
   lines.push(
-    'Not changed by this: a private dashboard page this plugin published to your claude.ai account (delete it ' +
+    'Not changed by this: your private savings page this plugin published to your claude.ai account (delete it ' +
       'there), and what the service keeps for your account (see DATA.md in the plugin, or /agent-services info data).',
   )
   lines.push('This session\'s agent-services hooks now do nothing more; other open Claude Code sessions stop within ' +

@@ -64,10 +64,13 @@ export type {
 
 export const CLIENT_VERSION = '0.1.0'
 
-/** The client_version a body carries: the plugin's release version (the export's shell stamp) when it is one, else
- * CLIENT_VERSION (a development copy has no stamp and reports 'dev', which the schema's Version refuses). */
+/** The client_version a body carries: the plugin's version as register.ts passes it (the export's shell stamp, which
+ * is X.Y.Z: a beta build of X.Y.Z reports X.Y.Z) when it is one. A copy whose stamp could not be read reports 'dev',
+ * which the schema's Version refuses: it is sent as 0.0.0-dev, never as a release number. No version given at all:
+ * CLIENT_VERSION. */
 export function releaseVersion(v: string | null | undefined): string {
-  return typeof v === 'string' && /^\d+\.\d+\.\d+([-+][0-9A-Za-z.-]+)?$/.test(v) && v.length <= 40 ? v : CLIENT_VERSION
+  if (typeof v !== 'string') return CLIENT_VERSION
+  return /^\d+\.\d+\.\d+([-+][0-9A-Za-z.-]+)?$/.test(v) && v.length <= 40 ? v : '0.0.0-dev'
 }
 export const BACKFILL_DAYS = 30
 export const HARNESS = 'claude-code'
@@ -86,7 +89,7 @@ const DAY_RX = /^\d{4}-\d{2}-\d{2}$/
 
 type Obj = Record<string, any>
 
-export class BodyTooLarge extends Error {}
+export class BodyTooLarge extends Error {} // dailyBody: the body is still over BODY_BYTES after fitBody
 
 // ------------------------------------------------------------------ savings events
 
@@ -236,7 +239,7 @@ export function active(day: string, facts: Facts, events: SavingsEvent[]): boole
   return events.some((e) => e.day === day)
 }
 
-/** The POST /metrics/daily body for one local day (the Python client's _Sources.body); throws BodyTooLarge. */
+/** The POST /metrics/daily body for one local day (the Python client's _Sources.body), at most BODY_BYTES (fitBody). */
 export function dailyBody(day: string, input: DailyInput): Obj {
   const { facts, salt, prices } = input
   const events = input.events ?? []
@@ -295,11 +298,64 @@ export function dailyBody(day: string, input: DailyInput): Obj {
   if (tm && (tm.typed_bytes > 0 || tm.agent_seconds > 0 || tm.turns > 0)) {
     body.time = { typed_bytes: tm.typed_bytes, agent_seconds: tm.agent_seconds, agent_sum_seconds: tm.agent_sum_seconds, turns: tm.turns }
   }
-  while (bodySize(body) > BODY_BYTES) {
-    if (!body.by_task.length) throw new BodyTooLarge(`metrics body for ${day} is over ${BODY_BYTES} bytes`)
-    body.by_task.pop()
-  }
+  fitBody(body)
+  if (bodySize(body) > BODY_BYTES) throw new BodyTooLarge() // the rest alone is over the limit: the day is left out
   return body
+}
+
+/**
+ * A compaction row's steps with the same outcome in the service's formula, in fewer bytes (fitBody): the formula
+ * reads a step's context only to set the compaction's after-size (its first step, when unknown) and to find the
+ * first step past the threshold; every other step counts by its model alone, so its context is sent as 0. Steps
+ * after the compaction closed, and a first step of context 0, change nothing and are left out. Only rows whose
+ * starting point is on this day and states a threshold are changed: the state of a carried-over row is not known here.
+ */
+export function leanSteps(row: Obj): Obj {
+  const start = row.start
+  if (!isObj(start) || typeof start.threshold_tokens !== 'number') return row
+  const before = start.before_tokens as number
+  const threshold = start.threshold_tokens as number
+  let after: number | null = typeof start.after_tokens === 'number' ? start.after_tokens : null
+  let crossed = false
+  const steps: [number, number][] = []
+  for (const [context, model] of row.steps as [number, number][]) {
+    if (after === null) {
+      if (context === 0) continue // no effect while the after-size is unknown
+      steps.push([context, model])
+      if (context >= before) break // closes the compaction: later steps change nothing
+      after = context
+      if (context + (before - after) > threshold) crossed = true
+      continue
+    }
+    if (!crossed && context + (before - after) > threshold) {
+      crossed = true
+      steps.push([context, model])
+    } else steps.push([0, model]) // 0 + (before - after) <= context + (before - after) <= threshold, or already past it
+  }
+  return { ...row, steps }
+}
+
+/**
+ * Brings a body over BODY_BYTES under it, least important detail first, and never refuses the day: the compaction
+ * steps in their lean form (same savings, leanSteps), then the smallest subagent task rows, then the last steps of
+ * the longest compaction rows (that compaction's later savings are not counted), then whole compaction rows from the
+ * end. by_model, sessions and the other savings rows stay whole.
+ */
+export function fitBody(body: Obj): void {
+  if (bodySize(body) <= BODY_BYTES) return
+  const compact: Obj[] = Array.isArray(body.savings?.compact) ? body.savings.compact.map((r: Obj) => ({ ...leanSteps(r) })) : []
+  if (isObj(body.savings)) body.savings = { ...body.savings, compact } // the caller's counters stay as they were
+  while (bodySize(body) > BODY_BYTES && body.by_task.length) body.by_task.pop()
+  while (bodySize(body) > BODY_BYTES) {
+    let longest: Obj | null = null
+    for (const row of compact) if (row.steps.length && (!longest || row.steps.length > longest.steps.length)) longest = row
+    if (!longest) break
+    const over = bodySize(body) - BODY_BYTES
+    // each step is at least 6 bytes ("[0,0],"): cut what the excess needs, at least a quarter of the row
+    const cut = Math.min(longest.steps.length, Math.max(Math.ceil(over / 6), Math.ceil(longest.steps.length / 4)))
+    longest.steps = longest.steps.slice(0, longest.steps.length - cut)
+  }
+  while (bodySize(body) > BODY_BYTES && compact.length) compact.pop()
 }
 
 export type Request = { method: 'POST'; route: string; body_text: string }

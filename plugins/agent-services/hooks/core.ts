@@ -21,6 +21,7 @@ import { Counters, sweep } from './counters'
 import type { CountersOptions } from './counters'
 import { Receipts } from './receipts'
 import { sha256Hex } from './e2e'
+import { pyRound } from './pyfmt'
 import { Records } from './records'
 import { SessionSummary } from './summary'
 import type { Clock, GateState, KV, Random, ReadText, SvcResult, Transport } from './engine_types'
@@ -64,6 +65,8 @@ export const GATE_NOTICES: Readonly<Record<string, string>> = {
   unavailable: "agent-services can't reach its server; it tries again in a few minutes and at the next session.",
   unavailable_until: 'agent-services stopped sending: the server could not open two requests in a row; it tries ' +
     'again in about {minutes} minutes.',
+  clock: "agent-services paused: this computer's clock is more than 5 minutes off, so the server's answers cannot be " + // svc.ts says the same
+    'checked. Set the clock right (turn on automatic time); it tries again in about 30 minutes or once the clock is right.',
   unverified: "agent-services can't verify its server: an answer claiming to come from the server was not signed by the server's key " +
     '(a proxy or a fake server may be in the way); nothing it said was used. It tries again in a few minutes.',
 }
@@ -236,7 +239,8 @@ export function gateNotice(state: GateState | null | undefined, nowS: number | n
   const left = state.retryAt != null && nowS !== null ? state.retryAt - nowS : 0
   if (state.reason === 'unavailable' && left > 0)
     return GATE_NOTICES.unavailable_until!.replace('{minutes}', String(Math.max(1, Math.ceil(left / 60))))
-  const text = GATE_NOTICES[state.reason ?? '']
+  const reason = state.reason ?? ''
+  const text = Object.hasOwn(GATE_NOTICES, reason) ? GATE_NOTICES[reason] : undefined
   if (text === undefined) return null
   return text.replace('{min_shell}', state.minShell || 'unknown')
 }
@@ -887,7 +891,7 @@ export class Core {
     if (typeof ins === 'string' && ins.startsWith(CHECKPOINT_MARK) && isInt(before) && isInt(window) && typeof mainModel === 'string') {
       const cb = e.cost_before
       const ca = e.cost_after
-      const usd = isNum(cb) && isNum(ca) ? ca - cb : null
+      const usd = isNum(cb) && isNum(ca) ? pyRound(ca - cb, 6) : null // as the body's other dollar figures
       let ref: string | null = null
       try {
         ref = await this.counters.compaction(sid, {
@@ -938,7 +942,11 @@ export class Core {
     } finally {
       this.sessionsMap.delete(sid)
       this.closeGuard(sid)
-      this.spawn(() => this.counters.flush())
+      // the session's open compaction count ends with it (a later resume adds no steps to an old compaction)
+      this.spawn(async () => {
+        await this.counters.stop(sid).catch(() => undefined)
+        await this.counters.flush()
+      })
     }
     return answer()
   }

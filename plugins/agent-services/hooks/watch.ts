@@ -12,7 +12,7 @@
 // No table (signed out) means every part here passes its event through untouched. Nothing is sent anywhere: the
 // table is read in memory and the notes only reach this session's model.
 import type { EngineInterface } from 'claude-code'
-import { rulesLive, rulesTable } from './rules'
+import { RX_INPUT_MAX, RX_SOURCE_MAX, rulesLive, rulesTable } from './rules'
 import { vaultMask } from './vault'
 
 type Obj = Record<string, any>
@@ -91,9 +91,11 @@ export function untilOf(s: unknown): number | null {
   return m[4] === undefined ? new Date(y, mo, d + 1).getTime() : new Date(y, mo, d, Number(m[4]), Number(m[5])).getTime()
 }
 
+// A served pattern longer than RX_SOURCE_MAX is not used; the text is tested on at most RX_INPUT_MAX characters.
 function test(pattern: string, text: string, whole = false): boolean | null {
+  if (typeof pattern !== 'string' || pattern.length > RX_SOURCE_MAX) return null
   try {
-    return new RegExp(whole ? `^(?:${pattern})$` : pattern, 'i').test(text)
+    return new RegExp(whole ? `^(?:${pattern})$` : pattern, 'i').test(String(text).slice(0, RX_INPUT_MAX))
   } catch {
     return null
   }
@@ -203,10 +205,11 @@ export async function watchBash($: EngineInterface, e: Obj, next: (e: Obj) => Pr
   }
 }
 
-// The stop self-check: owner null is the main conversation (its `listed` background tasks tell which have ended), else
-// the subagent's id. A task is named once; a synchronous subagent's task named before is dropped at its next stop.
+// The stop self-check: owner null is the main conversation, else the subagent's id; the stop's `listed` background
+// tasks, when the event carries them, tell which have ended. A task is named once; a synchronous subagent's task named
+// before is dropped at its next stop.
 function selfCheck(t: Table, owner: string | null, listed: unknown, at: number): string | null {
-  const running = owner === null && Array.isArray(listed)
+  const running = Array.isArray(listed)
     ? new Set(listed.filter((x: Obj) => /running|pending/i.test(String(x?.status ?? ''))).map((x: Obj) => x.id))
     : null
   const due: AutoTask[] = []
@@ -488,6 +491,11 @@ export function installWatch(on: any): void {
     .catch(($: EngineInterface, e: Obj, next: any) => next(e))
   on('classic.StopFailure', { error: 'rate_limit' }, async ($: EngineInterface, e: Obj, next: any) => watchFailure($, e, next))
     .catch(($: EngineInterface, e: Obj, next: any) => next(e))
+}
+
+/** After a /clear or a compaction of the main conversation: the usage alerts already given are given again. */
+export function watchAgain(): void {
+  alertsGiven = []
 }
 
 /** Tests only: a fresh session state; `since` is when the module counts as loaded. */

@@ -78,13 +78,22 @@ export async function setAutonomy(kv: Kv, choice: Autonomy | null, now: number):
   }
 }
 
-/** The choice an AskUserQuestion result holds: an answer that is exactly one of AUTONOMY_LABELS; null otherwise. Pure. */
+// A label as compared: no case, spaces collapsed, trailing "(...)" parts and punctuation dropped, so "Fully automatic
+// (recommended)" or "fully automatic." count as the auto label; anything else (a translation, a paraphrase) does not.
+const norm = (t: string): string => {
+  let s = t.toLowerCase().replace(/\s+/g, ' ').trim()
+  for (let prev = ''; prev !== s;) { prev = s; s = s.replace(/\s*\([^()]*\)\s*$/, '').replace(/[\s.!:;,]+$/, '') }
+  return s
+}
+
+/** The choice an AskUserQuestion result holds: an answer that is one of AUTONOMY_LABELS (compared by `norm`); null
+ * otherwise. Pure. */
 export function autonomyOf(done: unknown): Autonomy | null {
   if (!isObj(done) || done.deny !== undefined || done.isError === true) return null
   const answers = isObj(done.result) && isObj(done.result.answers) ? Object.values(done.result.answers) : []
   const found = new Set<Autonomy>()
   for (const a of answers) {
-    for (const k of ['auto', 'ask'] as const) if (typeof a === 'string' && a.trim() === AUTONOMY_LABELS[k]) found.add(k)
+    for (const k of ['auto', 'ask'] as const) if (typeof a === 'string' && norm(a) === norm(AUTONOMY_LABELS[k])) found.add(k)
   }
   return found.size === 1 ? [...found][0]! : null
 }

@@ -47,4 +47,5 @@ accepted as the trusted hash.
   on only with Yes on the sign-in page (No turns it off); `sharing off` turns it off, `sharing preview` shows what is
   sent and kept. Call it only with the user's own answer.
 
-When the server cannot be reached, the hooks fail open and Codex goes on unchanged.
+When the server cannot be reached, the hooks fail open and Codex goes on unchanged; Codex waits for each hook, so a
+slow server can add up to 2 seconds to a model request and up to 5 seconds to a prompt or a subagent start.

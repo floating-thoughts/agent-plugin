@@ -93,6 +93,11 @@ export async function runLimitsStart(e: Obj, rt: Rt): Promise<Promise<Note | nul
   }
 }
 
+/** After a /clear or a compaction of the main conversation: each head's note is given once more (the answers stay). */
+export function runLimitsAgain(): void {
+  noted = new Set()
+}
+
 /** Tests only: a fresh session state. */
 export function runLimitsResetForTest(): void {
   answers = new Map()

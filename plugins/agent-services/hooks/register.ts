@@ -28,7 +28,7 @@ import { engineStore, safeDelete, safeGet, type KV } from './store'
 import { Svc, type HttpAnswer } from './svc'
 import { engineSleep, installTools, registerTools, SESSION_FALLBACK, svcAuthLine, toolInput } from './tools'
 import { probeProcess, processRunner, updateCheck, type Gate } from './update'
-import { bandSetter, createWiring, installBand, notePlan, svcTransport, type Wiring } from './wiring'
+import { bandSetter, createWiring, engineChunks, installBand, notePlan, svcTransport, type Wiring } from './wiring'
 import { canAskNow } from './choice'
 import { appendRow, denied, installEngines, mailGate, promptIn, rulesStart, spawnGated, stopCheck, toolRun } from './engines'; import { spawnGate } from './subagents'; import { watchPrompt } from './watch' // rule-table engines
 
@@ -51,7 +51,7 @@ type Rt = {
 export const HARNESS = 'claude-code'
 export const START_WAIT_MS = 3000 // session.start waits this long at most for the core's first answer
 export const EVENT_WAIT_MS = 6000 // any other hook: the core's answer (a dispatch has its own 1 s inside)
-export const END_WAIT_MS = 2500 // session end: background work, then again for the outbox write
+export const END_WAIT_MS = 1500 // session end: background work, then again for the outbox write (6 + 1.5 + 1.5 s: under the 10 s a hook gets)
 export const PROBE_WAIT_MS = 1500 // the $.process probe (it runs nothing)
 export const STAMP_PATH = 'core/host/shell_stamp.json' // under the plugin root: the export's version stamp
 
@@ -97,7 +97,7 @@ const first = new Promise<Rt | null>((resolve) => (resolveFirst = resolve))
 function declare($: EngineInterface): void {
   if (declared) return
   declared = true
-  void registerTools($)
+  void registerTools($).catch(() => undefined)
   void declareCommand($).catch(() => undefined)
 }
 
@@ -119,7 +119,7 @@ const engineFetch = ($: EngineInterface) => async (
 }
 
 const engineFs = ($: EngineInterface) => ({
-  read: async (p: string): Promise<string> => String(await $.fs.read(p)),
+  read: async (p: string): Promise<string> => String(await $.fs.read(p)), chunks: (p: string) => engineChunks($, p),
   write: async (p: string, text: string): Promise<void> => {
     await $.fs.write(p, text)
   },
@@ -221,7 +221,7 @@ async function send($: EngineInterface, kind: string, agent: string | null, fiel
 function background($: EngineInterface, r: Rt, interactive: boolean): void {
   void r.wiring.metricsTick().catch(() => undefined)
   void r.outbox.sweep().catch(() => undefined); void rulesStart($, r.svc, ready($)).catch(() => undefined) // engines.ts: rule tables, just-in-time resume
-  void pushStart(r).then(() => methodsStart($, r, interactive)) // phase.ts: plan items; methods.ts: CLAUDE.md file
+  void pushStart(r).then(() => methodsStart($, r, interactive)).catch(() => undefined) // phase.ts: plan items; methods.ts: CLAUDE.md file
   void migrate({
     dataDir: r.dir,
     fs: engineFs($),
@@ -256,7 +256,7 @@ export const register: Register = (on) => {
       svc: r.svc,
       outbox: r.outbox,
       prices: PRICES,
-      dailyBody: (day) => r.wiring.previewBody(day), refreshTime: () => r.wiring.refreshTime(), panel: () => r.wiring.panelLines(), // wiring.ts
+      dailyBody: (day) => r.wiring.previewBody(day), previewNote: () => r.wiring.previewNote(), refreshTime: () => r.wiring.refreshTime(), panel: () => r.wiring.panelLines(), // wiring.ts
       clientVersion: r.wiring.clientVersion,
       marketplace: MARKETPLACE,
       selfUpdates: () => updates.selfUpdates,
@@ -357,12 +357,12 @@ export const register: Register = (on) => {
   }).catch(($, e, next) => next(e))
 
   // On the user's consent, this plugin's own board calls (dashboard.ts dashboardGrant) are allowed without a rule;
-  // a deny from the user's own rule or hook stands, and every other call goes on unchanged.
+  // a deny from the user's own rule, hook or setting stands, and every other call goes on unchanged.
   on('tool.check', { tool: ['Artifact', 'ArtifactData'] }, async ($, e: Ev, next) => {
     const granted = (next as any).origin?.plugin === $.plugin.name && (await dashboardGrant($, e.input, e.tool))
     if (!granted) return next(e)
     const v: Ev = await next(e)
-    return v?.decision === 'deny' && (v.rule || v.hook) ? v : { decision: 'allow', reason: GRANT_REASON }
+    return v?.decision === 'deny' && (v.rule || v.hook || v.setting) ? v : { decision: 'allow', reason: GRANT_REASON }
   }).catch(($, e, next) => next(e))
 
   on('prompt.submit', async ($, e: Ev, next) => {
@@ -388,9 +388,9 @@ export const register: Register = (on) => {
     const ans = await send($, 'compaction', e.agentId ?? null, {
       trigger: e.trigger ?? null,
       instructions: e.instructions ?? null,
-      done: done.skip === undefined,
-      before: done.tokensBefore ?? b?.context?.tokens ?? null,
-      after: done.tokensAfter ?? null,
+      done: done?.skip === undefined,
+      before: done?.tokensBefore ?? b?.context?.tokens ?? null,
+      after: done?.tokensAfter ?? null,
       window: a?.context?.window ?? b?.context?.window ?? null,
       threshold: a?.context?.breakdown?.autoCompactThreshold ?? null,
       cost_before: b?.cost?.usd ?? null,

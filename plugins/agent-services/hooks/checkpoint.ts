@@ -112,7 +112,7 @@ export function checkpointShort(tokens: number): string | null {
 
 /** prompt.submit of the main conversation from a person: after a checkpointed turn, the person leads. */
 export function checkpointPersonPrompt(): void {
-  if (marked === null) personSpoke = true
+  personSpoke = true // also while the checkpointed turn still runs (a queued message): the person's message comes first
 }
 
 /** The instructions given to the compaction. Pure. */
@@ -142,6 +142,7 @@ async function compactThenResume($: EngineInterface, m: Mark): Promise<void> {
   } catch (err) {
     failure = err instanceof Error ? err.message : String(err)
   }
+  compacting = false // done: a checkpoint in the resumed turn is a new one
   try {
     $.ui.log(failure === null ? `agent-services checkpoint "${m.milestone}": compacted.` : `agent-services checkpoint "${m.milestone}": not compacted (${failure}).`)
   } catch {}
@@ -162,7 +163,11 @@ export async function checkpointTurnEnd($: EngineInterface, reason: unknown): Pr
     return
   }
   compacting = true
-  $.clock.after(0, () => {
-    void compactThenResume($, m).catch(() => undefined).finally(() => (compacting = false))
-  })
+  try {
+    $.clock.after(0, () => {
+      void compactThenResume($, m).catch(() => undefined).finally(() => (compacting = false))
+    })
+  } catch {
+    compacting = false // no timer: nothing runs, so the next checkpoint may
+  }
 }

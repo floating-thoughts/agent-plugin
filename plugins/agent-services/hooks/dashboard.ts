@@ -29,13 +29,15 @@ import { encode } from './render'
 import { engineStore } from './store'
 
 export const PUBLISH_INTERVAL_MS = 600_000
-export const PUBLISH_START_WAIT_MS = 4000 // turn.complete waits this long so the first tool call starts inside it
+export const PUBLISH_START_WAIT_MS = 3000 // (after the 6 s event wait: under the 10 s a hook gets) turn.complete waits this long so the first tool call starts inside it
 const TOOL = 'Artifact'
 const DATA_TOOL = 'ArtifactData'
 const URL_RX = /https:\/\/claude\.ai\/(?:code\/)?artifact\/[A-Za-z0-9_-]+/
 // The tool refuses a publish to an artifact this session has neither read nor published: read it once, then retry.
 const UNREAD_RX = /\bread\b/i
-export const GRANT_REASON = 'agent-services dashboard (user allowed)' // the tool.check verdict's reason
+export const GRANT_REASON = 'agent-services savings page (user allowed)' // the tool.check verdict's reason
+// A first publish (no URL stored yet) is marked in the state file; another session waits while the mark is this fresh.
+export const FIRST_PUBLISH_HOLD_MS = 120_000
 const INPUT_KEYS = ['action', 'file_path', 'url', 'icon', 'capabilities'] // what this module's publish call carries
 /** The page's runtime capability: the artifact's own database, written by its owner only (read by whoever opens it). */
 export const DB_CAPS = { db: { rules: [{ path: '', read: 'view', write: 'owner' }] } }
@@ -47,9 +49,9 @@ export type Board = { page: string; state: string; live: string; icon: string }
 export const MAIN_BOARD: Board = { page: 'dashboard/index.html', state: 'services/dashboard.json', live: 'services/dashboard-live.json', icon: 'chart' }
 export const BOSS_BOARD: Board = { page: 'boss/index.html', state: 'services/boss.json', live: 'services/boss-live.json', icon: 'chart' }
 
-type State = { changed_at: number | null; url: string | null; published_at: number | null; denied: boolean }
+type State = { changed_at: number | null; url: string | null; published_at: number | null; denied: boolean; publishing_at: number | null }
 type Live = { url: string; format: string; version: number | null }
-type Page = { data: Record<string, unknown> | null; format: string | null }
+type Page = { data: Record<string, unknown> | null; format: string | null; empty?: boolean }
 type Res = { deny?: string; text?: string; isError?: boolean; result?: unknown }
 /** Where the outcome goes: (kind, fields) as a core event of this session (dashboard_published, dashboard_denied). */
 export type Report = (session: string, kind: string, fields?: Record<string, unknown>) => unknown
@@ -85,7 +87,7 @@ async function readState($: EngineInterface, dir: string, board: Board = MAIN_BO
       return null
     }
     const url = typeof s.url === 'string' && URL_RX.test(s.url) ? s.url : null
-    return { changed_at: num(s.changed_at), url, published_at: num(s.published_at), denied: s.denied === true }
+    return { changed_at: num(s.changed_at), url, published_at: num(s.published_at), denied: s.denied === true, publishing_at: num(s.publishing_at) }
   } catch {
     return null
   }
@@ -110,9 +112,23 @@ export function pageParts(html: string): Page {
 
 async function readPage($: EngineInterface, dir: string, board: Board): Promise<Page> {
   try {
-    return pageParts(String(await $.fs.read(`${dir}/${board.page}`)))
+    const html = String(await $.fs.read(`${dir}/${board.page}`))
+    return { ...pageParts(html), empty: html.trim() === '' }
   } catch {
-    return { data: null, format: null }
+    return { data: null, format: null } // unreadable: the publish call itself reports it
+  }
+}
+
+/** Marks a first publish in the board's state file (publishing_at, ms), keeping the file's other fields. */
+async function markPublishing($: EngineInterface, dir: string, board: Board, now: number): Promise<void> {
+  try {
+    const path = `${dir}/${board.state}`
+    const s = JSON.parse(String(await $.fs.read(path)))
+    if (isObj(s)) {
+      await $.fs.write(path, JSON.stringify({ ...s, publishing_at: now }, null, 2))
+    }
+  } catch {
+    // without the mark two sessions that end a turn together may each create a page
   }
 }
 
@@ -235,6 +251,17 @@ export async function publishDashboard($: EngineInterface, report?: Report, opts
     if (!(await pageOn(engineStore($)))) {
       return 'not_allowed'
     }
+    // an emptied page (the company board after its figures were removed) is never published
+    const page = await readPage($, dir, board)
+    if (page.empty) {
+      return 'no_page'
+    }
+    if (st.url === null) {
+      if (st.publishing_at !== null && now >= st.publishing_at && now - st.publishing_at < FIRST_PUBLISH_HOLD_MS) {
+        return 'too_soon' // another session is creating the page right now
+      }
+      await markPublishing($, dir, board, now)
+    }
     lastAttempt.set(board.page, now)
     const denied = async (res: Res): Promise<string> => {
       deniedIn.set(board.page, session)
@@ -246,7 +273,6 @@ export async function publishDashboard($: EngineInterface, report?: Report, opts
       await send(report, session, 'dashboard_denied')
       return 'denied'
     }
-    const page = await readPage($, dir, board)
     const live = page.data !== null && st.url !== null && tools.includes(DATA_TOOL) ? await readLive($, dir, board) : null
     const data = page.data
     let version = live && live.url === st.url ? live.version : null

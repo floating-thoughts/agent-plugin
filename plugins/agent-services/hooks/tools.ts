@@ -5,7 +5,7 @@
 // Rules:
 // - registerTools($) issues every `$.tool.register` call, each with isDeferred: false, before it awaits anything,
 //   and it touches nothing else of `$`. session.start calls it before its first slow await (store, fetch, file).
-//   All five tools are registered every session: knowing whether the user is signed in takes a store read, which
+//   All the contract's tools (TOOL_SPECS) are registered every session: knowing whether the user is signed in takes a store read, which
 //   must not come first, so in auth fail every tool answers the sign-in line instead of being left out.
 // - Schemas and descriptions are the contract's x-tools (contract.ts TOOLS, generated); names become
 //   mcp__agent-services__<name>.

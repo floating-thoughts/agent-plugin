@@ -22,11 +22,6 @@ export function servedInt(part: string, key: string, min = 1): number | null {
   return typeof v === 'number' && Number.isInteger(v) && v >= min ? v : null
 }
 
-/** A boolean from a section, or null. */
-export function servedFlag(part: string, key: string): boolean | null {
-  const v = workflowPart(part)?.[key]
-  return typeof v === 'boolean' ? v : null
-}
 
 /** A text from a section with its {name} placeholders filled from `vars` (unknown ones stay), or null. */
 export function servedText(part: string, key: string, vars: Record<string, string | number> = {}): string | null {

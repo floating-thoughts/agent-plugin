@@ -43,8 +43,8 @@ export const HOOKS: readonly HookRow[] = [
   },
   {
     event: 'agent.spawn', matcher: '', file: 'register.ts', does: ['network', 'deny', 'rewrite', 'ui'],
-    what: 'Does nothing at all while subagent routing is off (/agent-services routing off: no request, no deny, no ' +
-      'model change, nothing added). Otherwise it asks the service for routing advice on each subagent (forks and ' +
+    what: 'While subagent routing is off (/agent-services routing off) it sends no request, changes no model and ' +
+      'adds nothing; only the weekly usage line below can still deny a subagent. Otherwise it asks the service for routing advice on each subagent (forks and ' +
       'teammates are skipped). The advice can ' +
       'deny the subagent with a reason, or set its model and effort. At routing suggest (the default) a subagent ' +
       'whose description has no task type word is never denied for it; at routing strict the request says so and ' +
@@ -52,8 +52,9 @@ export const HOOKS: readonly HookRow[] = [
       'model id and whether your latest message asked for a review (yes or no; your text is not sent). Unless the ' +
       'methods level is off, the service\'s speed-up suggestion is added once to the end of the subagent\'s prompt, ' +
       'labelled as an agent-services suggestion. ' +
-      'With the served rule tables (signed in): a subagent whose task names a step with [step:ID] is denied while that step\'s dependencies in .agent/steps.json are not done ([override: reason] lets it start); the weekly usage line that stops new subagents applies only to accounts whose served rules include it; on accounts whose served rules turn it on (not product accounts), the main conversation\'s subagents are started in the background. These checks send nothing.',
-    shown: 'A deny shows its reason, which starts with "agent-services routing". A changed model is said each ' +
+      'With the served rule tables (signed in): a subagent whose task names a step with [step:ID] is denied while that step\'s dependencies in .agent/steps.json are not done ([override: reason] lets it start; not while routing is off); the weekly usage line that stops new subagents applies only to accounts whose served rules include it; on accounts whose served rules turn it on (not product accounts), the main conversation\'s subagents are started in the background. These checks send nothing.',
+    shown: 'A deny shows its reason, which starts with "agent-services routing", "agent-services steps gate" or ' +
+      '"agent-services usage line". A changed model is said each ' +
       'time in a dim line naming the model. The added suggestion is in the subagent\'s prompt.',
   },
   {
@@ -128,7 +129,7 @@ export const HOOKS: readonly HookRow[] = [
     what: 'Allows this plugin\'s own savings-page publish and its writes of the page\'s figures without a ' +
       'permission prompt once you allowed it. A deny from your own rule or hook stands; every other Artifact or ' +
       'ArtifactData call goes on unchanged.',
-    shown: 'The permission reason "agent-services dashboard (user allowed)".',
+    shown: 'The permission reason "agent-services savings page (user allowed)".',
   },
   {
     event: 'prompt.submit', matcher: '', file: 'register.ts', does: ['drop', 'context', 'rewrite', 'file', 'ui'],
@@ -196,8 +197,9 @@ export const HOOKS: readonly HookRow[] = [
   },
   {
     event: 'tool.call', matcher: 'tool: Bash, PowerShell', file: 'cmdguard.ts', does: ['deny'],
-    what: 'With the served rule tables (signed in): a search or recursive listing of a whole drive or the home ' +
-      'folder and a `cat >` with no input are denied, and a git command that takes every changed file is denied ' +
+    what: 'With the served rule tables (signed in): a find, grep -r, rg or ls -R, or a PowerShell Get-ChildItem ' +
+      '-Recurse (gci, dir, ls), whose path argument is a whole drive or the home folder, and a `cat >` with no input ' +
+      'are denied (a drive reached through an earlier cd is not seen), and a git command that takes every changed file is denied ' +
       'while other agents are running; each denial says how to write the command instead. Runs locally; sends nothing.',
     shown: 'The denial reason.',
   },

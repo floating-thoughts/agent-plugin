@@ -9,8 +9,9 @@
 export const PREFIX = 'agent-services this session: '
 export const END_KINDS = ['clear', 'session_end']
 
-// Model families from cheapest to dearest; a name outside them has no known tier and is never called cheaper.
-const TIERS = ['haiku', 'sonnet', 'opus']
+// Model families from cheapest to dearest (fable and mythos list above opus); a name outside them has no known tier
+// and is never called cheaper.
+const TIERS = ['haiku', 'sonnet', 'opus', 'fable', 'mythos']
 
 type Out = Record<string, unknown>
 
@@ -21,12 +22,13 @@ export function tier(model: unknown): number | null {
   return i >= 0 ? i : null
 }
 
-// True when the routed model is a cheaper tier than the one the subagent would have run without the rewrite (the
-// dispatch's own model, else the main conversation's).
-export function cheaper(routed: unknown, requested: unknown, mainModel: unknown): boolean {
+// True when the routed model is a cheaper tier than the route savings' baseline: the service prices every routed run
+// against Opus (claude-opus-5-5, "compared with running them on Opus"). The one definition of a routed run on a
+// cheaper model: this session line, the status line's day counts (day_counts.ts countsOf) and the board use it.
+// The requested and main models are no longer read (kept so older callers still fit).
+export function cheaper(routed: unknown, _requested?: unknown, _mainModel?: unknown): boolean {
   const n = tier(routed)
-  const o = tier(requested !== null && requested !== undefined ? requested : mainModel)
-  return n !== null && o !== null && n < o
+  return n !== null && n < TIERS.indexOf('opus')
 }
 
 const part = (n: number, one: string, many: string): string | null => (n > 0 ? `${n} ${n === 1 ? one : many}` : null)

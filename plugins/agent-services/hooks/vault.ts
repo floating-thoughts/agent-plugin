@@ -68,7 +68,7 @@ function nameFor(secret: string, kind: string, found: string[]): string {
 /** Mask one text: the values the vault knows first (longest first), then each pattern; a placeholder is never touched.
  * A pattern with a group masks only that group, which is the end of its match. */
 function maskText(text: string, t: Table, found: string[]): string {
-  for (const m of text.matchAll(/\{\{secret:([a-z0-9_]+)\}\}/g)) if (vault[m[1]] === undefined) foreign.add(m[1])
+  for (const m of text.matchAll(/\{\{secret:([a-z0-9_]+)\}\}/g)) if (!Object.hasOwn(vault, m[1])) foreign.add(m[1])
   let out = text
   for (const [name, value] of Object.entries(vault).sort((a, b) => b[1].length - a[1].length)) {
     if (value && out.includes(value)) out = out.split(value).join(placeholder(name))
@@ -94,7 +94,7 @@ function maskText(text: string, t: Table, found: string[]): string {
 }
 
 function reveal(text: string): string {
-  return text.replace(/\{\{secret:([a-z0-9_]+)\}\}/g, (whole: string, name: string) => vault[name] ?? whole)
+  return text.replace(/\{\{secret:([a-z0-9_]+)\}\}/g, (whole: string, name: string) => (Object.hasOwn(vault, name) ? vault[name] : whole))
 }
 
 /** Apply fn to every string inside a JSON-like value, keeping its shape. */

@@ -14,7 +14,8 @@ covers only the Codex path.
   users. The Claude Code path keeps its end-to-end encryption and signatures unchanged.
 - agent-services is a paid service and needs a sign-in. Signed out, Codex works as usual: every `/mcp` request is refused
   (401) and the hooks fail open (Codex goes on as if they were not there). The same happens
-  when the service cannot be reached.
+  when the service cannot be reached. Codex waits for each hook's answer, so a slow or unreachable service can add
+  up to 2 seconds to a model request and up to 5 seconds to a session start, a prompt or a subagent start.
 - Your prompts, your code and the text of the briefs Codex writes for its subagents never leave your machine. The
   hooks send only a fixed event name, the task name of a subagent (v2) or the turn id (v1), and, after each model
   request (Codex 0.167 or later), the model name, the request status and the token counts. Codex adds its thread
@@ -108,13 +109,14 @@ agent-services writes no file on your computer. Codex itself keeps:
 ## 5. What comes back
 
 - `hook_session`: once per thread, the working-methods text, which Codex adds to the model's context; otherwise an
-  empty answer.
+  empty answer. The server remembers a thread for 2 hours: a thread still in use after that, or after a server
+  restart, gets the text once more.
 - `hook_usage`: always an empty answer, at once (Codex waits for it before the next model request).
 - `hook_spawn`: for the first spawn of a task name (v2) or of a turn (v1), a refusal whose reason names the model and
   reasoning effort to use; the repeat goes through. Otherwise an empty answer (no decision: Codex applies its own
   rules).
 - Listed tools: a short JSON answer (advice, a lesson text, checkpoint timing, your status, the methods text or your
-  choice), or an error code such as `org_paused`, `license_inactive`, `no_license` or `rate_limited`.
+  choice; `router_advice` may add `brief_rule`, a short served rule the model copies into the subagent's brief), or an error code such as `org_paused`, `license_inactive`, `no_license` or `rate_limited`.
 
 ## 6. What you can turn off
 

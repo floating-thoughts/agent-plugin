@@ -40,6 +40,7 @@ export const KEYS = {
   block: 'block', // { code, until, token_sha256 }: 401 / 423 / locked_out block shared by all sessions
   cool: 'cool', // { until, since }: shared cool-down (Retry-After), ms since the epoch
   badEnvelope: 'bad_envelope', // { n, at }: bad_envelope answers in a row, shared, so the IP budget is spared
+  clockOff: 'clock_off', // { server, local, until }: a signed answer showed this computer's clock off; shared pause
   settings: 'settings', // { offline, services, served, metrics_set }: the user's switches (port of settings.json)
   org: 'org', // { savings, at, told, since }: the company's upload choice from the hello (org.ts)
   metricsState: 'metrics_state', // { previewed_day, enabled_day, last_uploaded_day, account } (wiring.ts)

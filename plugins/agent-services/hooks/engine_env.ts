@@ -9,17 +9,38 @@ const isObj = (v: unknown): v is Record<string, any> => typeof v === 'object' &&
 // ------------------------------------------------------------------ the Claude account hash
 
 /** sha256 hex of oauthAccount.accountUuid from .claude.json (under CLAUDE_CONFIG_DIR first, then the home folder);
- * "" when there is none. The raw id never leaves this function. */
-export async function claudeHashOf(readText: (path: string) => Promise<string | null>, dirs: readonly string[]): Promise<string> {
+ * "" when there is no such file or it holds no account id; null when a .claude.json is there but could not be read or
+ * parsed (Claude Code may be rewriting it: try again later, never take it as ""). `exists` tells a missing file from
+ * an unreadable one; without it a failed read counts as missing. The raw id never leaves this function. */
+export async function claudeHashOf(
+  readText: (path: string) => Promise<string | null>,
+  dirs: readonly string[],
+  exists?: (path: string) => Promise<boolean>,
+): Promise<string | null> {
   for (const d of dirs) {
     if (!d) continue
+    const p = `${d.replace(/[\\/]+$/, '')}/.claude.json`
+    let t: string | null
+    try {
+      t = await readText(p)
+    } catch {
+      t = null
+    }
+    if (t === null) {
+      let there = false
+      try {
+        there = exists ? await exists(p) : false
+      } catch {
+        there = false // cannot tell: taken as missing, as before
+      }
+      if (there) return null
+      continue
+    }
     let data: unknown
     try {
-      const t = await readText(`${d.replace(/[\\/]+$/, '')}/.claude.json`)
-      if (t === null) continue
       data = JSON.parse(t)
     } catch {
-      continue
+      return null // half written
     }
     const uid = isObj(data) && isObj(data.oauthAccount) ? data.oauthAccount.accountUuid : null
     return typeof uid === 'string' && uid ? sha256Hex(utf8(uid)) : ''
@@ -113,10 +134,10 @@ export function readTextOf($: EngineInterface): (path: string) => Promise<string
   }
 }
 
-/** The Claude account hash for Svc's claudeHash dependency. */
-export function engineClaudeHash($: EngineInterface): () => Promise<string> {
+/** The Claude account hash for Svc's claudeHash dependency (null: .claude.json unreadable right now). */
+export function engineClaudeHash($: EngineInterface): () => Promise<string | null> {
   return async () => {
     const d = await engineDirs($)
-    return claudeHashOf(readTextOf($), d.configSet ? [d.configDir, d.home] : [d.home])
+    return claudeHashOf(readTextOf($), d.configSet ? [d.configDir, d.home] : [d.home], (p) => $.fs.exists(p))
   }
 }

@@ -58,6 +58,8 @@ export function money(usd: number): string {
   return cents < 0 ? `-$${(-cents / 100).toFixed(2)}` : `$${(cents / 100).toFixed(2)}`
 }
 
+const isDay = (v: unknown): v is string => typeof v === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(v)
+
 /** '19 to 25 October 2026', '26 October to 1 November 2026', '28 December 2026 to 3 January 2027'. */
 export function span(first: string, last: string): string {
   const [ay, am, ad] = first.split('-').map(Number)
@@ -110,7 +112,7 @@ export function bossView(s: Obj, at: string | null = null): Obj {
     v: 1,
     ...(at === null ? {} : { at }), // when these figures were rendered (UTC), for the page's newer-only check
     org: String(s.org ?? 'your company'),
-    week: isObj(s.week) ? span(String(s.week.first_day), String(s.week.last_day)) : '',
+    week: isObj(s.week) && isDay(s.week.first_day) && isDay(s.week.last_day) ? span(s.week.first_day, s.week.last_day) : '',
     no_data: noData,
     total: money(total),
     trend: noData ? 'flat' : trend,
@@ -118,10 +120,10 @@ export function bossView(s: Obj, at: string | null = null): Obj {
     kpis: [noData ? '-' : money(total), prev === null ? '-' : money(prev), `${measured} of ${totals ? used : people.length}`, paid === null ? `${used}` : `${used} / ${paid}`],
     totals,
     people: people.map((p) => ({
-      email: String(p.email),
+      email: typeof p.email === 'string' && p.email ? p.email : '-',
       usd: typeof p.usd === 'number' ? money(p.usd) : 'no data yet',
       none: typeof p.usd !== 'number',
-      devices: p.devices === 0 ? 'not signed in' : p.devices === 1 ? '1 device' : `${p.devices} devices`,
+      devices: typeof p.devices !== 'number' ? '-' : p.devices === 0 ? 'not signed in' : p.devices === 1 ? '1 device' : `${p.devices} devices`,
     })),
     settings: [seatsText(used, paid), paused, savings, mailText(s)],
   }
@@ -197,7 +199,7 @@ footer { color: var(--muted); font-size: 13px; margin-top: 24px; }
 <div class="kpi"><span>People with figures</span><strong id="k2"></strong></div>
 <div class="kpi"><span>Seats used</span><strong id="k3"></strong></div>
 </div>
-<p class="note">These figures are estimates of AI cost savings, not a measure of anyone's work, time or performance. A saving is an estimate: what the same work would have cost without agent-services, with every subagent on the most capable model (Opus). "No data yet" means we have no usage figures from that person for the week. It is not evidence that they did not use Claude Code or did not work: they may have chosen not to share their figures.</p>
+<p class="note">These figures are estimates of AI cost savings, not a measure of anyone's work, time or performance. A saving is an estimate: what the same work would have cost without agent-services, with every subagent on a top-tier model (Opus). "No data yet" means we have no usage figures from that person for the week. It is not evidence that they did not use Claude Code or did not work: they may have chosen not to share their figures.</p>
 <section id="people">
 <h2>Saved by each person (est.)</h2>
 <div class="scroll">
@@ -494,7 +496,7 @@ export const COMPANY_VIEW_LINE = `To see what your company admin sees about you:
 /** The member's view in plain sentences, from a GET /org/me answer. */
 export function memberText(m: Obj): string {
   if (m.in_org !== true) return NOT_IN_COMPANY_TEXT
-  const week = isObj(m.week) ? ` for the week of ${span(String(m.week.first_day), String(m.week.last_day))}` : ''
+  const week = isObj(m.week) && isDay(m.week.first_day) && isDay(m.week.last_day) ? ` for the week of ${span(m.week.first_day, m.week.last_day)}` : ''
   const lines = [MEMBER_HEAD, `Your admin's private board for ${String(m.org ?? 'your company')} shows this about you${week}:`]
   const you = isObj(m.you) ? m.you : null
   if (m.view === 'totals') {

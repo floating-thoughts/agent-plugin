@@ -6,6 +6,7 @@ import type { DayCounters } from './counters'
 import type { KV } from './engine_types'
 import { isDay } from './metrics'
 import { normModel } from './transcripts'
+import { cheaper } from './summary'
 
 const cmp = (a: string, b: string): number => (a < b ? -1 : a > b ? 1 : 0)
 
@@ -79,7 +80,7 @@ export const dayEmpty = (dc: DayCounters): boolean => !dc.route.length && !dc.in
 /** The status line's and the dashboard's event counts of one day: route turns, compactions and indexed reads. */
 export function countsOf(dc: DayCounters): Record<string, number> {
   const out: Record<string, number> = {}
-  const route = dc.route.reduce((n, r) => n + r.turns, 0)
+  const route = dc.route.reduce((n, r) => n + (cheaper(r.model) ? r.turns : 0), 0) // summary.ts cheaper: below the baseline
   const compact = dc.compact.filter((r) => r.start !== null).length
   const index = dc.index.reduce((n, r) => n + r.reads, 0)
   if (route > 0) out.route = route
