@@ -1,5 +1,6 @@
 {
   "name": "agent-services",
   "description": "agent-services: its tools, slash command and hook flows, run in Claude Code's hooks module (no local process); see the README for install",
-  "author": { "name": "Yi Zhang" }
+  "author": { "name": "Yi Zhang" },
+  "license": "SEE LICENSE IN LICENSE"
 }

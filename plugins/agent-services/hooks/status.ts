@@ -89,13 +89,8 @@ export function render(metricsOn: boolean, saved: unknown, counts: Counts): stri
   if (!metricsOn) {
     tail = HINT_OFF
     short = HINT_OFF_SHORT
-  } else if (num(usd) && usd >= 0.005) {
-    const since = shortDay((saved as Record<string, unknown>).first_day)
-    head.push(`saved you $${fixed(usd, 2, true)} ${since ? `since ${since}` : 'so far'}`)
   } else {
-    head.push('on')
-    tail = HINT_WAIT
-    short = HINT_WAIT_SHORT
+    return '' // signed in and on: no status line; the band's panel shows the figures and the open decisions
   }
   let text = ''
   for (const [t, end] of [

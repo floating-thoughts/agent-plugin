@@ -120,6 +120,9 @@ What the engines do on this computer, with the tables:
   long-running background tasks are named to the main conversation; a
   turn that ended at the usage limit is told to carry on later; the `run_command` tool queues `/reload-plugins` or
   `/context` for the idle session and refuses every other command; past 80% of a usage limit the model is told once.
+- Delegation hints: the main conversation's tool calls in each turn are counted in memory on this computer, and
+  when they reach a count or a result size the served table names, the result gets one note suggesting a subagent
+  for that kind of work next time; nothing new is sent.
 
 `/agent-services check` shows which engines are on in this session.
 

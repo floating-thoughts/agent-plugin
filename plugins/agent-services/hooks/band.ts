@@ -190,10 +190,29 @@ export function bandSetup(n: unknown): void {
 }
 
 let panelShown: Panel | null = null // the usage panel setBandPanel last wrote (wiring.ts, after each band state)
+let pendingShown = 0 // the open decisions in the project's .agent/pending.md (flow.ts refreshPending)
+
+/** flow.ts: the number of decisions waiting for the person, shown as the band's top line; a redraw when it changed. */
+export function setBandPending(n: unknown): void {
+  const v = typeof n === 'number' && Number.isFinite(n) && n > 0 ? Math.floor(n) : 0
+  if (v === pendingShown) return
+  pendingShown = v
+  try {
+    redraw?.()
+  } catch {
+    // no redraw: the band shows it at its next draw
+  }
+}
+
+/** The band's top line over the panel: "1 decision waiting for you", "3 decisions waiting for you". */
+export const pendingLine = (n: number): string => `${n} decision${n === 1 ? '' : 's'} waiting for you`
+
+/** The band's top-right word: online while the panel shows (signed in and reaching the service), else offline. */
+export const connLine = (online: boolean): string => `${NAME}: ${online ? 'online' : 'offline'}`
 
 /** wiring.ts: the usage panel (panel.ts panelOf) shown under the band's line; a redraw when it changed. Never throws. */
 export function setBandPanel(panel: Panel | null): void {
-  const next = isObj(panel) && Array.isArray(panel.columns) && panel.columns.length === 3 && typeof panel.method === 'string' ? panel : null
+  const next = isObj(panel) && Array.isArray(panel.columns) && panel.columns.length >= 3 && typeof panel.method === 'string' ? panel : null
   if (JSON.stringify(next) === JSON.stringify(panelShown)) return
   panelShown = next
   try {
@@ -217,12 +236,24 @@ export function installBand(on: any): void {
     const line = bandText(shown && setupOpen ? { ...shown, setup: setupOpen } : shown, e.props?.bodyColumns)
     const { Text, Box } = $.ui.resolve(e as any) as any
     const panel = bandPanel(shown)
-    if (!panel) return Text({ dimColor: true, children: line })
+    const isOnline = isObj(shown) && ['facts', 'wait', 'off'].includes(String(shown.state)) // signed in, reaching the service
+    const topRow = (online: boolean) =>
+      Box({
+        key: 'top', flexDirection: 'row', justifyContent: 'space-between',
+        children: [
+          Text({ key: 'pending', bold: pendingShown > 0, dimColor: pendingShown === 0, children: pendingLine(pendingShown) }),
+          Text({ key: 'conn', dimColor: true, children: connLine(online) }),
+        ],
+      })
+    if (!panel) {
+      if (typeof Box !== 'function') return Text({ dimColor: true, children: [`${pendingLine(pendingShown)}${SEP}${connLine(isOnline)}`, line].join('\n') })
+      return Box({ flexDirection: 'column', children: [topRow(isOnline), Text({ key: 'line', dimColor: true, children: line })] })
+    }
     // the band leaves out the disclosure (panel.method): the status command and the board still show it
-    if (typeof Box !== 'function') return Text({ dimColor: true, children: [line, ...panelLines(panel).slice(0, -1)].join('\n') })
+    if (typeof Box !== 'function') return Text({ dimColor: true, children: [`${pendingLine(pendingShown)}${SEP}${connLine(true)}`, ...(setupOpen ? [line] : []), ...panelLines(panel).slice(0, -1)].join('\n') })
     const column = (c: Panel['columns'][number], i: number) =>
       Box({
-        key: String(i), flexDirection: 'column', borderStyle: 'round', borderDimColor: true, paddingX: 1, flexShrink: 0,
+        key: String(i), flexDirection: 'column', borderStyle: 'round', borderDimColor: true, paddingX: 1, flexShrink: 0, flexGrow: 1, // the four boxes share the full width
         children: [Text({ key: 't', bold: true, children: c.title }), cells(c.rows, c.align)],
       })
     // one sub-column per cell position, so the figures line up in proportional fonts (the desktop app) as well:
@@ -246,8 +277,11 @@ export function installBand(on: any): void {
     return Box({
       flexDirection: 'column',
       children: [
-        Text({ key: 'line', dimColor: true, children: line }),
-        Box({ key: 'cols', flexDirection: 'row', columnGap: 1, flexWrap: 'nowrap', children: panel.columns.map(column) }),
+        // the top row: the open decisions on the left, the connection on the right; under it the line shows only an
+        // open setup choice (the saved figure is in the panel's Quota column)
+        topRow(true),
+        ...(setupOpen ? [Text({ key: 'line', dimColor: true, children: line })] : []),
+        Box({ key: 'cols', flexDirection: 'row', columnGap: 2, flexWrap: 'nowrap', children: panel.columns.map(column) }),
       ],
     })
   }).catch(($: EngineInterface, e: Obj, next: (e: Obj) => unknown) => next(e))

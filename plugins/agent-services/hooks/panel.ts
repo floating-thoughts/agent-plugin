@@ -55,11 +55,14 @@ export function usageDaysOf(facts: Facts, fromDay: string): Record<string, Usage
   const out: Record<string, UsageDay> = {}
   const day = (d: string): UsageDay =>
     (out[d] ??= { tokens: 0, usd: 0, typed_bytes: 0, agent_seconds: 0, agent_sum_seconds: 0, turns: 0 })
+  const cacheRead: Record<string, number> = {} // the scan's cache reads per day: the panel counts every token
   for (const [d, f] of Object.entries(facts.by_day ?? {})) {
     if (d < fromDay) continue
     for (const b of Object.values(f.by_model)) {
-      day(d).tokens += b.tokens
+      const r = num(b.cache_read_tokens) ?? 0
+      day(d).tokens += b.tokens + r
       day(d).usd += b.api_usd
+      cacheRead[d] = (cacheRead[d] ?? 0) + r
     }
   }
   for (const [d, t] of Object.entries(facts.time_by_day ?? {})) {
@@ -78,6 +81,8 @@ export function usageDaysOf(facts: Facts, fromDay: string): Record<string, Usage
     for (const k of ['tokens', 'usd', 'typed_bytes', 'agent_seconds', 'agent_sum_seconds', 'turns'] as const) {
       if (num(x[k]) !== null) t[k] = x[k]
     }
+    // the days file's tokens leave cache reads out: add its own count, or else the scan's
+    if (num(x.tokens) !== null) t.tokens += num(x.cache_read_tokens) ?? cacheRead[d] ?? 0
   }
   return out
 }
@@ -156,20 +161,27 @@ export function notePlan(usage: unknown): void {
 
 export const heldPlan = (): Plan => plan
 
-/** Tokens as 950, 90k, 2.0M, 1.2B. */
-export function tokensText(n: number): string {
-  if (n >= 1e9) return `${(n / 1e9).toFixed(1)}B`
-  if (n >= 1e6) return `${(n / 1e6).toFixed(1)}M`
-  if (n >= 1e3) return `${Math.round(n / 1e3)}k`
-  return String(Math.round(n))
+/** At most three significant digits with a k, M or B suffix: 9.41k, 94.1k, 132M, 1.20B. Below 1000: whole numbers,
+ *  or with `cents` two decimals below 10 and one below 100 (5.40, 40.7, 940). */
+export function compactText(n: number, cents = false): string {
+  const a = Math.abs(n)
+  const sig = (x: number): string => (x < 9.995 ? x.toFixed(2) : x < 99.95 ? x.toFixed(1) : String(Math.round(x)))
+  let s: string | null = null
+  for (const [unit, sfx] of [[1e9, 'B'], [1e6, 'M'], [1e3, 'k']] as const) {
+    if (a >= unit * 0.9995) {
+      s = sig(a / unit) + sfx
+      break
+    }
+  }
+  if (s === null) s = cents ? sig(a) : String(Math.round(a))
+  return `${n < 0 ? '-' : ''}${s}`
 }
 
-/** Dollars as $5.40, or whole dollars with commas from $1,000. */
-export function moneyText(v: number): string {
-  const a = Math.abs(v)
-  const s = a >= 1000 ? String(Math.round(a)).replace(/\B(?=(\d{3})+(?!\d))/g, ',') : a.toFixed(2)
-  return `${v < 0 ? '-' : ''}$${s}`
-}
+/** Tokens as 950, 90.0k, 2.00M, 132M, 1.20B. */
+export const tokensText = (n: number): string => compactText(n)
+
+/** Dollars as $5.40, $40.7, $940, $9.41k, $94.1k. */
+export const moneyText = (v: number): string => (v < 0 ? '-$' : '$') + compactText(Math.abs(v), true)
 
 /** `35m` under an hour, `2.5h` under ten hours, then whole hours. */
 export function durationText(seconds: number): string {
@@ -198,7 +210,7 @@ const plusDays = (day: string, n: number): string => {
 }
 
 /** The three columns, from the stored days, the plan, the GET /metrics/savings body (or null) and today. */
-export function panelOf(days: unknown, p: Plan | null, savings: unknown, today: string, nowMs: number): Panel {
+export function panelOf(days: unknown, p: Plan | null, savings: unknown, today: string, nowMs: number, week: unknown = null): Panel {
   const all: Record<string, UsageDay> = isObj(days) ? (days as Record<string, UsageDay>) : {}
   const pick = (keep: (d: string) => boolean): string[] => {
     const list = Object.keys(all).filter(keep)
@@ -209,10 +221,10 @@ export function panelOf(days: unknown, p: Plan | null, savings: unknown, today: 
   }
   const weekFrom = plusDays(today, -6)
   const token: Column = {
-    title: 'Token (excl. cache reads)',
+    title: 'Token',
     rows: [
-      ['This week', ...pick((d) => d >= weekFrom && d <= today)],
-      ['This month', ...pick((d) => d.slice(0, 7) === today.slice(0, 7) && d <= today)],
+      ['Week', ...pick((d) => d >= weekFrom && d <= today)],
+      ['Month', ...pick((d) => d.slice(0, 7) === today.slice(0, 7) && d <= today)],
       ['All time', ...pick(() => true)],
     ],
   }
@@ -227,7 +239,7 @@ export function panelOf(days: unknown, p: Plan | null, savings: unknown, today: 
   const s = isObj(savings) && !('error' in savings) ? savings : null
   const usd = s ? num(s.usd) : null
   const quota: Column = {
-    title: ctx ? `Quota${DOT}context ${Math.round((ctx.tokens / ctx.window) * 100)}% (${tokensText(ctx.tokens)})` : `Quota${DOT}context --`,
+    title: ctx ? `Quota${DOT}context ${Math.round((ctx.tokens / ctx.window) * 100)}%` : `Quota${DOT}context --`,
     rows: [
       ['Week', ...limit(pl.week, true)],
       ['5-hour', ...limit(pl.five_hour, false)],
@@ -244,12 +256,23 @@ export function panelOf(days: unknown, p: Plan | null, savings: unknown, today: 
   const time: Column = {
     title: 'Time',
     rows: [
-      ['Spent by you', you > 0 || typing > 0 ? durationText(typing) : '--'],
-      ['Saved for you', you > 0 ? durationText(you) : '--'],
-      ['Concurrency save', you > 0 ? durationText(concurrent) : '--'],
+      ['Spent', you > 0 || typing > 0 ? durationText(typing) : '--'],
+      ['Saved', you > 0 ? durationText(you) : '--'],
+      ['Concurrent', you > 0 ? durationText(concurrent) : '--'],
     ],
   }
-  return { columns: [token, quota, time], method: METHOD_LINE }
+  // the last 7 days' counts from the store counters (day_counts.ts countsOf, summed): route turns, compactions, index reads
+  const w = isObj(week) ? week : null
+  const count = (k: string): string => (w ? compactText(num(w[k]) ?? 0) : '--')
+  const stats: Column = {
+    title: 'Weekly Stats',
+    rows: [
+      ['Cheaper jobs', count('route')],
+      ['Cleanups', count('compact_start')],
+      ['Index reads', count('index')],
+    ],
+  }
+  return { columns: [token, quota, time, stats], method: METHOD_LINE }
 }
 
 const rowText = (r: string[]): string => r.filter((x) => x !== '').join(' ')
@@ -264,9 +287,9 @@ export function boardLines(panel: Panel): string[] {
   const [typing, you, concurrent] = panel.columns[2].rows
   return [
     ...panelLines(panel).slice(0, 2),
-    `Spent by you: ${typing[1]}`,
-    `Saved for you: ${you[1]}`,
-    `Concurrency save: ${concurrent[1]}`,
+    `Spent: ${typing[1]}`,
+    `Saved: ${you[1]}`,
+    `Concurrent: ${concurrent[1]}`,
     panel.method,
   ]
 }

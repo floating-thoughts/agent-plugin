@@ -1,8 +1,9 @@
 // The local engines that run on the served rule tables (rules.ts), wired from register.ts's existing hooks with one
 // call each: command guard (cmdguard.ts), secret masking (vault.ts), row trimming (trim.ts), subagent gates and long
-// reports (subagents.ts), and the shell watch (watch.ts). Each engine does nothing without its table (signed out),
+// reports (subagents.ts), the shell watch (watch.ts) and the delegation hints (delegate.ts). Each engine does nothing without its table (signed out),
 // and nothing here sends a command, prompt, tool input or output anywhere.
 import type { EngineInterface } from 'claude-code'
+import { delegateAfter, delegateTurn } from './delegate'
 import { commandRule, installCmdguard, mailAfter, mailDeny, spawnBackground, stopSendBack } from './cmdguard'
 import { loadRules, RULES_OFF_LINE, RULES_PENDING_LINE, rulesLive, rulesSettled, rulesState, rulesTable, rulesVersion } from './rules'
 import { agentResult, notificationEvent } from './subagents'
@@ -63,7 +64,7 @@ export async function toolRun($: EngineInterface, e: Obj, next: Next, rt: Ready)
   const ran: Obj = await next(vaultToolIn(e) ?? e)
   const done = await agentResult($, e, vaultToolOut($, ran) ?? ran, rt as any)
   mailAfter(e, done)
-  return done
+  return delegateAfter(e, done, rt) // delegate.ts: a served note when the main turn's work suits a subagent
 }
 
 /** prompt.submit: secrets in the prompt masked, then a long background report shortened (so the report file is
@@ -73,6 +74,7 @@ export async function promptIn($: EngineInterface, e: Obj, rt: Ready): Promise<O
   if (r?.svc) void loadRules(r.svc) // not fetched yet (a prompt before session.start ran), or cleared: start it now
   await rulesSettled(1500) // a fetch in flight at the first prompt: wait briefly so the prompt is masked
   await rulesLive()
+  delegateTurn(e) // delegate.ts: a main prompt starts a new turn of counts
   const masked = vaultPrompt($, e) ?? e
   const shortened = await notificationEvent($, masked, rt as any)
   const line = vaultPendingLine()
@@ -129,6 +131,7 @@ export async function checkLines($: EngineInterface): Promise<string> {
     `Row trimming after a compaction: ${on(lineFor('invoked_skills', 'x') !== null && (await trimOn($)))}.`,
     `Subagent gates and long reports: ${on(subs !== null)}${subs?.redline ? '; the weekly usage line stops new subagents on this account' : ''}${subs?.demand || subs?.coauthor ? '; the requirements-file lock and the commit co-author check are on' : ''}.`,
     `Shell watch: ${on(rulesTable('watch') !== null)}.`,
+    `Delegation hints: ${on(rulesTable('delegate') !== null)}.`,
   ].join('\n')
 }
 
