@@ -10,6 +10,17 @@
 // from the document), so it changes only when the figures do. Everything here is best effort and
 // never throws.
 //
+// What the board shows: people are listed by email as the service sends them, never ranked or
+// drawn as bars; the device count is the count at the time the page was made, and the page says the figures are
+// estimates of AI cost savings, not a measure of anyone's work, and that "no data yet" is not evidence of non-use.
+// In the company's "totals" view the service sends no per-person row, and the page shows only the total and how
+// many people have figures.
+// Local copies: the cached summary (BOSS_CACHE_KEY) and the page file are deleted (the page is emptied: the
+// engine gives plugins no file delete) when this account is no longer its company's admin, when it is signed out,
+// when the service answers not_org_admin, and when the cached summary is older than BOSS_TTL_MS (30 minutes). render
+// checks this after a turn and sweep at the periodic tick; while the admin works, the summary is fetched again after
+// half of BOSS_TTL_MS, so it never gets that old.
+//
 // The summary-mail switch: `/agent-services company mail on|off` (POST /org/summary-mail); `/agent-services company`
 // tells where the board is and how the weekly email is set.
 // For anyone else `/agent-services company` shows the member's own view (memberView, GET /org/me).
@@ -81,8 +92,8 @@ export const NO_DATA_LINE = 'Figures show here after your people have used Claud
 
 /** The figures the company board shows, from a GET /org/summary answer: its texts, as the page prints them. */
 export function bossView(s: Obj, at: string | null = null): Obj {
-  const people: Obj[] = Array.isArray(s.people) ? s.people : []
-  const top = Math.max(0, ...people.map((p) => (typeof p.usd === 'number' ? p.usd : 0)))
+  const totals = s.view === 'totals'
+  const people: Obj[] = !totals && Array.isArray(s.people) ? s.people : []
   const savings = s.savings === 'on' ? 'On for everyone.' : s.savings === 'off' ? 'Off for everyone: nothing is uploaded.' : 'Each person decides.'
   const paused = s.paused ? 'Paused for everyone in your company.' : 'Running.'
   const total = typeof s.total_usd === 'number' ? s.total_usd : 0
@@ -92,7 +103,7 @@ export function bossView(s: Obj, at: string | null = null): Obj {
     : Math.round(total * 100) < Math.round(prev * 100) ? 'down' : 'flat'
   const used = Number(s.seats_used) || 0
   const paid = typeof s.seats_paid === 'number' ? s.seats_paid : null
-  const measured = people.filter((p) => typeof p.usd === 'number').length
+  const measured = totals ? Number(s.with_data) || 0 : people.filter((p) => typeof p.usd === 'number').length
   // nobody has a figure and the total is zero: a new company, so say so instead of a big $0.00
   const noData = measured === 0 && Math.round(total * 100) === 0
   return {
@@ -104,13 +115,13 @@ export function bossView(s: Obj, at: string | null = null): Obj {
     total: money(total),
     trend: noData ? 'flat' : trend,
     change: noData ? NO_DATA_LINE : changeLine(total, prev),
-    kpis: [noData ? '-' : money(total), prev === null ? '-' : money(prev), `${measured} of ${people.length}`, paid === null ? `${used}` : `${used} / ${paid}`],
+    kpis: [noData ? '-' : money(total), prev === null ? '-' : money(prev), `${measured} of ${totals ? used : people.length}`, paid === null ? `${used}` : `${used} / ${paid}`],
+    totals,
     people: people.map((p) => ({
       email: String(p.email),
       usd: typeof p.usd === 'number' ? money(p.usd) : 'no data yet',
       none: typeof p.usd !== 'number',
       devices: p.devices === 0 ? 'not signed in' : p.devices === 1 ? '1 device' : `${p.devices} devices`,
-      pct: typeof p.usd === 'number' && top > 0 ? Math.max(0, Math.round((p.usd / top) * 100)) : 0,
     })),
     settings: [seatsText(used, paid), paused, savings, mailText(s)],
   }
@@ -162,8 +173,6 @@ tbody tr:last-child td { border-bottom: 0; }
 th { color: var(--muted); font-weight: 700; font-size: 12px; letter-spacing: 0.06em; text-transform: uppercase; }
 td:nth-child(2), th:nth-child(2) { text-align: right; white-space: nowrap; font-weight: 700; font-variant-numeric: tabular-nums; }
 td:nth-child(3) { color: var(--muted); font-size: 14px; }
-.bar { width: 28%; min-width: 80px; }
-td.bar span { display: block; height: 8px; border-radius: 999px; background: var(--accent); }
 td.none { color: var(--none); font-weight: 400; }
 dl { margin: 0; display: grid; grid-template-columns: repeat(auto-fit, minmax(260px, 1fr)); gap: 12px; }
 dl div { border: 1px solid var(--border); border-radius: 12px; padding: 12px 14px; }
@@ -171,7 +180,6 @@ dt { font-size: 13px; font-weight: 700; color: var(--muted); }
 dd { margin: 4px 0 0; font-weight: 600; }
 code { font-size: 13px; background: var(--accent-soft); color: var(--accent); padding: 1px 6px; border-radius: 6px; }
 footer { color: var(--muted); font-size: 13px; margin-top: 24px; }
-@media (max-width: 560px) { .bar { display: none; } }
 </style>
 </head>
 <body>
@@ -189,16 +197,21 @@ footer { color: var(--muted); font-size: 13px; margin-top: 24px; }
 <div class="kpi"><span>People with figures</span><strong id="k2"></strong></div>
 <div class="kpi"><span>Seats used</span><strong id="k3"></strong></div>
 </div>
-<section>
+<p class="note">These figures are estimates of AI cost savings, not a measure of anyone's work, time or performance. A saving is what the same work would have cost without agent-services. "No data yet" means we have no usage figures from that person for the week. It is not evidence that they did not use Claude Code or did not work: they may have chosen not to share their figures.</p>
+<section id="people">
 <h2>Saved by each person</h2>
 <div class="scroll">
 <table>
-<thead><tr><th>Person</th><th>Saved last week</th><th>Signed in on</th><th class="bar"></th></tr></thead>
+<thead><tr><th>Person (by email)</th><th>Saved last week</th><th>Devices signed in when this page was made</th></tr></thead>
 <tbody id="rows">
 </tbody>
 </table>
 </div>
-<p class="note">A saving is what the same work would have cost without agent-services. "No data yet" means we have no usage figures from that person for the week: they may not have used Claude Code, or they may have chosen not to share their figures. Each person is told that you see their figure.</p>
+<p class="note">People are listed by email address, not by figure. Each person's plugin tells them what you see about them.</p>
+</section>
+<section id="totals" hidden>
+<h2>Totals only</h2>
+<p class="note">Your company chose totals only: this board shows the company total and how many people have figures, not any one person's figure or devices.</p>
 </section>
 <section>
 <h2>Your company's settings</h2>
@@ -236,20 +249,17 @@ footer { color: var(--muted); font-size: 13px; margin-top: 24px; }
     c.textContent = String(D.change || "");
     var k = Array.isArray(D.kpis) ? D.kpis : [];
     for (var i = 0; i < 4; i++) { put("k" + i, k[i] === undefined ? "-" : k[i]); }
+    byId("people").hidden = D.totals === true;
+    byId("totals").hidden = D.totals !== true;
     var rows = byId("rows");
     rows.textContent = "";
-    var people = Array.isArray(D.people) ? D.people : [];
-    if (!people.length) { var tr0 = document.createElement("tr"); cell(tr0, "Nobody is set up yet.", "none").colSpan = 4; rows.appendChild(tr0); }
+    var people = D.totals === true || !Array.isArray(D.people) ? [] : D.people;
+    if (!people.length) { var tr0 = document.createElement("tr"); cell(tr0, "Nobody is set up yet.", "none").colSpan = 3; rows.appendChild(tr0); }
     people.forEach(function (p) {
       var tr = document.createElement("tr");
       cell(tr, p.email || "");
       cell(tr, p.usd, p.none ? "none" : "");
       cell(tr, p.devices);
-      var bar = cell(tr, "", "bar");
-      bar.setAttribute("aria-hidden", "true");
-      var sp = document.createElement("span");
-      sp.style.width = (typeof p.pct === "number" && isFinite(p.pct) ? Math.max(0, Math.min(100, p.pct)) : 0) + "%";
-      bar.appendChild(sp);
       rows.appendChild(tr);
     });
     var st = Array.isArray(D.settings) ? D.settings : [];
@@ -311,20 +321,70 @@ export class BossBoard {
     }
   }
 
-  /** The cached summary, fetched again when it is older than BOSS_TTL_MS (a failed fetch keeps the old one). */
+  /** The cached summary's body while it is at most BOSS_TTL_MS old (fetched_at), else null. */
+  private fresh(c: unknown, now: number): Obj | null {
+    if (!isObj(c) || !isObj(c.body) || typeof c.fetched_at !== 'number') return null
+    return now - c.fetched_at <= BOSS_TTL_MS ? c.body : null
+  }
+
+  /** Delete the cached summary and empty the board page (the engine has no file delete). -> whether anything
+   * was there. Never throws. */
+  async purge(): Promise<boolean> {
+    let did = false
+    try {
+      const c = await safeGet(this.d.store, BOSS_CACHE_KEY)
+      if (c !== undefined && c !== null) did = (await safeDelete(this.d.store, BOSS_CACHE_KEY)) || did
+    } catch {
+      // best effort
+    }
+    try {
+      const page = this.path(BOSS_BOARD.page)
+      if (String(await this.d.fs.read(page)) !== '') {
+        await this.d.fs.write(page, '')
+        did = true
+      }
+    } catch {
+      // no page, or not writable
+    }
+    return did
+  }
+
+  /** At the periodic tick: purge when this account is no longer the admin, is signed out, or the cached
+   * summary is older than BOSS_TTL_MS. -> 'purged' | 'kept' | 'clean'. Never throws. */
+  async sweep(): Promise<string> {
+    try {
+      let drop = !(await this.isAdmin()) || (await this.d.svc.authState()) !== 'ok'
+      if (!drop) {
+        const c = await safeGet(this.d.store, BOSS_CACHE_KEY)
+        drop = c !== undefined && c !== null && this.fresh(c, this.d.now()) === null
+      }
+      if (!drop) return 'kept'
+      return (await this.purge()) ? 'purged' : 'clean'
+    } catch {
+      return 'clean'
+    }
+  }
+
+  /** The cached summary, fetched again when it is older than half of BOSS_TTL_MS; a failed fetch keeps the old one
+   * only while it is at most BOSS_TTL_MS old, and a not_org_admin answer purges it. */
   async summary(): Promise<Obj | null> {
     const c = await safeGet(this.d.store, BOSS_CACHE_KEY)
-    const body = isObj(c) && isObj(c.body) ? c.body : null
-    const tried = isObj(c) && typeof c.tried_at === 'number' ? c.tried_at : null
     const now = this.d.now()
-    if (this.fetching || (tried !== null && now - tried < BOSS_TTL_MS)) return body
+    const body = this.fresh(c, now)
+    const fetched = body !== null && isObj(c) ? (c.fetched_at as number) : null
+    const tried = isObj(c) && typeof c.tried_at === 'number' ? c.tried_at : null
+    if (this.fetching || (tried !== null && now - tried < BOSS_TTL_MS / 2)) return body
     this.fetching = true
     try {
-      await safeSet(this.d.store, BOSS_CACHE_KEY, { tried_at: now, body })
+      await safeSet(this.d.store, BOSS_CACHE_KEY, body === null ? { tried_at: now } : { tried_at: now, fetched_at: fetched, body })
       const r = await this.d.svc.call('GET', '/org/summary', undefined, { kind: 'daily', hook: 'background' })
       if (r.ok && isObj(r.body)) {
-        await safeSet(this.d.store, BOSS_CACHE_KEY, { tried_at: now, body: r.body })
+        await safeSet(this.d.store, BOSS_CACHE_KEY, { tried_at: now, fetched_at: now, body: r.body })
         return r.body
+      }
+      if (r.error === 'not_org_admin') {
+        await this.purge()
+        return null
       }
       return body
     } catch {
@@ -355,10 +415,19 @@ export class BossBoard {
   /** One render: the page is written (and changed_at recorded) only when it changed. */
   async render(): Promise<string> {
     try {
-      if (!(await this.isAdmin())) return 'not_admin'
-      if ((await this.d.svc.authState()) !== 'ok') return 'auth_failed'
+      if (!(await this.isAdmin())) {
+        await this.purge() // the admin role is gone
+        return 'not_admin'
+      }
+      if ((await this.d.svc.authState()) !== 'ok') {
+        await this.purge() // signed out (or the sign-in no longer works)
+        return 'auth_failed'
+      }
       const s = await this.summary()
-      if (!s) return 'no_summary'
+      if (!s) {
+        await this.purge() // no summary fresher than BOSS_TTL_MS
+        return 'no_summary'
+      }
       let old: string | null = null
       try {
         old = String(await this.d.fs.read(this.path(BOSS_BOARD.page)))
@@ -428,10 +497,13 @@ export function memberText(m: Obj): string {
   const week = isObj(m.week) ? ` for the week of ${span(String(m.week.first_day), String(m.week.last_day))}` : ''
   const lines = [MEMBER_HEAD, `Your admin's private board for ${String(m.org ?? 'your company')} shows this about you${week}:`]
   const you = isObj(m.you) ? m.you : null
-  if (you) {
+  if (m.view === 'totals') {
+    lines.push("Nothing about you alone: your company chose totals only, so the board and the weekly company email " +
+      'show the company total and how many people have figures, not your email address, figure or devices.')
+  } else if (you) {
     lines.push(
       `Your email address: ${String(you.email)}.`,
-      `Devices you are signed in on: ${Number(you.devices)}.`,
+      `Devices you are signed in on (when the board was made): ${Number(you.devices)}.`,
       typeof you.usd === 'number'
         ? `Your savings figure: ${money(you.usd)}.`
         : 'Your savings figure: no data yet (the service has no usage figures of yours for that week).',
@@ -447,7 +519,10 @@ export function memberText(m: Obj): string {
       : m.savings === 'off'
         ? 'Savings record: your company turned it off for everyone, so nothing of yours is uploaded.'
         : `Savings record: your company leaves it to each person, so your own choice applies (${COMMAND} setup).`,
-    'The weekly company email to your admin, when one is sent, shows your email address and savings figure (not the device count).',
+    m.view === 'totals'
+      ? 'The weekly company email to your admin, when one is sent, shows the same totals.'
+      : 'The weekly company email to your admin, when one is sent, shows your email address and savings figure (not the device count).',
+    'The figures are estimates of AI cost savings, not a measure of your work.',
     "The admin also sees the company totals, the seats and the company's settings.",
     MEMBER_NOT_SEEN,
   )

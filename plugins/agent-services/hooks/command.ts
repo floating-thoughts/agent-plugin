@@ -56,8 +56,8 @@ import { safeSet } from './store'
 import type { KV } from './store'
 import { gateNotice, LOCKED_LINE, NOTICE_TEXT, PAUSED_LINE, PLAN_NOTICE, SERVED_CHANNELS, SERVED_ROLES } from './svc'
 import type { Result, Svc } from './svc'
-import { ASKED_FILE, askDue, askedFrom, canAsk, dashboardUrl, readEntry, recordState, savingsOpen, uploadOn,
-  writeEntry } from './choice'
+import { ASKED_FILE, askDue, askedFrom, canAsk, dashboardUrl, readEntry, recordConsent, recordState, savingsOpen,
+  uploadOn, writeEntry } from './choice'
 import { dataDir, engineDirs, envOf, readTextOf } from './engine_env'
 import { COMPANY_VIEW_LINE, companyCommand } from './boss'
 import { hasTrust, type TrustFile, unbalancedTrust, withoutTrust, withTrust } from './trust'
@@ -1164,6 +1164,8 @@ export class Command {
         ? await writeEntry(this.d.store, { record: 'off', at, backfill: undefined, page: 'off', page_at: at })
         : await writeEntry(this.d.store, { record: undefined, at: undefined, backfill: undefined, page: undefined, page_at: undefined })
     if (!kept) return errorText('store_unavailable')
+    // 0.7.9: the choice is recorded on the server as a consent record; quiet on failure (the next upload retries)
+    if (sub !== 'not_now') await recordConsent(this.d.store, on, (b) => this.d.svc.call('POST', '/privacy/consent', b))
     if (sub === 'not_now') await this.stampAsked()
     // 0.7.6: the weekly email is its own choice, asked separately (never turned on with the upload)
     let mailAsk = ''

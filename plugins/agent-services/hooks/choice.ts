@@ -17,6 +17,10 @@
 //   shared "last asked" time is a small file in the plugin data folder (the caller reads and writes it).
 // - The 0.5.0 keys (sharing, dashboard_consent, savings_prompt and the upload switch) are read once, for the account
 //   signed in then, to seed the record (seedChoices); after that they are never read again.
+// - The upload choice is also recorded on the server as a usage_upload consent record (0.7.9, recordConsent):
+//   `consent` in the entry is what the server last confirmed for it (true granted, false withdrawn); absent means not
+//   recorded yet, so the next daily upload records the "on" first (a yes given before 0.7.9 included) and uploads
+//   nothing that day when that fails.
 // - canAskNow is the one "can we ask the user now" check: an interactive session with a surface to ask on. A -p
 //   run, a CI run or an SDK call without a surface gets no question, no dialog and no question note.
 import type { EngineInterface } from 'claude-code'
@@ -35,7 +39,7 @@ const DASHBOARD_URL_RX = /^https:\/\/claude\.ai\/(?:code\/)?artifact\/[A-Za-z0-9
 
 export type Side = 'on' | 'off'
 export type RecordValue = Side | 'unanswered'
-export type Entry = { record?: Side; at?: number; backfill?: boolean; page?: Side; page_at?: number }
+export type Entry = { record?: Side; at?: number; backfill?: boolean; page?: Side; page_at?: number; consent?: boolean }
 export type RecordState = {
   record: RecordValue // what the upload does: the company's "off", else the person's own answer
   own: RecordValue // the person's own answer
@@ -63,6 +67,7 @@ export function entryOf(v: unknown): Entry {
   const p = side(v.page)
   if (p) e.page = p
   if (num(v.page_at) !== null) e.page_at = v.page_at
+  if (typeof v.consent === 'boolean') e.consent = v.consent
   return e
 }
 
@@ -127,6 +132,28 @@ export async function writeEntry(kv: KV, patch: Partial<Record<keyof Entry, unkn
   }
   const all = await safeGet(kv, CHOICE_KEY)
   return safeSet(kv, CHOICE_KEY, { ...(isObj(all) ? all : {}), [account]: next })
+}
+
+/** Record the upload choice on the server as a usage_upload consent (POST /privacy/consent through `send`, the
+ * signed svc channel) and keep in the entry what the server confirmed; on a failure the entry says "not recorded",
+ * so the next daily upload tries again. Quiet: never throws; true when the server confirmed it. */
+export async function recordConsent(
+  kv: KV,
+  granted: boolean,
+  send: (body: { purpose: 'usage_upload'; granted: boolean }) => Promise<{ ok: boolean }>,
+): Promise<boolean> {
+  let ok = false
+  try {
+    ok = (await send({ purpose: 'usage_upload', granted })).ok === true
+  } catch {
+    ok = false
+  }
+  try {
+    await writeEntry(kv, { consent: ok ? granted : undefined })
+  } catch {
+    // the next upload records it again
+  }
+  return ok
 }
 
 /** The record as every surface shows it. Never throws. */

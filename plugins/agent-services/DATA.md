@@ -49,8 +49,9 @@ the device's public key, the device id, the Claude account hash, and the harness
 | Session start (also a resumed session), the first prompt after a project's `agent-state.md` changes between planning and `phase: running`, and after `/clear` or a compaction, only at methods level `suggest` (the default) | the per-session id, the role `auto`, the work phase, the version pinned, the channel (to fetch the working methods; the full text goes to the model once per session and again only after `/clear`, a compaction, a phase change or a new served version) |
 | Session start, only at methods level `on` (your CLAUDE.md has the agent-services section) | the same, once for each of the six phases |
 | Session start, and once a day in a session left open, only after you chose to upload for the account signed in | the daily usage summary, one per active day not uploaded yet. With "Upload, including the past 30 days" never a day more than 30 days before your choice (so the first upload also sends up to 30 earlier days); with "Upload from now on only" only the days after the day of your choice; after a switch to another account on this computer, nothing from before that account's choice |
+| When you change the upload choice (`sharing on_backfill`, `sharing on_from_now` or `sharing off`, or the same answers in `/agent-services setup`; `sharing not_now` sends nothing), and once before an upload when the service has not confirmed your yes yet (for example a yes given before version 0.7.9) | your sharing choice, recorded on the service as a consent record: the purpose `usage_upload` and yes (granted) or no (withdrawn). The service refuses daily summaries from this plugin version on unless your newest record there is a yes, and from any version once it is a no. If recording a yes fails, nothing is uploaded that day and it is tried again at the next upload; a no the service did not confirm is sent again at the next session start |
 | The band, the status line and your savings page refresh | nothing (asks for your savings and report lines) |
-| After a turn, for a company admin only | nothing (asks for the company summary, at most every 30 minutes) |
+| After a turn, for a company admin only | nothing (asks for the company summary, at most every 15 minutes) |
 
 The **daily usage summary** holds: the day and the plugin version; per model, input, output and cache token counts
 and the cost; per task type (the plugin sends a word from a fixed list, or `other`; the service itself accepts any
@@ -74,7 +75,7 @@ marketplace, not our service. It never updates the plugin; `/agent-services upda
 turn on Claude Code's own auto-update for agent-plugin, Claude Code updates the plugin by itself, without asking you;
 the model then gets no note about new versions. Your private savings page is published to your own
 claude.ai account with Claude Code's Artifact tool, only after you allowed it. A company admin's board (member
-emails and savings) goes to the admin's own claude.ai account the same way. Each board page is published once (and
+emails, savings and device counts, or only the company totals) goes to the admin's own claude.ai account the same way. Each board page is published once (and
 again only when a new plugin version changes how the page looks; a board published by an earlier plugin version is
 published once more to turn it into this kind of page). The page declares the artifact's own database (only you, its
 owner, can write to it). After that, an update does not publish the page: the plugin writes the figures the page
@@ -158,11 +159,24 @@ delivery service.
 
 ## 3. What a company admin sees about each member
 
-If your account belongs to a company account, its admin sees, in the admin's private board (the weekly email shows the same except the device count): each
-member's email address, how many devices each member is signed in on, and each member's weekly savings figure ("no
-data yet" while a member uploads nothing), plus the company totals, the seats, and the company's settings. The admin
-does not see token counts, costs, task types, project ids, session counts, times of use, IP addresses, prompts or
-code.
+A company account shows its admin one of two views, chosen for the company by our operator (a newly created company starts at totals only; companies created before this setting existed keep the
+per-member view):
+
+- **Totals only**: the admin's private board and the weekly company email show the company's total weekly savings
+  estimate, the week before, how many members have figures, the seats and the company's settings. No member's email
+  address, figure or device count is sent to the admin's computer or put in the email.
+- **Each member**: the board also lists each member's email address, how many devices each member is signed in on
+  (counted when the page was made), and each member's weekly savings estimate ("no data yet" while a member uploads nothing),
+  listed by email address, never ranked by figure. The weekly email shows the same except the device count.
+
+Both views say that the figures are estimates of AI cost savings, not a measure of anyone's work, and that "no data
+yet" is not evidence that someone did not use Claude Code. The admin does not see token counts, costs, task types,
+project ids, session counts, times of use, IP addresses, prompts or code.
+
+From plugin 0.8.0, when your company has an admin (or a company summary address), the plugin tells you once what the
+admin sees about you in your company's view, and again if the company changes the view; the upload question says the
+same, so you know before anything of yours is uploaded. Before an account becomes a company's admin, our operator
+records the date the company confirmed it told its members about the board.
 
 The company can also pause agent-services for everyone, and can set the savings record on or off for everyone.
 Set off, nothing of yours is uploaded and only the admin can change it. Set on, nothing is turned on for you: you
@@ -175,7 +189,7 @@ email address and device count stay visible to the admin while you are a member.
 
 `/agent-services company` shows you exactly what the admin's private board shows about you: your email
 address, your device count and your weekly savings figure (or "no data yet"), for the same week and with the same
-values, plus whether the company paused agent-services and how it set the savings record. Only your own row is
+values, or that your company shows totals only, plus whether the company paused agent-services and how it set the savings record. Only your own row is
 fetched, never another member's. For the admin, the same command still shows the company board and the email switch.
 
 ## 4. Files on this computer
@@ -184,7 +198,7 @@ fetched, never another member's. For the admin, the same command still shows the
 |---|---|
 | Claude Code's plugin store, a JSON file in your Claude Code folder (`~/.claude`) | the sign-in credential in plain text (the token, the next token during a rotation, the device key), plus account id, device id, plan, your choices (the savings record, the autonomy choice and the methods version you were last told about, each kept for each account that signed in here, and the methods level and the routing level) and switches, a local key for the project hash, and day counters. Any other plugin and any program running as you can read it; a copy works as your sign-in until the next rotation or sign-out. |
 | `~/.agent-services/services/outbox/<day>-<session>.jsonl` | the request log: every request as sent (secrets such as the code and the token blanked) and its answer, previews, every call the model made to this plugin's tools with its full arguments (for one, a whole subagent description given to `router_advice`), and savings-page publish attempts. Kept 90 days, at most 2 MiB a file. |
-| `~/.agent-services/dashboard/`, `~/.agent-services/boss/`, `~/.agent-services/services/*.json` | your savings page (a company admin's board, with member emails) and their publish state (`dashboard.json`, `boss.json`), and for each board the page format last published and the version of its figures document (`dashboard-live.json`, `boss-live.json`) |
+| `~/.agent-services/dashboard/`, `~/.agent-services/boss/`, `~/.agent-services/services/*.json` | your savings page (a company admin's board, with member emails in the per-member view; the admin's computer empties the board page and deletes its cached company summary from the plugin store after sign-out, when the account is no longer the admin, and once the summary is more than 30 minutes old, checked when the board is refreshed after a turn and about every minute while Claude Code runs) and their publish state (`dashboard.json`, `boss.json`), and for each board the page format last published and the version of its figures document (`dashboard-live.json`, `boss-live.json`) |
 | `~/.agent-services/methods.md`, `methods.approved.md`, `methods.pending.md` | the working-methods text |
 | `~/.agent-services/methods.seen.md`, `methods.previous.md` | the served working-methods text of the version last seen and of the one before it, so `/agent-services methods diff` can show what changed |
 | Claude Code's plugin store (see above), keys `checkpoint_counts`, `terms_accepted`, `redline_override` | checkpoint counters per hashed session id; the terms version you accepted at sign-in (sent with the code, with "business use, 18 or older"); the weekly reset until which you let your agent start subagents past the usage line |
@@ -258,7 +272,8 @@ text of your messages (only to see whether one asks for a review), and the marke
 Every answer has a fixed shape:
 
 - Sign-in check: accepted, the plan, the routes open to you, and for a company account the company's savings
-  setting (and whether you are its admin).
+  setting (and whether you are its admin); from plugin 0.8.0 also the company's board view (totals only or each
+  member) and whether anyone sees the company board or email.
 - Subagent routing: route, pass or deny; a model and effort or none; a reason code; a hint and two short rules
   (text, at most 2,000 characters each). A deny gives the hint and rules to the model as the reason; a route or pass
   adds the speed-up rule to the subagent's prompt. For a main session on a Haiku, Sonnet or Opus model the routed
