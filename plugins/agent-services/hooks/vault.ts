@@ -71,7 +71,15 @@ function maskText(text: string, t: Table, found: string[]): string {
   for (const m of text.matchAll(/\{\{secret:([a-z0-9_]+)\}\}/g)) if (!Object.hasOwn(vault, m[1])) foreign.add(m[1])
   let out = text
   for (const [name, value] of Object.entries(vault).sort((a, b) => b[1].length - a[1].length)) {
-    if (value && out.includes(value)) out = out.split(value).join(placeholder(name))
+    if (!value || !out.includes(value)) continue
+    // a long, high-entropy value is masked wherever it appears (SECRET_suffix, prefixSECRET); a short or low-entropy
+    // one (the pattern loop never stores one, but the vault may hold older entries) only as a whole token, so it
+    // does not corrupt ordinary words
+    const weak = value.length < 8 || new Set(value).size < 5
+    const head = weak && /^[A-Za-z0-9_]/.test(value) ? '(?<![A-Za-z0-9_])' : ''
+    const tail = weak && /[A-Za-z0-9_]$/.test(value) ? '(?![A-Za-z0-9_])' : ''
+    const re = new RegExp(head + value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&') + tail, 'g')
+    out = out.replace(re, () => placeholder(name))
   }
   for (const p of t.pats) {
     const spans = [...out.matchAll(/\{\{secret:[a-z0-9_]+\}\}/g)].map((m) => [m.index ?? 0, (m.index ?? 0) + m[0].length])
@@ -85,6 +93,8 @@ function maskText(text: string, t: Table, found: string[]): string {
       const start = end - secret.length
       if (spans.some(([a, b]) => start < b && end > a)) continue
       if (p.mixed && !(/[A-Za-z]/.test(secret) && /\d/.test(secret))) continue
+      // a short or low-entropy value never enters the vault: replacing it later would corrupt ordinary text
+      if (secret.length < 8 || new Set(secret).size < 5) continue
       res += out.slice(last, start) + placeholder(nameFor(secret, p.kind, found))
       last = end
     }
@@ -238,8 +248,8 @@ export function vaultAppend($: EngineInterface, e: Obj): Obj | null {
 export function vaultSecrets(args: string = ''): string[] {
   if (!table()) return [rulesState() === 'pending' ? RULES_PENDING_LINE : RULES_OFF_LINE]
   if (String(args).trim() === 'forget') {
+    foreign = new Set<string>([...foreign, ...Object.keys(vault)]) // names handed out before are never reused
     vault = {}
-    foreign = new Set<string>()
     return ["The session's secret vault is now empty; earlier placeholders can no longer be swapped back."]
   }
   const names = Object.keys(vault)

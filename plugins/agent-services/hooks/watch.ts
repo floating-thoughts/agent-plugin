@@ -333,8 +333,11 @@ export function watchDue(at: number, live: string[]): { prompts: string[]; sends
       continue
     }
     walled[id] = { at, tries: w.tries + 1, resumed: w.resumed }
-    if (id) out.sends.push({ agentId: id, text: t.wall?.sub ?? '' })
-    else out.prompts.push(t.wall?.main ?? '')
+    const raw: unknown = id ? t.wall?.sub : t.wall?.main
+    const text = typeof raw === 'string' ? raw : ''
+    if (!text.trim()) continue // no served text: nothing to send (an empty prompt would start an empty turn)
+    if (id) out.sends.push({ agentId: id, text })
+    else out.prompts.push(text)
   }
   return out
 }

@@ -618,7 +618,21 @@ export class EstimateScan {
     this.opt = opt
   }
 
-  async step(root: string): Promise<Facts | ScanProgress | null> {
+  private running: Promise<Facts | ScanProgress | null> | null = null
+
+  /** One slice of the scan; a call while a slice runs shares that slice (never two readers on one job). */
+  step(root: string): Promise<Facts | ScanProgress | null> {
+    if (this.running) return this.running
+    const run = this.slice(root)
+    this.running = run
+    const clear = () => {
+      if (this.running === run) this.running = null
+    }
+    run.then(clear, clear)
+    return run
+  }
+
+  private async slice(root: string): Promise<Facts | ScanProgress | null> {
     const clock = this.opt.clock ?? (() => Date.now())
     if (!this.job || clock() - this.job.at > (this.opt.maxAgeMs ?? 1_800_000)) {
       this.job = null
@@ -632,7 +646,10 @@ export class EstimateScan {
     const start = job.next
     let used = 0
     while (job.next < job.files.length) {
-      if (job.next > start && used >= (this.opt.sliceMs ?? 5000)) return { progress: { done: job.done, total: job.total } }
+      if (job.next > start && used >= (this.opt.sliceMs ?? 5000)) {
+        job.at = clock() // a job still being stepped is not abandoned
+        return { progress: { done: job.done, total: job.total } }
+      }
       const f = job.files[job.next]!
       const file = await readTranscript(this.fs, base, f) // a read is the engine's time, not the hook's
       const t = clock()
@@ -1068,16 +1085,19 @@ export class Command {
     if (sub === '') return this.methodsLine()
     const chosen = sub === 'on' && this.userChoseOn
     if (sub === 'on' || sub === 'off' || sub === 'suggest') this.userChoseOn = false // one answer applies one "on"
-    if (byTool && (sub === 'on' || sub === 'accept') && !chosen) {
-      // the model asked: these make served text the person's own instructions, so only the person's own answer applies
-      const yes = sub === 'on' ? 'Make them my own instructions' : 'Take the new text'
+    if (byTool && (sub === 'on' || sub === 'accept' || sub === 'keep') && !chosen) {
+      // the model asked: these decide which text is the person's own instructions, so only the person's answer applies
+      const yes = sub === 'on' ? 'Make them my own instructions' : sub === 'accept' ? 'Take the new text' : 'Keep the approved text'
       const a = this.canAsk()
         ? await this.dialog(sub === 'on'
           ? 'Claude asks to make the agent-services working methods your own instructions: one line in your CLAUDE.md ' +
             `loads them, and the planning gate then holds larger file edits until there is a plan. ${COMMAND} methods ` +
             'preview shows the text. Make them your own instructions?'
-          : 'Claude asks to take the changed agent-services working methods as your own instructions. ' +
-            `${COMMAND} methods diff shows the change. Take the new text?`, [yes, 'Not now'], METHODS_HEADER)
+          : sub === 'accept'
+            ? 'Claude asks to take the changed agent-services working methods as your own instructions. ' +
+              `${COMMAND} methods diff shows the change. Take the new text?`
+            : 'Claude asks to keep the agent-services working methods you approved and not ask about this change ' +
+              `again. ${COMMAND} methods diff shows the change. Keep the approved text?`, [yes, 'Not now'], METHODS_HEADER)
         : null
       if (a !== yes) {
         return `Nothing was changed: "methods ${sub}" needs the user's own answer. The user can type ${COMMAND} ` +
@@ -1155,9 +1175,13 @@ export class Command {
     await f.write(next)
     await safeSet(this.d.store, LEVEL_KEY, { level: 'on', at: now })
     const ok = await approveMethods() // the text previewed, then the file the line loads
+    const none = ok.text === null
+      ? ' No text could be fetched now (signed out or the service unreachable), so nothing new was approved; ' +
+        `${COMMAND} methods preview shows the text once it can be reached.`
+      : ''
     return `Added the agent-services section to ${f.path}: from the next session on, the working methods you approved ` +
       `count as your own instructions, and the planning gate holds larger file edits until agent-state.md has a plan; ` +
-      `a change to the methods is shown to you first. ${COMMAND} methods suggest takes the section out again.` +
+      `a change to the methods is shown to you first. ${COMMAND} methods suggest takes the section out again.` + none +
       (ok.text !== null && !(ok.shown && this.userPreviewed)
         ? ` No preview was shown in this session, so this is the text approved:\n\n----- begin -----\n` +
             `${ok.text.trim()}\n----- end -----`
@@ -1432,13 +1456,15 @@ export class Command {
   }
 
   /** A message that is only a sign-in code while a sign-in waits for one: finish it (the answer), else null. */
-  async pasted(text: string): Promise<string | null> {
+  async pasted(text: string, signedIn?: () => void): Promise<string | null> {
     const code = pastedForm(String(text ?? ''))
     if (!PASTED_CODE_RX.test(code)) return null
     const email = await this.safe(() => this.d.svc.pendingEmail(), null)
     if (!email) return null
     // no dialog here: a question inside prompt.submit could run past its budget (any command asks it later)
     const done = this.complete(email, code, '', false).catch(() => PASTED_FAILED)
+    // the after-sign-in work follows the sign-in itself, also when it answers after PASTED_SLOW
+    if (signedIn) void done.then((a) => (a.startsWith('Signed in') ? signedIn() : undefined)).catch(() => undefined)
     let slow: Promise<string> | null = null
     try {
       // a timer that cannot start (or fails) never decides the answer: the sign-in's own answer does
@@ -1932,12 +1958,11 @@ export async function pastedCode(
   if (!servedOptions || typeof text !== 'string' || text.length > 40) return null
   if (!PASTED_CODE_RX.test(pastedForm(text))) return null // most messages: nothing is built or read
   try {
-    const answer = await (await servedCommand($)).pasted(text)
-    if (answer === null) return null // no sign-in waits: an ordinary message
-    if (answer.startsWith('Signed in')) {
+    const answer = await (await servedCommand($)).pasted(text, () => {
       void Promise.resolve(servedAfter?.('login')).catch(() => undefined)
       void syncMethodsNow() // the band names the open setup questions from the next prompt on (setupDue)
-    }
+    })
+    if (answer === null) return null // no sign-in waits: an ordinary message
     tookCode($)
     return `${PASTED_TAKEN}
 ${answer.replace(/^agent-services: /, '')}`

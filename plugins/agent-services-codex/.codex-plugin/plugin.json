@@ -1,6 +1,6 @@
 {
   "name": "agent-services",
-  "version": "0.10.1",
+  "version": "0.10.2",
   "description": "agent-services for Codex: working methods once per thread and model advice for spawn_agent, from the agent-services server through a remote MCP connection (no local process); needs a signed-in account",
   "author": { "name": "Yi Zhang" },
   "license": "SEE LICENSE IN LICENSE",

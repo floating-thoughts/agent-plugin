@@ -203,7 +203,7 @@ function ready($: EngineInterface): Promise<Rt | null> {
   declare($); if (isRemoved()) return Promise.resolve(null) // after /agent-services remove: every event passes
   if (!runtime) {
     runtime = build($)
-    void runtime.then(resolveFirst)
+    void runtime.then((r) => { resolveFirst(r); if (!r) runtime = null }) // a failed build is tried again at the next event
   }
   return runtime
 }

@@ -22,7 +22,7 @@ import type { EngineInterface } from 'claude-code'
 import { claudePlanOf, dataDir, engineDirs, readTextOf } from './engine_env'
 import { methodsLevel } from './methods_level'
 import { expired, heldPlan, planOf } from './panel'
-import { rulesLive, rulesTable } from './rules'
+import { riskyPattern, rulesLive, rulesTable } from './rules'
 import { engineStore } from './store'
 import { toolInput } from './tools'
 
@@ -53,12 +53,24 @@ function fill(text: unknown, values: Record<string, string>): string {
   return String(text ?? '').replace(/\{(\w+)\}/g, (all, k: string) => (Object.hasOwn(values, k) ? values[k]! : all))
 }
 
-function rx(source: string, flags = ''): RegExp | null {
+// compiled served patterns, kept per source and flags (cleared when it grows past a few hundred)
+let compiledRx = new Map<string, RegExp | null>()
+
+/** A served pattern compiled once, or null when it does not compile or may backtrack without end (rules.ts
+ * riskyPattern, applied to `screen`: the served template when the source has a file name filled in). */
+function rx(source: string, flags = '', screen = source): RegExp | null {
+  const key = `${flags}/${source}`
+  const hit = compiledRx.get(key)
+  if (hit !== undefined) return hit
+  let out: RegExp | null = null
   try {
-    return new RegExp(source, flags)
+    out = riskyPattern(screen) ? null : new RegExp(source, flags)
   } catch {
-    return null
+    out = null
   }
+  if (compiledRx.size >= 500) compiledRx = new Map<string, RegExp | null>()
+  compiledRx.set(key, out)
+  return out
 }
 
 /** True when the runtime is signed in; no runtime given (the tests) counts as signed in. A sign-in that no longer
@@ -117,7 +129,7 @@ function shellHit(command: string, locked: readonly string[], cased: string[], a
   for (const path of locked) {
     const name = `(?<![\\w.-])${escape(baseName(path))}` // so RetroP3_X.spec.luau is not taken for X.spec.luau
     const at = `[^|;&]*${name}\\b`
-    const pats = [...cased.map((s) => rx(fill(s, { name, at }))), ...anyCase.map((s) => rx(fill(s, { name, at }), 'i'))]
+    const pats = [...cased.map((s) => rx(fill(s, { name, at }), '', s)), ...anyCase.map((s) => rx(fill(s, { name, at }), 'i', s))]
     if (commands.some((c) => pats.some((r) => r?.test(c) === true))) return path
   }
   return null
@@ -358,9 +370,16 @@ export async function ownerCheck($: EngineInterface, e: Obj, cwd: string | null,
     const target = demandTarget(e, cwd)
     if (target !== null) {
       let current: string | null = null
-      try {
-        current = String(await $.fs.read(target))
-      } catch {}
+      // read as written first (on Linux and WSL the one spelling, /mnt/c/... as c:/..., names no real file)
+      const written = toolInput(e).file_path ?? toolInput(e).notebook_path
+      const asWritten = typeof written !== 'string' ? null
+        : /^([a-zA-Z]:)?[\\/]/.test(written) || !cwd ? written : `${cwd.replace(/[\\/]+$/, '')}/${written}`
+      for (const p of asWritten !== null && asWritten !== target ? [asWritten, target] : [target]) {
+        try {
+          current = String(await $.fs.read(p))
+          break
+        } catch {}
+      }
       const why = demandRefusal(e, current, !e.agentId)
       if (why) return why
     }

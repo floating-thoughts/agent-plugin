@@ -25,9 +25,11 @@ type Table = {
 // remembered webmail tabs and the fronted tab, each keyed "<tool family>:<tab id>" (a family is the tool name up to its
 // last "__", so tab ids of two browsers never mix)
 let mailTabs = new Set<string>()
+let mailEver = new Set<string>() // tabs that showed webmail at some time (history steps may return to it)
 let fronted = new Map<string, string>() // family -> key of its fronted tab, when a result or a call showed it
 onRulesClear(() => {
   mailTabs = new Set<string>()
+  mailEver = new Set<string>()
   fronted = new Map<string, string>()
 })
 
@@ -58,20 +60,49 @@ function fill(text: string, key: string, value: string): string {
  * split at newlines, ; && || and a single & (not a redirection such as 2>&1), and where a subshell, $( ) or backticks
  * open or close. */
 export function commandsOf(command: string): string[] {
-  return command
-    .replace(/<<-?\s*(['"]?)(\w+)\1[^\n]*\n[\s\S]*?\n\s*\2\s*(?=\n|$)/g, '<<HEREDOC')
+  const text = command
+    // a heredoc body that feeds a shell (bash <<EOF, cat <<EOF | sh) holds commands and is kept
+    .replace(/<<-?\s*(['"]?)(\w+)\1[^\n]*\n[\s\S]*?\n\s*\2\s*(?=\n|$)/g, (s: string, _q: string, _w: string, at: number, all: string) =>
+      /(?:^|[\s|;&(/])(?:(?:ba|da|z|k)?sh|pwsh|powershell)(?:\.exe)?(?:\s+-\S+)*\s*$/i.test(all.slice(all.lastIndexOf('\n', at - 1) + 1, at)) ||
+      /^[^\n]*\|\s*(?:(?:ba|da|z|k)?sh|pwsh|powershell)\b/i.test(s)
+        ? s
+        : '<<HEREDOC')
     .replace(/@(['"])[ \t]*\r?\n[\s\S]*?\r?\n\1@/g, "'Q'")
     .replace(/"[^"]*"/g, (s) => (s.includes('\n') && !/\$\(|`/.test(s) ? '"Q"' : s))
     .replace(/((?:^|\s)(?:-m|--message)(?:\s+|=))'[^']*'/g, (s, head: string) => (s.includes('\n') ? `${head}'Q'` : s))
-    .split(/\n|;|&&|\|\||(?<![>&])&(?![&>])|\$\(|[()`]/)
+  return splitOutsideQuotes(text, /\n|;|&&|\|\||(?<![>&])&(?![&>])|\$\(|[()`]/)
     .map((s) => s.trim())
     .filter(Boolean)
+}
+
+/** Split text at a separator pattern, but not at ; & | ( ) inside a closed quoted span ('...', or "..." without $( or a
+ * backtick, which run commands). A backslash outside quotes escapes the next character; inside "..." it does not, so a
+ * doubtful quote leaves the text split as before (a false refusal, never a missed command). */
+export function splitOutsideQuotes(text: string, sep: RegExp): string[] {
+  let out = ''
+  for (let i = 0; i < text.length; i++) {
+    const c = text[i]!
+    if (c === '\\') {
+      out += text.slice(i, i + 2)
+      i++
+      continue
+    }
+    const j = c === '"' || c === "'" ? text.indexOf(c, i + 1) : -1
+    if (j < 0) {
+      out += c
+      continue
+    }
+    const span = text.slice(i, j + 1)
+    out += c === '"' && /\$\(|`/.test(span) ? span : span.replace(/[;&|()]/g, (x) => String.fromCharCode(0xe000 + ';&|()'.indexOf(x)))
+    i = j
+  }
+  return out.split(sep).map((s) => s.replace(/[\ue000-\ue004]/g, (x) => ';&|()'[x.charCodeAt(0) - 0xe000]!))
 }
 
 function ruleMatch(rule: CommandRule, one: string): string | null {
   const re = rx(rule.pattern, rule.flags ?? '')
   if (!re) return null
-  const parts = rule.scope === 'stage' ? one.split('|').map((s) => s.trim()) : [one]
+  const parts = rule.scope === 'stage' ? splitOutsideQuotes(one, /\|/).map((s) => s.trim()) : [one]
   for (const part of parts) {
     // a quoted single option or path ("-A", '.', ":/") is read as written; other quoted text is data
     const bare = (m: string, a?: string, b?: string): string => (/^[-.:]/.test(a ?? b ?? '') ? (a ?? b)! : 'Q')
@@ -162,7 +193,15 @@ export function urlsIn(input: unknown): string[] {
     if (depth > 6) return
     if (typeof v === 'string') {
       if (keys?.test(key)) out.push(v)
-      for (const m of v.matchAll(/https?:\/\/[^\s"'`<>)\]}\\]+/gi)) out.push(m[0]) // a backslash ends one (JSON-escaped text)
+      for (const m of v.matchAll(/https?:\/\/[^\s"'`<>)\]}\\]+/gi)) {
+        out.push(m[0]) // a backslash ends one (JSON-escaped text)
+        // a URL nested in another one's query (a redirect link), also percent-encoded
+        let rest = m[0].slice(1)
+        try {
+          rest = decodeURIComponent(rest)
+        } catch {}
+        for (const n of rest.matchAll(/https?:\/\/[^\s"'`<>)\]}\\]+/gi)) out.push(n[0])
+      }
     } else if (Array.isArray(v)) {
       v.forEach((x) => walk(x, key, depth + 1))
     } else if (v !== null && typeof v === 'object') {
@@ -205,10 +244,16 @@ function tabIdOf(e: Obj): string | null {
 const familyOf = (tool: string): string => (tool.includes('__') ? tool.slice(0, tool.lastIndexOf('__')) : tool)
 
 /** The tab steps of a call: each browser_batch action (its own tool name and tab id), else the call itself. */
-function stepsOf(e: Obj): { tool: string; tab: string | null }[] {
+function stepsOf(e: Obj): { tool: string; tab: string | null; history: boolean }[] {
   const tool = String(e?.tool ?? '')
-  if (!Array.isArray(e?.actions)) return [{ tool, tab: tabIdOf(e) }]
-  return e.actions.map((a: Obj) => ({ tool: `${familyOf(tool)}__${String(a?.name ?? a?.tool ?? '')}`, tab: tabIdOf(a?.input ?? a) }))
+  // a history step (navigate to "back" or "forward") can return the tab to a webmail page it showed before
+  const history = (x: Obj): boolean => /^\s*(?:back|forward)\s*$/i.test(String(x?.url ?? ''))
+  if (!Array.isArray(e?.actions)) return [{ tool, tab: tabIdOf(e), history: history(e) }]
+  return e.actions.map((a: Obj) => ({
+    tool: `${familyOf(tool)}__${String(a?.name ?? a?.tool ?? '')}`,
+    tab: tabIdOf(a?.input ?? a),
+    history: history(a?.input ?? a),
+  }))
 }
 
 // A Browser pane tool that acts on the fronted tab when it names none (not a tab-list, preview or window-size tool).
@@ -237,7 +282,8 @@ export function mailDeny(e: Obj): string | null {
       const family = familyOf(s.tool)
       const key = s.tab !== null ? `${family}:${s.tab}` : onFronted(s.tool) ? fronted.get(family) ?? null : null
       if (free?.test(s.tool) ?? false) {
-        if (key !== null && ((reset?.test(s.tool) ?? false) || /tabs_close/i.test(s.tool))) seen.delete(key)
+        if (key !== null && s.history && mailEver.has(key)) seen.add(key)
+        else if (key !== null && ((reset?.test(s.tool) ?? false) || /tabs_close/i.test(s.tool))) seen.delete(key)
         continue
       }
       if (key !== null && seen.has(key)) return reason(`tab ${key.slice(family.length + 1)}`)
@@ -260,7 +306,8 @@ export function mailAfter(e: Obj, done: unknown): void {
     const family = familyOf(String(e.tool))
     for (const s of stepsOf(e)) {
       const key = s.tab !== null ? `${family}:${s.tab}` : onFronted(s.tool) ? fronted.get(family) ?? null : null
-      if (key !== null && (rx(mail.tab_reset, 'i')?.test(s.tool) ?? false)) mailTabs.delete(key)
+      if (key !== null && s.history && mailEver.has(key)) mailTabs.add(key)
+      else if (key !== null && (rx(mail.tab_reset, 'i')?.test(s.tool) ?? false)) mailTabs.delete(key)
       if (/tabs_select|switch_to_tab/i.test(s.tool)) {
         if (s.tab !== null) fronted.set(family, `${family}:${s.tab}`)
         else fronted.delete(family)
@@ -268,11 +315,13 @@ export function mailAfter(e: Obj, done: unknown): void {
       if (/tabs_create/i.test(s.tool) && e.foreground === true) fronted.delete(family)
       if (/tabs_close/i.test(s.tool) && key !== null) {
         mailTabs.delete(key) // a closed tab is no mail tab any more
+        mailEver.delete(key)
         if (fronted.get(family) === key) fronted.delete(family)
       }
     }
     for (const t of tabsShown(JSON.stringify(done) ?? '')) {
       if (t.mail) mailTabs.add(`${family}:${t.id}`)
+      if (t.mail) mailEver.add(`${family}:${t.id}`)
       if (t.active) fronted.set(family, `${family}:${t.id}`)
     }
   } catch {}
@@ -281,6 +330,7 @@ export function mailAfter(e: Obj, done: unknown): void {
 /** Forget every remembered tab (tests; a new session). */
 export function mailReset(): void {
   mailTabs = new Set<string>()
+  mailEver = new Set<string>()
   fronted = new Map<string, string>()
 }
 

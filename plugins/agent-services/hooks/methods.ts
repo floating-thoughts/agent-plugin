@@ -20,7 +20,7 @@
 import type { EngineInterface } from 'claude-code'
 import { canAsk } from './choice'
 import { engineDirs } from './engine_env'
-import { hasTrust, TRUST_KEY } from './trust'
+import { hasTrust, TRUST_KEY, unbalancedTrust } from './trust'
 
 export const METHODS_FILE = 'methods.md'
 export const APPROVED_FILE = 'methods.approved.md'
@@ -217,7 +217,10 @@ async function approved(): Promise<string | null> {
 }
 
 async function sync($: EngineInterface, r: MethodsRuntime): Promise<void> {
-  if (!hasTrust(await claudeMd($))) return
+  // a section with a leftover marker cannot be taken out, yet its import line may still load methods.md: the off and
+  // signed-out notes replace the text there too
+  const md = await claudeMd($)
+  if (!hasTrust(md) && !unbalancedTrust(md)) return
   if ((await levelNow()) === 'off') {
     if ((await files!.read(METHODS_FILE)) !== METHODS_OFF) await files!.write(METHODS_FILE, METHODS_OFF)
     return
@@ -266,7 +269,8 @@ export async function approveMethods(): Promise<{ text: string | null; shown: bo
       if (text !== null) {
         await files.write(APPROVED_FILE, text)
         await files.write(PENDING_FILE, '')
-        out = { text, shown: previewed !== null }
+        // shown: the person saw this exact text (a preview by the model's own tool does not count)
+        out = { text, shown: previewed !== null && shownBody !== null && shownBody === flatBody(text) }
       }
     }
   } catch {

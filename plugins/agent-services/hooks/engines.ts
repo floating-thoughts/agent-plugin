@@ -59,8 +59,10 @@ export async function rulesStart($: EngineInterface, svc: RulesSvc, rt?: Ready):
   if (rt) void jitStart(rt as any)
   await registerRunCommand($)
   if ((await loadRules(svc)) !== 'off') return
+  // signed in but the tables did not arrive: say that, not "signed out"
+  const signedOut = await Promise.resolve(svc.authState()).then((s) => s !== 'ok', () => true)
   try {
-    $.ui.log(RULES_OFF_LINE)
+    $.ui.log(signedOut ? RULES_OFF_LINE : 'Command guarding and secret masking are off: the rule tables could not be fetched.')
   } catch {}
 }
 

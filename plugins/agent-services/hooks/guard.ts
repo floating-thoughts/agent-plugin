@@ -201,13 +201,14 @@ export class Guard {
 
   // ---------------- fetch
   /** One phase, without the items served just in time (black-box step 5; an older service sends them all). With
-   * `event`: only that event's items (cached per event; `phase` is only echoed). */
+   * `event`: only that event's items (cached per event and phase: the phase is echoed in the answer and its wrappers). */
   async fetch(token: string, phase: string, event?: string): Promise<GuardAnswer> {
     const s = this.get(token)
     if (typeof phase !== 'string' || !PHASES.includes(phase)) throw new GuardError(400, 'bad_request')
     if (event !== undefined && (typeof event !== 'string' || !EVENTS.includes(event))) throw new GuardError(400, 'bad_request')
     const key = event ? `@${event}` : phase
-    const cached = s.cache.get(key)
+    const ck = event ? `${key}#${phase}` : key // the cache key
+    const cached = s.cache.get(ck)
     if (cached) return cached
     let res: SvcResult
     try {
@@ -241,14 +242,15 @@ export class Guard {
       items,
     }
     if (!this.sessions.has(s.token)) throw new GuardError(401, 'session_token_required') // closed meanwhile
-    const again = s.cache.get(key) // another call for the same phase or event finished first
+    const again = s.cache.get(ck) // another call for the same phase or event finished first
     if (again) return again
     const merged = new Set([...s.items, ...keys])
     if (keys.length > MAX_ITEMS || merged.size > MAX_ITEMS * (PHASES.length + EVENTS.length)) throw new GuardError(429, 'quota_items')
-    if (s.bytes + size > MAX_BYTES) throw new GuardError(429, 'quota_bytes')
+    const charged = event !== undefined && [...s.cache.keys()].some((k) => k.startsWith(`${key}#`)) // under another phase
+    if (!charged && s.bytes + size > MAX_BYTES) throw new GuardError(429, 'quota_bytes')
     s.items = merged
-    s.bytes += size
-    s.cache.set(key, answer)
+    if (!charged) s.bytes += size
+    s.cache.set(ck, answer)
     return answer
   }
   // ---------------- toolbox

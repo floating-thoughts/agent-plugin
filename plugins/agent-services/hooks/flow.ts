@@ -25,7 +25,7 @@ import { takeNotice } from './methods'
 import { methodsLevel } from './methods_level'
 import { setBandPending } from './band'
 import { engineStore } from './store'
-import { authorCheck, ownerCheck, redlineOverride, signedIn } from './subagents'
+import { authorCheck, ownerCheck, redlineOverride, signedIn, spellPath } from './subagents'
 import { toolInput } from './tools'
 import { servedText } from './workflow_table'
 
@@ -89,8 +89,11 @@ export function lockGlobs(text: string | null): string[] {
 /** The glob that locks `file`, or null; a file in a git worktree (".../worktrees/<id>/...", where a subagent with
  * isolation works) is also matched by its path inside that worktree. Pure. */
 export function lockedBy(file: string, cwd: string | null, globs: readonly string[]): string | null {
-  const rel = relPath(file, cwd)
-  const paths = [rel, slash(file)]
+  // normalised first (src/../tests/a.py is tests/a.py); the spellings as written are matched too
+  const raw = slash(file)
+  const abs = /^([a-zA-Z]:)?\//.test(raw) || cwd ? spellPath(raw, cwd ?? '') : spellPath(`/${raw}`).slice(1)
+  const rel = relPath(abs, cwd ? spellPath(cwd) : null)
+  const paths = [rel, abs, relPath(file, cwd), raw]
   const inTree = /(?:^|\/)worktrees\/[^/]+\/(.+)$/i.exec(rel)?.[1] // a match too many only denies
   if (inTree) paths.push(inTree)
   return globs.find((g) => paths.some((p) => globRx(g).test(p))) ?? null

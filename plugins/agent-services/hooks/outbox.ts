@@ -225,6 +225,16 @@ export class Outbox {
     if (!this.dirty) return
     this.dirty = false
     this.lastFlush = this.now()
+    try {
+      await this.writeFiles()
+    } catch (err) {
+      if (!this.stopped) this.dirty = true // not written: the next flush tries again
+      throw err
+    }
+  }
+
+  private async writeFiles(): Promise<void> {
+    let skipped = false
     for (const [p, f] of this.files) {
       if (f.base === null) {
         // an earlier copy of this module (hot reload) may have written this session's file already
@@ -232,6 +242,13 @@ export class Outbox {
           const old = String((await this.fs.read(p)) ?? '')
           f.base = utf8(old).length <= FILE_CAP_BYTES ? old : ''
         } catch {
+          // missing: start empty; listed but unreadable: never overwrite its earlier lines, try again later
+          const name = p.slice(p.lastIndexOf('/') + 1)
+          const absent = await this.fs.list(this.dir).then((l) => !l.some((x) => x.name === name), () => true) // no listing: no folder yet
+          if (!absent) {
+            skipped = true
+            continue
+          }
           f.base = ''
         }
         if (f.base && !f.base.endsWith('\n')) f.base += '\n'
@@ -254,7 +271,12 @@ export class Outbox {
         f.dropped += over
       }
       if (f.dropped > 0) text += JSON.stringify({ ts: isoTime(this.now()), kind: 'cap', dropped: f.dropped }) + '\n'
+      if (this.stopped) return // /agent-services remove ran meanwhile: write nothing more
       await this.fs.write(p, text)
+    }
+    if (skipped) {
+      this.dirty = true
+      return
     }
     // files of earlier days are complete: drop them from memory once written
     const cur = this.path()
