@@ -115,8 +115,10 @@ What the engines do on this computer, with the tables:
   change that file. A subagent whose task names a step with `[step:ID]` waits until that step's dependencies in
   `.agent/steps.json` are done (`[override: reason]` lets it start). A subagent report longer than the served cap is
   saved whole in a file under the plugin's data folder (`agent-reports/<session>/`), and the conversation gets its
-  opening and the file's path. A weekly usage line that stops new subagents applies only to accounts whose served
-  rules include one.
+  opening and the file's path. Where the served rules include a weekly usage line, no new subagent starts once the
+  weekly limit is past it; the line can depend on your subscription plan, which the plugin reads from the plan fields
+  of `~/.claude.json` (the rate-limit tiers, the plan name and the organization type; they are not sent). A message
+  that is only the word "override", sent once the line is reached, lets subagents start until the weekly reset.
   On accounts whose served rules include them (not product accounts): a requirements file the rules name, whose opening lines say it
   is locked, takes only an amendment appended at its end by the main conversation (a shell command never changes it),
   and a commit whose Co-Authored-By line names another model than the one the agent runs on is refused; the model
