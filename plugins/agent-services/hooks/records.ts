@@ -25,6 +25,9 @@ export const KNOWN_HEADS: ReadonlySet<string> = new Set([
 ])
 export const ROUTER_NOTICE =
   'The routing service is temporarily unavailable; this subagent dispatch runs as written, with the model and effort the caller set.'
+// a 403 no_license: the service is up, this account has no license (no ids or emails in the text)
+export const NO_LICENSE_NOTICE =
+  'This account has no active license (company seat or paid plan), so routing is off; this subagent dispatch runs as written, with the model and effort the caller set.'
 export const SALT_KEY = 'salt'
 export const ROUTE_DEADLINE_MS = 1000 // agent.spawn
 export const BACKGROUND_DEADLINE_MS = 30000 // turn_end checkpoint timing runs in the background
@@ -284,7 +287,8 @@ export class Records {
     if (errors.length === 1 && errors[0] === 'not_in_plan') return pass // not "temporarily unavailable": no notice
     const first = !this.notified.has(key)
     this.notified.add(key)
-    pass.notice = first ? ROUTER_NOTICE : null
+    const noLicense = errors.length === 1 && errors[0] === 'no_license' // not an outage either
+    pass.notice = first ? (noLicense ? NO_LICENSE_NOTICE : ROUTER_NOTICE) : null
     return pass
   }
 

@@ -42,7 +42,9 @@ export function svcTransport(svc: Svc): Transport {
         // Signed in (in the store) while this session's gate still says login or locked: another session signed in
         // since this one's 401 or 423. Report unknown so the core handshakes again.
         if (!g.open && (g.reason === 'login' || g.reason === 'locked' || g.reason === 'paused')) return { open: false, reason: 'unknown', minShell: null }
-        return { open: g.open, reason: g.reason, minShell: g.min_shell }
+        const until = typeof svc.retryAt === 'function' ? svc.retryAt() : null
+        return until === null ? { open: g.open, reason: g.reason, minShell: g.min_shell }
+          : { open: g.open, reason: g.reason, minShell: g.min_shell, retryAt: until / 1000 }
       } catch {
         return { open: false, reason: 'unavailable', minShell: null }
       }

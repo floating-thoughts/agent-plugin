@@ -60,9 +60,11 @@ export const GATE_NOTICES: Readonly<Record<string, string>> = {
   paused: ORG_PAUSED_LINE,
   upgrade: 'agent-services needs an update: this plugin version is no longer accepted; update the plugin (minimum {min_shell}).',
   offline: 'agent-services is offline: offline mode is on, so nothing is sent.',
-  unavailable: "agent-services can't reach its server; it tries again at the next session.",
+  unavailable: "agent-services can't reach its server; it tries again in a few minutes and at the next session.",
+  unavailable_until: 'agent-services stopped sending: the server could not open two requests in a row; it tries ' +
+    'again in about {minutes} minutes.',
   unverified: "agent-services can't verify its server: an answer claiming to come from the server was not signed by the server's key " +
-    '(a proxy or a fake server may be in the way); nothing it said was used. It tries again at the next session.',
+    '(a proxy or a fake server may be in the way); nothing it said was used. It tries again in a few minutes.',
 }
 export const PLAN_NOTICE = "agent-services: this account's plan does not include every service; the others run on their open " +
   'defaults. Plan changes happen on the account, with no reinstall.'
@@ -238,8 +240,11 @@ export function answer(action = 'allow', f: Partial<Omit<Answer, 'action'>> = {}
   }
 }
 
-export function gateNotice(state: GateState | null | undefined): string | null {
+export function gateNotice(state: GateState | null | undefined, nowS: number | null = null): string | null {
   if (!state || state.open) return null
+  const left = state.retryAt != null && nowS !== null ? state.retryAt - nowS : 0
+  if (state.reason === 'unavailable' && left > 0)
+    return GATE_NOTICES.unavailable_until!.replace('{minutes}', String(Math.max(1, Math.ceil(left / 60))))
   const text = GATE_NOTICES[state.reason ?? '']
   if (text === undefined) return null
   return text.replace('{min_shell}', state.minShell || 'unknown')
@@ -435,7 +440,11 @@ export class Core {
     if (!this.gated) return { open: true, reason: null, minShell: null }
     try {
       const st = await this.transport.gateState()
-      if (st && typeof st.open === 'boolean') return { open: st.open, reason: st.reason ?? null, minShell: st.minShell ?? null }
+      if (st && typeof st.open === 'boolean') {
+        const g: GateState = { open: st.open, reason: st.reason ?? null, minShell: st.minShell ?? null }
+        if (typeof st.retryAt === 'number') g.retryAt = st.retryAt
+        return g
+      }
     } catch {
       // fail closed
     }
@@ -465,8 +474,12 @@ export class Core {
 
   private helloDue(st: GateState): boolean {
     if (!this.gated || st.open) return false
-    return st.reason === 'unknown' || ((st.reason === 'unavailable' || st.reason === 'unverified')
-      && (this.helloAt === null || this.now() - this.helloAt >= GATE_RETRY_SECONDS))
+    if (st.reason === 'unknown') return true
+    if (st.reason !== 'unavailable' && st.reason !== 'unverified') return false
+    // a fresh module (after /reload-plugins) has no helloAt: it handshakes at once
+    if (this.helloAt === null || this.now() - this.helloAt >= GATE_RETRY_SECONDS) return true
+    // a bad_envelope stop that has ended since the last try: again now, not GATE_RETRY_SECONDS later
+    return typeof st.retryAt === 'number' && this.now() >= st.retryAt && this.helloAt < st.retryAt
   }
 
   private noticeOnce(session: string, notice: string | null): string | null {
@@ -477,7 +490,7 @@ export class Core {
   }
 
   private closedAnswer(session: string, st: GateState): Answer {
-    return answer('allow', { fallback: 'inactive', notice: this.noticeOnce(session, gateNotice(st)) })
+    return answer('allow', { fallback: 'inactive', notice: this.noticeOnce(session, gateNotice(st, this.now())) })
   }
 
   // {open, reason, notice}; refresh runs a handshake first (awaited, within the tool deadline).
@@ -486,7 +499,7 @@ export class Core {
     const before = await this.gateState()
     if (refresh || this.helloDue(before)) await this.startHello(null, TOOL_DEADLINE_MS)
     const st = await this.gateState()
-    return { open: st.open, reason: st.reason, notice: gateNotice(st) }
+    return { open: st.open, reason: st.reason, notice: gateNotice(st, this.now()) }
   }
 
   // ---------------- registry

@@ -271,6 +271,7 @@ export const ERROR_TEXT: Record<string, string> = {
   rate_limited: 'agent-services is busy and is slowing requests down; try again in a few minutes.',
   inactive: `The service is not available to this session right now; ${COMMAND} status says why.`,
   not_in_plan: "This account's plan does not include this service.",
+  no_license: 'This account has no active license (company seat or paid plan), so this service is not available.',
   service_off: 'This service is switched off on this machine.',
   account_locked: NOTICE_TEXT.account_locked!,
   org_paused: ORG_PAUSED_LINE,
@@ -728,7 +729,7 @@ export class Command {
       if (gate?.open) lines.push('Service: connected.')
       else if (gate?.reason === 'unknown') lines.push('Service: not checked yet in this session.')
       else if (gate?.reason !== 'offline') {
-        const n = gateNotice(gate)
+        const n = typeof svc.gateText === 'function' ? svc.gateText() : gateNotice(gate)
         if (n) lines.push(n)
       }
       if (st.plan === 'guard') lines.push(PLAN_NOTICE)

@@ -59,7 +59,7 @@ export const BAND_TEXT: Readonly<Record<string, string>> = {
   locked: `${NAME}: this account is locked. Contact support, then type ${COMMAND} login.`,
   paused: ORG_PAUSED_LINE,
   offline: `${NAME}: offline mode is on, so nothing is sent. Type ${COMMAND} offline off to turn it off.`,
-  unreachable: `${NAME} can't reach its server right now. It tries again at the next session.`,
+  unreachable: `${NAME} can't reach its server right now. It tries again in a few minutes.`,
   upgrade: `${NAME}: this version is no longer accepted. Update the plugin to keep using it.`,
   starting: `${NAME} is starting. Its status shows here after your next message.`,
 }

@@ -164,10 +164,12 @@ export const GATE_NOTICES: Record<string, string> = {
   paused: ORG_PAUSED_LINE,
   upgrade: 'agent-services needs an update: this plugin version is no longer accepted; update the plugin (minimum {min_shell}).',
   offline: 'agent-services is offline: offline mode is on, so nothing is sent.',
-  unavailable: "agent-services can't reach its server; it tries again at the next session.",
+  unavailable: "agent-services can't reach its server; it tries again in a few minutes and at the next session.",
+  unavailable_until: 'agent-services stopped sending: the server could not open two requests in a row; it tries ' +
+    'again in about {minutes} minutes.',
   unverified:
     "agent-services can't verify its server: an answer claiming to come from the server was not signed by the server's key (a " +
-    'proxy or a fake server may be in the way); nothing it said was used. It tries again at the next session.',
+    'proxy or a fake server may be in the way); nothing it said was used. It tries again in a few minutes.',
 }
 export const NOTICE_TEXT: Record<string, string> = {
   login_expired: 'Your agent-services sign-in expired; sign in again with /agent-services login.',
@@ -180,7 +182,7 @@ export const NOTICE_TEXT: Record<string, string> = {
     'agent-services is busy and is slowing requests down; the plugin keeps working on its defaults and retries on its own.',
   server_unverified:
     "agent-services stopped: an answer was not signed by the server's key, so it was not used (a proxy or a fake " +
-    'server may be in the way). It tries again at the next session.',
+    'server may be in the way). It tries again in a few minutes.',
   endpoint_changed: 'The agent-services address or server keys changed, so this machine was signed out; sign in again.',
   bad_envelope:
     'agent-services stopped sending: the server could not open two requests in a row; it tries again in 10 minutes.',
@@ -248,9 +250,12 @@ const R = (ok: boolean, p: Partial<Result> = {}): Res => ({
   attempts: p.attempts ?? 0,
 })
 
-/** The one notice for a closed gate; null when open or the reason is unknown. */
-export function gateNotice(state: GateState): string | null {
+/** The one notice for a closed gate; null when open or the reason is unknown. retryInMs: how long the bad_envelope
+ * stop still holds (Svc.retryAt), so the notice says when it tries again. */
+export function gateNotice(state: GateState, retryInMs: number | null = null): string | null {
   if (!state || state.open) return null
+  if (state.reason === 'unavailable' && retryInMs !== null && retryInMs > 0)
+    return GATE_NOTICES.unavailable_until!.replace('{minutes}', String(Math.max(1, Math.ceil(retryInMs / 60000))))
   const t = GATE_NOTICES[state.reason ?? '']
   return t ? t.replace('{min_shell}', state.min_shell || 'unknown') : null
 }
@@ -262,10 +267,11 @@ export class Svc {
   private d: Required<Omit<Deps, 'outbox' | 'config'>> & { outbox: Outbox | null }
   private cfg: ReturnType<typeof parseConfig>
   private gs: GateState = { open: false, reason: 'unknown', min_shell: null }
+  private envelopeUntil: number | null = null // ms: the bad_envelope stop holds until then (null: none known)
   private holder: string
   private helloP: Promise<Result> | null = null
   private planRoutes: Set<string> | null = null
-  private refused = new Set<string>()
+  private refused = new Map<string, string>() // route key -> the 403 code (not_in_plan or no_license)
   private notes: { ts: number; code: string; text: string }[] = []
   private lastNotice = new Map<string, number>()
   private authCache: { at: number; value: AuthState } | null = null
@@ -387,6 +393,16 @@ export class Svc {
   gateState(): GateState {
     return { ...this.gs }
   }
+  /** When (ms) the bad_envelope stop ends, while the gate is closed by it; null otherwise. */
+  retryAt(): number | null {
+    const u = this.envelopeUntil
+    return !this.gs.open && this.gs.reason === 'unavailable' && u !== null && u > this.d.now() ? u : null
+  }
+  /** gateNotice for this channel's gate, with the retry time of a bad_envelope stop. */
+  gateText(): string | null {
+    const u = this.retryAt()
+    return gateNotice(this.gs, u === null ? null : u - this.d.now())
+  }
   notices(): { ts: number; code: string; text: string }[] {
     return this.notes.map((n) => ({ ...n }))
   }
@@ -484,11 +500,18 @@ export class Svc {
   }
   private async unthrottle(): Promise<void> {
     if ((await safeGet(this.kv, KEYS.cool)) !== undefined) await safeDelete(this.kv, KEYS.cool)
+    await this.envelopeOpened()
+  }
+  /** The server opened one of our envelopes (any sealed answer): the bad_envelope run is over. */
+  private async envelopeOpened(): Promise<void> {
+    this.envelopeUntil = null
     if ((await safeGet(this.kv, KEYS.badEnvelope)) !== undefined) await safeDelete(this.kv, KEYS.badEnvelope)
   }
   private async envelopeBlocked(): Promise<boolean> {
     const b = await safeGet(this.kv, KEYS.badEnvelope)
-    return isObj(b) && typeof b.n === 'number' && typeof b.at === 'number' && b.n >= BAD_ENVELOPE_LIMIT && this.d.now() - b.at < BAD_ENVELOPE_WINDOW_MS
+    const on = isObj(b) && typeof b.n === 'number' && typeof b.at === 'number' && b.n >= BAD_ENVELOPE_LIMIT && this.d.now() - b.at < BAD_ENVELOPE_WINDOW_MS
+    this.envelopeUntil = on ? (b.at as number) + BAD_ENVELOPE_WINDOW_MS : null
+    return on
   }
   private async badEnvelope(): Promise<number> {
     const now = this.d.now()
@@ -662,6 +685,7 @@ export class Svc {
             ih = lower(op.headers)
             data = dec.decode(op.body)
             sealed = true
+            if (ist < 200 || ist >= 300) await this.envelopeOpened() // a success clears it below (unthrottle)
           } catch {
             this.logged(line, null, null, 'undecryptable_response')
             last = R(false, { error: 'undecryptable_response', attempts })
@@ -702,8 +726,19 @@ export class Svc {
       if (!sealed && ist === 400 && code === 'bad_envelope') {
         // the server could not open it; each one counts against this IP's failure budget
         if ((await this.badEnvelope()) >= BAD_ENVELOPE_LIMIT) {
+          this.envelopeUntil = this.d.now() + BAD_ENVELOPE_WINDOW_MS
           this.notice('bad_envelope')
           this.setGate('unavailable')
+        }
+        break
+      }
+      if (!sealed && ist === 503 && code === 'restarted') {
+        // an envelope sealed before the server's process started (a restart): not counted; a fresh one goes once the
+        // signed Retry-After (seconds until the start, at most 10 here) has passed
+        const ms = retrySeconds(ih['retry-after'], 1, 10) * 1000
+        if (o.retry && attempts < MAX_ATTEMPTS && ms < deadline.remaining()) {
+          await this.d.sleep(ms)
+          continue
         }
         break
       }
@@ -980,7 +1015,7 @@ export class Svc {
       const p = isObj(r.body) && typeof r.body.plan === 'string' ? r.body.plan : await getText(this.kv, KEYS.plan)
       return { plan: p, notice: p === 'guard' ? PLAN_NOTICE : null, gate: st }
     }
-    return { plan: (await this.status()).plan as string | null, notice: gateNotice(st), gate: st, error: r.error ?? st.reason }
+    return { plan: (await this.status()).plan as string | null, notice: this.gateText(), gate: st, error: r.error ?? st.reason }
   }
 
   /** GET /auth/plan: store the plan, keep the routes in memory, clear the refused set. */
@@ -1073,7 +1108,8 @@ export class Svc {
       }
       const service = route['x-inventory'].service
       if (!(await this.serviceOn(service)) && !ungated(route) && !(opts.consent && CONSENT_ROUTES.includes(key))) return fail('service_off')
-      if (signed && (this.refused.has(key) || (this.planRoutes !== null && !this.planRoutes.has(key)))) return fail('not_in_plan')
+      if (signed && this.refused.has(key)) return fail(this.refused.get(key)!)
+      if (signed && this.planRoutes !== null && !this.planRoutes.has(key)) return fail('not_in_plan')
       if (await this.cooling()) return fail('rate_limited') // a Retry-After in force: nothing sent, the fallback runs
       if (signed) {
         const blk = await this.blocked()
@@ -1089,7 +1125,7 @@ export class Svc {
         secret: route['x-response-secret'] ?? null,
       })
       if (!res.ok) {
-        if (res.status === 403 && res.error === 'not_in_plan') this.refused.add(key)
+        if (res.status === 403 && (res.error === 'not_in_plan' || res.error === 'no_license')) this.refused.set(key, res.error)
         return { ...strip(res), fallback: fb }
       }
       return strip(res)
