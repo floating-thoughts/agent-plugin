@@ -8,8 +8,9 @@ its tools answer only with its status, and nothing is sent anywhere.
 
 ## Requirements
 
-Python 3.9 or newer on the `python` command, with the `cryptography` package. If it is missing, the sign-in command
-says so and offers to install it for you; to install it yourself:
+Python 3.9 or newer, as `python`, `python3` or (on Windows) `py -3`: the plugin uses the first one it finds. It also
+needs the `cryptography` package. If that is missing, the sign-in command says so and offers to install it for you; to
+install it yourself (use `python3` if that is your Python):
 
 ```
 python -m pip install --user cryptography

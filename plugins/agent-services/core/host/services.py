@@ -138,9 +138,9 @@ _OPEN_STATE = {"open": True, "reason": None, "min_shell": None}
 
 # The one package outside the standard library the shell needs at run time (Ed25519 device keys: sign-in and signed requests).
 # Without it the gate stays closed with reason "dependency" and sign-in answers missing_dependency at once.
-DEPENDENCY_FIX = "python -m pip install --user cryptography"
+DEPENDENCY_FIX = f'"{sys.executable}" -m pip install --user cryptography'   # the Python this core runs on
 DEPENDENCY_NOTICE = ("agent-services is paused: the Python package 'cryptography' is missing; run `"
-                     + DEPENDENCY_FIX + "`, then sign in again with /agent-services.")
+                     + DEPENDENCY_FIX + "`, then sign in again with /agent-services:agent-services.")
 
 
 def missing_dependency() -> str | None:

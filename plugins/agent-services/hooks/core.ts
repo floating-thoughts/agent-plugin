@@ -107,8 +107,8 @@ export async function coreEvent($: EngineInterface, event: Record<string, unknow
     if (got === 'absent' && !ensured) {
       ensured = true
       try {
-        const python = (await envText(() => $.env.get('AGENT_CORE_PYTHON'))) || 'python'
-        await $.process.run([python, `${$.plugin.root}/hooks/agent_core.py`, 'ensure'], { timeoutMs: ENSURE_TIMEOUT_MS })
+        const own = await envText(() => $.env.get('AGENT_CORE_PYTHON')) // else python, then python3 (macOS, Linux); 9009: Windows Store stub
+        for (const py of own ? [own] : ['python', 'python3']) if (await $.process.run([py, `${$.plugin.root}/hooks/agent_core.py`, 'ensure'], { timeoutMs: ENSURE_TIMEOUT_MS }).then(r => r.exitCode !== 9009, () => false)) break
       } catch {} // the retry below finds out
       got = await attempt($, body)
     }

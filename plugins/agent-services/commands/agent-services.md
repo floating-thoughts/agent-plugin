@@ -1,32 +1,33 @@
 ---
 description: Sign in to agent-services, show its status, or sign out
 argument-hint: "[status | login <email> | code <email> <code> | logout | savings [preview | on | off | status] | connect <endpoint> <server key> [<next key>] e2e:<key> [e2e:<next key>]]"
-allowed-tools: Bash(python "${CLAUDE_PLUGIN_ROOT}/hooks/agent_core.py" *), Bash(python -m pip install --user cryptography)
+allowed-tools: Bash("${CLAUDE_PLUGIN_ROOT}/hooks/agent-core" *)
 ---
 
 Run the agent-services command line for the user. The entry point is
-`python "${CLAUDE_PLUGIN_ROOT}/hooks/agent_core.py"`; it starts the local service when needed and prints one JSON answer.
+`"${CLAUDE_PLUGIN_ROOT}/hooks/agent-core"` (a launcher that runs `hooks/agent_core.py` with the first Python 3.8+ it finds: `python`, then
+`python3`, then `py -3`); it starts the local service when needed and prints one JSON answer.
 
 The user's arguments: `$ARGUMENTS`
 
-- No arguments or `status`: run `python "${CLAUDE_PLUGIN_ROOT}/hooks/agent_core.py" status` and report whether the
+- No arguments or `status`: run `"${CLAUDE_PLUGIN_ROOT}/hooks/agent-core" status` and report whether the
   account is signed in, its plan and any notice, in one or two sentences.
-- `login <email>`: run `python "${CLAUDE_PLUGIN_ROOT}/hooks/agent_core.py" login start --email <email>`. A sign-in code
+- `login <email>`: run `"${CLAUDE_PLUGIN_ROOT}/hooks/agent-core" login start --email <email>`. A sign-in code
   is mailed to that address; ask the user for it, then continue as for `code`.
-- `code <email> <code>`: run `python "${CLAUDE_PLUGIN_ROOT}/hooks/agent_core.py" login finish --email <email> --code <code>`
+- `code <email> <code>`: run `"${CLAUDE_PLUGIN_ROOT}/hooks/agent-core" login finish --email <email> --code <code>`
   and report whether the sign-in worked. The plugin turns on once the service accepts the sign-in.
-- `logout`: run `python "${CLAUDE_PLUGIN_ROOT}/hooks/agent_core.py" logout` and confirm.
-- `savings`: run `python "${CLAUDE_PLUGIN_ROOT}/hooks/agent_core.py" savings` and report what the services saved so
+- `logout`: run `"${CLAUDE_PLUGIN_ROOT}/hooks/agent-core" logout` and confirm.
+- `savings`: run `"${CLAUDE_PLUGIN_ROOT}/hooks/agent-core" savings` and report what the services saved so
   far in one or two sentences. If it answers `service_off`, say that savings are worked out by the service from a daily
   usage summary this machine uploads only after the user turns it on, and offer `savings on`.
-- `savings on`: first run `python "${CLAUDE_PLUGIN_ROOT}/hooks/agent_core.py" savings preview` and show the user the
+- `savings on`: first run `"${CLAUDE_PLUGIN_ROOT}/hooks/agent-core" savings preview` and show the user the
   `body_text` it returns: that is exactly what one daily upload sends. Ask whether to turn the upload on; only on the
-  user's yes run `python "${CLAUDE_PLUGIN_ROOT}/hooks/agent_core.py" savings on` and confirm. Savings appear once a day
+  user's yes run `"${CLAUDE_PLUGIN_ROOT}/hooks/agent-core" savings on` and confirm. Savings appear once a day
   or more has been uploaded.
-- `savings off`: run `python "${CLAUDE_PLUGIN_ROOT}/hooks/agent_core.py" savings off` and confirm that nothing more is
-  uploaded. `savings status`: run `python "${CLAUDE_PLUGIN_ROOT}/hooks/agent_core.py" savings status` and report it.
+- `savings off`: run `"${CLAUDE_PLUGIN_ROOT}/hooks/agent-core" savings off` and confirm that nothing more is
+  uploaded. `savings status`: run `"${CLAUDE_PLUGIN_ROOT}/hooks/agent-core" savings status` and report it.
 - `connect <endpoint> <server key> [<next key>] e2e:<key> [e2e:<next key>]`: run
-  `python "${CLAUDE_PLUGIN_ROOT}/hooks/agent_core.py" connect --endpoint <endpoint> --server-key <server key>
+  `"${CLAUDE_PLUGIN_ROOT}/hooks/agent-core" connect --endpoint <endpoint> --server-key <server key>
   --e2e-key <key>` (one `--server-key` per plain key and one `--e2e-key` per key given with the `e2e:` prefix, the
   prefix removed; two of a kind only while the server rotates that key). It writes the service address, the server's
   public signing keys and its public encryption keys to `client.json`; the operator gives all of them. Without
@@ -36,10 +37,11 @@ The user's arguments: `$ARGUMENTS`
   credentials or content. A new endpoint, pin or key (a key rotation included) signs this machine out; the answer
   then says `"signed_out": true` with a notice: report it, then suggest `login`.
 
-Requires Python 3.8 or newer with the `cryptography` package (`python -m pip install --user cryptography`).
+Requires Python 3.8 or newer (as `python`, `python3` or `py -3`) with the `cryptography` package.
 
-If any step answers `missing_dependency`, tell the user the one command in its `detail`,
-`python -m pip install --user cryptography`, and ask before running it. Once the user agrees, run it yourself, then retry
+If any step answers `missing_dependency`, tell the user that the `cryptography` package is missing and that
+`"${CLAUDE_PLUGIN_ROOT}/hooks/agent-core" --install-cryptography` installs it into the same Python (the `detail` gives the
+equivalent pip command), and ask before running it. Once the user agrees, run it yourself, then retry
 the failed step once. Never install anything without the user's yes.
 
 Never print or repeat a token; the command line keeps tokens in the system key store and never shows them. If a command
