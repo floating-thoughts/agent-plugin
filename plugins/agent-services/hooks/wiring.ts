@@ -38,7 +38,7 @@ import { counterDays, countsOf, dayCountsFromStore, dayEmpty, normalizeDay } fro
 import { boardData, readOutboxDay, timelineOf, weeklyOf } from './board_facts'
 import { bandFacts, paused, setBandPanel, type BandFacts, type BandKind, type BandState } from './band'
 import { readOrg } from './org'
-import { accountOf, accountSwitched, uploadFloor, uploadOn } from './choice'
+import { accountOf, accountSwitched, readEntry, recordConsent, uploadFloor, uploadOn, writeEntry } from './choice'
 import { boardLines, heldPlan, panelLines, panelOf, refreshUsage, USAGE_DAYS_KEY, type Panel } from './panel'
 import { Scanner } from './transcripts'
 import { refreshToolDays, type ProcessRun } from './usage_tool'
@@ -471,6 +471,7 @@ export class Wiring {
    *  redrawn, so reset countdowns and figures move during a long turn, not only at its end. Never throws. */
   async tick(): Promise<void> {
     try {
+      void this.boss.sweep() // boss.ts: the company summary and board deleted when stale, signed out or not admin
       if (await this.authOk()) this.refreshPanel()
       await this.band()
     } catch {
@@ -870,6 +871,17 @@ export class Wiring {
     }
   }
 
+  /** The upload choice as a consent record on the server (choice.ts recordConsent); quiet, true when confirmed. */
+  private consent(granted: boolean): Promise<boolean> {
+    return recordConsent(this.d.store, granted, (b) =>
+      this.d.svc.call('POST', '/privacy/consent', b, { kind: 'daily', hook: 'background' }))
+  }
+
+  private async forgetConsent(): Promise<void> {
+    const { entry } = await readEntry(this.d.store)
+    if (entry.consent === true) await writeEntry(this.d.store, { consent: undefined })
+  }
+
   /** Metrics.tick (background, at session start and once a day after): upload every due active day up to yesterday,
    * oldest first. */
   async metricsTick(): Promise<TickResult> {
@@ -882,6 +894,9 @@ export class Wiring {
       return { skipped: 'inactive' }
     }
     const settings = await this.settings()
+    const { entry } = await readEntry(this.d.store)
+    // a withdrawal ("off") the server did not confirm yet is sent again, while nothing is uploaded
+    if (entry.record === 'off' && entry.consent !== false && !settings.offline) await this.consent(false)
     if (!(await uploadOn(this.d.store))) return { sent: [], error: 'not_answered' } // the record first: no upload, no back-fill
     if (settings.services.metrics !== true) return { sent: [], error: 'service_off' }
     if (settings.offline) return { sent: [], error: 'offline' }
@@ -897,6 +912,9 @@ export class Wiring {
       const first = start < floor ? floor : start
       const st = start < floor ? { ...saved, last_uploaded_day: plusDays(floor, -1) } : saved
       if (first > yesterday) return { sent: [], error: null }
+      // 0.7.9: the server takes a day only with a granted consent record; a yes not recorded yet (one given before
+      // 0.7.9, or a failed call) is recorded once first, and nothing is uploaded today when that fails
+      if (entry.consent !== true && !(await this.consent(true))) return { sent: [], error: 'consent_failed' }
       // only the transcripts changed since the first day to send began: the same figures, far less to parse
       const facts = await this.facts({ since: new Date(`${first}T00:00:00`).getTime() }, true)
       const withCounts = new Set<string>()
@@ -927,7 +945,11 @@ export class Wiring {
           const { time: _time, ...rest } = body
           r = await this.d.svc.call('POST', DAILY_ROUTE, rest, { kind: 'daily', hook: 'background' })
         }
-        if (!r.ok) return { sent, error: r.error || 'failed' }
+        if (!r.ok) {
+          // the server holds no consent record: record the yes again before the next upload (quietly, no retry now)
+          if (r.error === 'consent_missing') await this.forgetConsent()
+          return { sent, error: r.error || 'failed' }
+        }
         sent.push(day)
         await this.saveState({ last_uploaded_day: day })
       }

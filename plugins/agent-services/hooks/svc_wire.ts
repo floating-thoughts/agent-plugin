@@ -199,10 +199,12 @@ export function defaultKind(path: string): Kind {
   return 'daily'
 }
 
-/** Metrics routes that upload nothing stay usable with the metrics switch off. */
+/** Metrics routes that upload nothing stay usable with the metrics switch off (the consent record included: a
+ * withdrawal must reach the server whatever the switch says). */
 export function ungated(route: any): boolean {
   if (route['x-inventory']?.service !== 'metrics') return false
-  return route.method === 'GET' || route.method === 'DELETE' || (route.method === 'POST' && ['/metrics/weekly-mail', '/org/summary-mail'].includes(route.path))
+  return route.method === 'GET' || route.method === 'DELETE' ||
+    (route.method === 'POST' && ['/metrics/weekly-mail', '/org/summary-mail', '/privacy/consent'].includes(route.path))
 }
 
 export function servedProps(route: any): string[] {

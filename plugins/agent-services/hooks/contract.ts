@@ -6,7 +6,7 @@ export type ToolSpec = {
   input_schema: Record<string, unknown>
 }
 
-export const CONTRACT_SHA256 = "d3f0b27c3ff19152cb78eb8b1ca375a09ece698824a97088eaacd4d0a1dfaa73"
+export const CONTRACT_SHA256 = "47b1b6cd71ab3bd84cf1cff47cd573f4200abd97ef79c474f95113f6985e4c5b"
 
 export const API = "svc/1" as const
 export const PREFIX = "/svc/v1" as const
@@ -696,7 +696,7 @@ export const CONTRACT = {
   },
   "OrgSummary": {
    "type": "object",
-   "description": "Company board: the org's reported week (the last complete ISO week, UTC, the week the weekly mails report) for an org admin. total_usd = the sum of the people's savings, each rounded to cents; prev_usd = the same people's savings the week before, null with no measured day that week; people = every member, measured first (highest saving first, then by email), then the members with no measured day that week (usd null, shown as no data yet), by email; devices = distinct devices with an active sign-in; seats_paid null = no seat limit; summary_mail = the weekly org summary mail setting; mail_to = its address, masked, or null when none is set",
+   "description": "Company board: the org's reported week (the last complete ISO week, UTC, the week the weekly mails report) for an org admin. total_usd = the sum of the people's savings, each rounded to cents; prev_usd = the same people's savings the week before, null with no measured day that week; people = every member, ordered by email only, never by figure (DPIA P7; usd null = no measured day that week, shown as no data yet), and empty in the totals view; devices = distinct devices with an active sign-in; seats_paid null = no seat limit; summary_mail = the weekly org summary mail setting; mail_to = its address, masked, or null when none is set; view = the company's board view: totals (the default for new companies: only the total and with_data, no per-person row) or members; with_data = how many members have a measured day that week",
    "properties": {
     "org": {
      "type": "string",
@@ -811,6 +811,17 @@ export const CONTRACT = {
        "type": "null"
       }
      ]
+    },
+    "view": {
+     "enum": [
+      "totals",
+      "members"
+     ]
+    },
+    "with_data": {
+     "type": "integer",
+     "minimum": 0,
+     "maximum": 1000000
     }
    },
    "required": [
@@ -824,13 +835,15 @@ export const CONTRACT = {
     "paused",
     "savings",
     "summary_mail",
-    "mail_to"
+    "mail_to",
+    "view",
+    "with_data"
    ],
    "additionalProperties": false
   },
   "OrgMe": {
    "type": "object",
-   "description": "A member's own view (R064): what the company admin's board (OrgSummary) shows about the caller, taken from that same answer, and the company settings that apply to them; never another member's row. in_org false (and every other field null, admin false) = the account is in no company account. you = the caller's row of OrgSummary.people (usd null = no data yet), null only if the board has no row for the caller; week = OrgSummary.week; admin = the caller is an active admin of the company",
+   "description": "A member's own view (R064): what the company admin's board (OrgSummary) shows about the caller, taken from that same answer, and the company settings that apply to them; never another member's row. in_org false (and every other field null, admin false) = the account is in no company account. you = the caller's row of OrgSummary.people (usd null = no data yet), null only if the board has no row for the caller; week = OrgSummary.week; admin = the caller is an active admin of the company; view = the company's board view (OrgSummary.view; in totals the board has no row for anyone, so you is null), null outside a company",
    "properties": {
     "in_org": {
      "type": "boolean"
@@ -934,6 +947,19 @@ export const CONTRACT = {
        "type": "null"
       }
      ]
+    },
+    "view": {
+     "anyOf": [
+      {
+       "enum": [
+        "totals",
+        "members"
+       ]
+      },
+      {
+       "type": "null"
+      }
+     ]
     }
    },
    "required": [
@@ -943,7 +969,8 @@ export const CONTRACT = {
     "week",
     "you",
     "paused",
-    "savings"
+    "savings",
+    "view"
    ],
    "additionalProperties": false
   },
@@ -953,7 +980,7 @@ export const CONTRACT = {
     "on",
     "off"
    ],
-   "description": "The org admin's savings-record choice (each = each person decides; on or off = for everyone). The POST /auth/hello answer carries it as {\"org\": {\"savings\": <this>}} for an account in an org, only to a shell release 0.3.0 or later (an older shell, and a dev shell, may refuse an unknown key). For an active org admin (account role admin) the field is {\"savings\": <this>, \"admin\": true}, only to a shell release 0.4.0 or later. 423 org_paused answers every signed request and the sign-in while the org's admin has paused the org; sign-out still works"
+   "description": "The org admin's savings-record choice (each = each person decides; on or off = for everyone). The POST /auth/hello answer carries it as {\"org\": {\"savings\": <this>}} for an account in an org, only to a shell release 0.3.0 or later (an older shell, and a dev shell, may refuse an unknown key). For an active org admin (account role admin) the field is {\"savings\": <this>, \"admin\": true}, only to a shell release 0.4.0 or later. A shell release 0.8.0 or later also gets \"view\" (totals | members, OrgSummary.view) and \"has_admin\" (true when someone sees the company board or mail: an admin account or a summary address), so the member's plugin can say once what the admin sees. 423 org_paused answers every signed request and the sign-in while the org's admin has paused the org; sign-out still works"
   },
   "PackTarget": {
    "enum": [
@@ -2897,7 +2924,9 @@ export const CONTRACT = {
    "errors": {
     "403": [
      "service_off",
-     "not_in_plan"
+     "not_in_plan",
+     "consent_withdrawn",
+     "consent_missing"
     ],
     "422": [
      "bad_request",
@@ -3118,6 +3147,73 @@ export const CONTRACT = {
    }
   },
   {
+   "method": "POST",
+   "path": "/privacy/consent",
+   "request": {
+    "type": "object",
+    "properties": {
+     "purpose": {
+      "enum": [
+       "usage_upload"
+      ],
+      "description": "the plugin records only the savings record's upload choice"
+     },
+     "granted": {
+      "type": "boolean",
+      "description": "true = the person turned the daily upload on; false = turned it off"
+     }
+    },
+    "required": [
+     "purpose",
+     "granted"
+    ],
+    "additionalProperties": false
+   },
+   "responses": {
+    "200": {
+     "type": "object",
+     "properties": {
+      "purpose": {
+       "type": "string",
+       "maxLength": 40
+      },
+      "granted": {
+       "type": "boolean"
+      },
+      "text_version": {
+       "type": "string",
+       "maxLength": 32
+      }
+     },
+     "required": [
+      "purpose",
+      "granted"
+     ],
+     "additionalProperties": false
+    }
+   },
+   "errors": {
+    "400": [
+     "bad_json"
+    ],
+    "422": [
+     "bad_request"
+    ],
+    "429": [
+     "rate_limited"
+    ]
+   },
+   "x-inventory": {
+    "service": "metrics",
+    "purpose": "record the person's daily-upload choice on the server as a consent record (granted or withdrawn), so the server refuses uploads without it",
+    "default": "sent when the person changes the savings record (on or off), and once before the first upload when the server has no record of an earlier yes",
+    "retention": "one row per change (account id, purpose, granted, time, text version), kept as proof for 3 years; audit record 13 months",
+    "sent_to": [
+     "our_service"
+    ]
+   }
+  },
+  {
    "method": "GET",
    "path": "/org/summary",
    "request": null,
@@ -3134,7 +3230,7 @@ export const CONTRACT = {
    },
    "x-inventory": {
     "service": "metrics",
-    "purpose": "the company admin's board: the company's savings last week, each person's figure and devices, seats, pause and savings settings; sends no content",
+    "purpose": "the company admin's board: the company's savings last week, each person's figure and devices or only the totals (the company's board view), seats, pause and savings settings; sends no content",
     "default": "only for an account the operator made its company's admin; fetched for the admin's private board while the board is allowed",
     "retention": "nothing stored; access log 30 days",
     "sent_to": [

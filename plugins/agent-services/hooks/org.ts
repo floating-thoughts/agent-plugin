@@ -14,6 +14,11 @@
 //   choice once (orgNotice). An answer without "org" (no company, or an older server) drops KEYS.org.
 // - Company admin: the org field also carries "admin": true for the company's admin; it is kept as `admin: true` in
 //   the org state (orgAdmin), and boss.ts then renders and publishes the company board.
+// - What the admin sees (shell 0.8.0 and later): the org field also carries "view" ("totals" | "members", the
+//   company's board view) and "has_admin" (someone sees the company board or its weekly email). keepOrg keeps both.
+//   For a company with an admin, orgNotice says once (and again when the view changes) what that admin sees about
+//   the member: their email address, savings estimate and device count, or company totals only (adminSees). The
+//   upload question (sharingQuestion) carries the same line, so it is said before anything is uploaded.
 import { CONTRACT } from './contract'
 import { KEYS, safeDelete, safeGet, safeSet } from './store'
 import type { KV } from './store'
@@ -22,6 +27,8 @@ export const ORG_PAUSED_LINE = 'Your company has paused agent-services. Ask your
 export const ORG_SAVINGS: readonly string[] = (CONTRACT as any).definitions.OrgSavings.enum
 export const ORG_ADMIN_SEES = "Your company's admin sees each member's email address, how many devices each member " +
   "is signed in on, and each member's weekly savings figure (\"no data yet\" while that member uploads nothing)."
+export const ORG_ADMIN_TOTALS = "Your company's admin sees only company totals: the total weekly savings estimate " +
+  'and how many members have figures, not any one member\'s email address, figure or devices.'
 export const ORG_SAVINGS_TEXT: Readonly<Record<string, string>> = {
   on: `Your company's admin turned the savings record on for your company and recommends it. Nothing of yours is ` +
     `uploaded until you choose: /agent-services setup asks "Upload, including the past 30 days", "Upload from now on ` +
@@ -33,15 +40,35 @@ export const ORG_SET_TEXT = 'Your company turned the daily upload off for everyo
   'your admin. Your private savings page stays yours: /agent-services sharing page on|off.'
 
 export type OrgSavings = 'each' | 'on' | 'off'
-export type OrgState = { savings: OrgSavings; at: number; told: OrgSavings | null; since?: number; admin?: true }
+export type OrgView = 'totals' | 'members'
+export type OrgState = {
+  savings: OrgSavings
+  at: number
+  told: OrgSavings | null
+  since?: number
+  admin?: true
+  view?: OrgView // shell 0.8.0: the company's board view
+  has_admin?: boolean // shell 0.8.0: someone sees the company board or its weekly email
+  told_admin?: OrgView // the view the admin line was last said for (orgNotice)
+}
+const isView = (v: unknown): v is OrgView => v === 'totals' || v === 'members'
 
 const isObj = (v: unknown): v is Record<string, any> => typeof v === 'object' && v !== null && !Array.isArray(v)
 
-/** The hello answer's "org" field is well formed: exactly {"savings": <OrgSavings>}, plus "admin": true. */
+/** The hello answer's "org" field is well formed: {"savings": <OrgSavings>}, plus "admin": true, plus (shell 0.8.0)
+ * "view" and "has_admin" together; no other key. */
 export function validOrg(v: unknown): boolean {
   if (!isObj(v) || !ORG_SAVINGS.includes(v.savings)) return false
-  const keys = Object.keys(v).sort().join(',')
-  return keys === 'savings' || (keys === 'admin,savings' && v.admin === true)
+  if ('admin' in v && v.admin !== true) return false
+  if ('view' in v || 'has_admin' in v) {
+    if (!isView(v.view) || typeof v.has_admin !== 'boolean') return false
+  }
+  return Object.keys(v).every((k) => ['savings', 'admin', 'view', 'has_admin'].includes(k))
+}
+
+/** What the company admin sees about this member, in one sentence: totals only, or the member's own row. */
+export function adminSees(o: OrgState | null): string {
+  return o?.view === 'totals' ? ORG_ADMIN_TOTALS : ORG_ADMIN_SEES
 }
 
 /** The stored org state, or null (no company, or unreadable). */
@@ -51,6 +78,9 @@ export async function readOrg(kv: KV): Promise<OrgState | null> {
   const told = ORG_SAVINGS.includes(v.told) ? v.told : null
   const o: OrgState = { savings: v.savings, at: v.at, told }
   if (typeof v.since === 'number') o.since = v.since
+  if (isView(v.view)) o.view = v.view
+  if (typeof v.has_admin === 'boolean') o.has_admin = v.has_admin
+  if (isView(v.told_admin)) o.told_admin = v.told_admin
   return v.admin === true ? { ...o, admin: true } : o
 }
 
@@ -76,11 +106,14 @@ export async function keepOrg(kv: KV, org: unknown, now: number, setMetrics: (on
       if (prev?.savings === 'off') await setMetrics(true)
       return
     }
-    const { savings, admin } = org as { savings: OrgSavings; admin?: true }
+    const { savings, admin, view, has_admin } = org as { savings: OrgSavings; admin?: true; view?: OrgView; has_admin?: boolean }
     const told = prev && prev.savings === savings ? prev.told : null
     // since: the first time this choice was seen (kept for the status; the upload floor is the member's own answer)
     const since = prev && prev.savings === savings && typeof prev.since === 'number' ? prev.since : now
     const state: OrgState = { savings, at: now, told, since }
+    if (view !== undefined) state.view = view
+    if (has_admin !== undefined) state.has_admin = has_admin
+    if (prev?.told_admin !== undefined) state.told_admin = prev.told_admin
     await safeSet(kv, KEYS.org, admin === true ? { ...state, admin } : state)
     if (savings === 'off') await setMetrics(false)
     else if (prev?.savings === 'off') await setMetrics(true)
@@ -89,12 +122,23 @@ export async function keepOrg(kv: KV, org: unknown, now: number, setMetrics: (on
   }
 }
 
-/** The one-time line about the company's choice: the text the first time a choice is seen, then null. */
+/** The one-time line about the company's choice: the text the first time a choice is seen, then null. For a company
+ * with an admin (has_admin), the line saying what that admin sees is also said once, and again when the view
+ * changes; the "on" text carries it already. */
 export async function orgNotice(kv: KV): Promise<string | null> {
   const o = await readOrg(kv)
-  if (!o || o.savings === 'each' || o.told === o.savings) return null
-  if (!(await safeSet(kv, KEYS.org, { ...o, told: o.savings }))) return null
-  return ORG_SAVINGS_TEXT[o.savings] ?? null
+  if (!o) return null
+  const view: OrgView = o.view ?? 'members'
+  if (o.savings !== 'each' && o.told !== o.savings) {
+    const told_admin = o.savings === 'on' ? view : o.told_admin
+    if (!(await safeSet(kv, KEYS.org, { ...o, told: o.savings, ...(told_admin ? { told_admin } : {}) }))) return null
+    const text = ORG_SAVINGS_TEXT[o.savings] ?? null
+    return text && o.savings === 'on' ? text.replace(ORG_ADMIN_SEES, adminSees(o)) : text
+  }
+  if (o.has_admin !== true || o.savings === 'off' || o.told_admin === view) return null
+  if (!(await safeSet(kv, KEYS.org, { ...o, told_admin: view }))) return null
+  return `Your company has an agent-services admin. ${adminSees(o)} Your own upload choice decides what is sent ` +
+    '(/agent-services sharing).'
 }
 
 /** The savings question, with the admin line for a person in a company; under a company "on" it first says the
@@ -102,7 +146,7 @@ export async function orgNotice(kv: KV): Promise<string | null> {
 export async function sharingQuestion(kv: KV, question: string): Promise<string> {
   const o = await readOrg(kv)
   if (o && o.savings === 'on') {
-    return `Your company's admin turned the savings record on and recommends it. ${question} ${ORG_ADMIN_SEES}`
+    return `Your company's admin turned the savings record on and recommends it. ${question} ${adminSees(o)}`
   }
-  return o && o.savings === 'each' ? `${question} ${ORG_ADMIN_SEES}` : question
+  return o && o.savings === 'each' && o.has_admin !== false ? `${question} ${adminSees(o)}` : question
 }
