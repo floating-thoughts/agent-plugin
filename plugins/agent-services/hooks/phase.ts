@@ -1,3 +1,4 @@
+import type { EngineInterface } from 'claude-code'
 import { isAbsPath, normPath, normpath } from './paths'
 import { canAsk } from './choice'
 import { levelNow, methodsActive, queueNotice, seenVersion } from './methods'
@@ -94,15 +95,47 @@ export function writeDeny(tool: unknown, input: Obj, cwd: string, text: string |
   return fillReason(v.reason, cwd)
 }
 
+export type GatePlaces = { homes: string[]; temps: string[]; configDir: string | null }
+
+const placeKey = (p: string): string => normpath(normPath(p)).replace(/\/+$/, '').toLowerCase()
+const within = (k: string, dir: string): boolean => !!dir && (k === dir || k.startsWith(`${dir}/`))
+
+export function notProject(dir: string, places?: GatePlaces | null): 'root' | 'home' | 'temp' | 'config' | null {
+  const k = placeKey(dir)
+  if (!k || k === '.' || /^(?:[a-z]:)?\/?$/.test(k)) return 'root'
+  const homes = (places?.homes ?? []).filter(Boolean).map(placeKey)
+  const configs = [...homes.map((h) => `${h}/.claude`), ...(places?.configDir ? [placeKey(places.configDir)] : [])]
+  if (configs.some((c) => within(k, c)) || /^(?:(?:[a-z]:)?\/(?:users|home)\/[^/]+|\/root)\/\.claude(?:\/|$)/.test(k)) return 'config'
+  if (homes.includes(k) || /^(?:(?:[a-z]:)?\/(?:users|home)\/[^/]+|\/root)$/.test(k)) return 'home'
+  if ((places?.temps ?? []).filter(Boolean).some((t) => placeKey(t) === k)) return 'temp'
+  if (/^(?:[a-z]:)?(?:\/private)?(?:\/var)?\/tmp$/.test(k) || /\/appdata\/local\/temp$/.test(k) || /^[a-z]:\/windows\/temp$/.test(k)) return 'temp'
+  return null
+}
+
+export async function gatePlaces($: EngineInterface): Promise<GatePlaces> {
+  const env = async (read: () => unknown): Promise<string> => {
+    try {
+      return String((await read()) ?? '').trim()
+    } catch {
+      return ''
+    }
+  }
+  const homes = [await env(() => $.env.get('HOME')), await env(() => $.env.get('USERPROFILE'))].filter(Boolean)
+  const temps = [await env(() => $.env.get('TEMP')), await env(() => $.env.get('TMP')), await env(() => $.env.get('TMPDIR'))].filter(Boolean)
+  const cfg = await env(() => $.env.get('CLAUDE_CONFIG_DIR'))
+  return { homes, temps, configDir: cfg || null }
+}
+
 export type GateDeps = {
   active(): Promise<boolean>
   cwd(): Promise<string | null>
   read: Read
   ask?: AskGate | null
   level?: GateLevel
+  places?: () => Promise<GatePlaces | null>
 }
 
-type Check = { why: string | null; small: number | null }
+type Check = { why: string | null; small: number | null; where?: string }
 
 async function gateCheck(tool: unknown, input: Obj, d: GateDeps): Promise<Check> {
   const none: Check = { why: null, small: null }
@@ -111,23 +144,38 @@ async function gateCheck(tool: unknown, input: Obj, d: GateDeps): Promise<Check>
     if (!(await d.active())) return none
     const start = await d.cwd()
     if (typeof start !== 'string' || !start) return none
-    let cwd = trimDir(start)
-    let text = await d.read(statePath(cwd))
+    let places: GatePlaces | null = null
+    try {
+      places = d.places ? await d.places() : null
+    } catch {
+      places = null
+    }
+    const here = trimDir(start)
+    const target = input.file_path ?? input.notebook_path ?? input.path
+    if (typeof target === 'string' && target) {
+      const t = normPath(target)
+      if (notProject(normpath(isAbsPath(t) ? t : `${here}/${t}`), places) === 'config') return none
+    }
+    let cwd = here
+    let text = notProject(cwd, places) ? null : await d.read(statePath(cwd))
     for (let dir = cwd, i = 0; text === null && i < 8; i++) {
       const up = dir.replace(/\/[^/]*$/, '')
       if (!up || up === dir || !up.includes('/')) break
       dir = up
+      if (notProject(dir, places)) continue
       const t = await d.read(statePath(dir))
       if (t !== null) { cwd = dir; text = t }
     }
-    const target = input.file_path ?? input.notebook_path ?? input.path
+    if (notProject(cwd, places)) return none
     if (isStatePath(target, cwd)) return none
     const full = typeof target === 'string'
       ? normpath(isAbsPath(normPath(target)) ? normPath(target) : `${cwd}/${normPath(target)}`) : null
     if (full !== null && !`${full.toLowerCase()}/`.startsWith(`${normpath(cwd).toLowerCase()}/`)) return none
     const level = d.level ?? 'on'
     const v = await askVerdict(gateState(parseState(text), level), d.ask ?? null)
-    return { why: writeDeny(tool, input, cwd, text, level), small: v ? v.small_edit_lines : null }
+    const where = cwd === here ? undefined
+      : `Project folder: ${cwd} (the nearest folder above the working directory ${here} that has agent-state.md).`
+    return { why: writeDeny(tool, input, cwd, text, level), small: v ? v.small_edit_lines : null, where }
   } catch {
     return none
   }
@@ -167,7 +215,8 @@ function askOf(r: { session?: unknown; core?: { servedGate?(session: unknown, st
 
 const reminders = new WeakMap<object, { due: string } | 'told'>()
 
-export async function holdWrite(rt: Promise<Runtime>, tool: unknown, input: Obj, cwd: () => Promise<string>, agent?: unknown): Promise<string | null> {
+export async function holdWrite(rt: Promise<Runtime>, tool: unknown, input: Obj, cwd: () => Promise<string>, agent?: unknown,
+  places?: () => Promise<GatePlaces | null>): Promise<string | null> {
   if (agent || typeof tool !== 'string' || !WRITE_TOOLS.includes(tool)) return null
   try {
     const r = await rt
@@ -186,12 +235,14 @@ export async function holdWrite(rt: Promise<Runtime>, tool: unknown, input: Obj,
       read: r.readText,
       ask: askOf(r),
       level,
+      places,
     })
     const late: Check = { why: null, small: null }
     const got = await Promise.race([gate, Promise.resolve(r.sleep(PHASE_WAIT_MS)).then(() => late, () => late)])
     if (got.why === null) return null
-    if (level === 'on') return smallEdit(tool, input, got.small) ? null : got.why
-    if (!reminders.has(r)) reminders.set(r, { due: got.why })
+    const why = got.where ? `${got.why}\n\n${got.where}` : got.why
+    if (level === 'on') return smallEdit(tool, input, got.small) ? null : why
+    if (!reminders.has(r)) reminders.set(r, { due: why })
     return null
   } catch {
     return null

@@ -9,7 +9,28 @@ type Raw = { kind: 'absent' } | { kind: 'error' } | { kind: 'big' } | { kind: 't
 
 const slashed = (p: string): string => p.replace(/\\/g, '/').replace(/\/+$/, '')
 const iso = (ms: number): string => new Date(ms).toISOString()
-const NO_PROJECT = 'No project folder was found (this is the home folder, a temp folder or a drive root); nothing was written. Open the session in a project folder, or add agent-state.md to one.'
+const NO_PROJECT = 'No project folder was found (the session\'s folder could not be read); nothing was written. Open the session in a project folder, or add agent-state.md to one.'
+
+export type Refusal = { dir: string; kind: 'home' | 'temp' | 'root' }
+
+export function errorBrief(err: unknown, mask?: Mask): string {
+  try {
+    const name = String((err as any)?.name || (err as any)?.constructor?.name || typeof err).slice(0, 40)
+    if (!mask) return name
+    const msg = mask(String((err as any)?.message ?? err ?? '')).replace(/\s+/g, ' ').trim().slice(0, 120)
+    return msg ? `${name}: ${msg}` : name
+  } catch {
+    return 'Error'
+  }
+}
+
+export function refusalText(r: Refusal, stale: boolean, verb: 'written' | 'read' = 'written'): string {
+  const shown = /^[A-Za-z]:$/.test(r.dir) || !r.dir ? `${r.dir}/` : r.dir
+  const what = r.kind === 'home' ? 'your home folder' : r.kind === 'temp' ? 'a temp folder' : 'a drive root'
+  const path = taskStatePaths(r.dir).json
+  return `No project folder was found: ${shown} is ${what}, and task state is kept only inside a project folder; nothing was ${verb}. ` +
+    `Run this from the project folder${stale ? `. A stale record from an older version exists at ${path}; the plugin no longer reads it here, so close it by editing that file by hand if needed` : ''}.`
+}
 
 export async function projectDir($: EngineInterface, start?: string): Promise<string | null> {
   try {
@@ -28,9 +49,13 @@ export async function projectDir($: EngineInterface, start?: string): Promise<st
 }
 
 export async function projectWriteDir($: EngineInterface, start?: string): Promise<string | null> {
+  return (await writeTarget($, start)).dir
+}
+
+export async function writeTarget($: EngineInterface, start?: string): Promise<{ dir: string | null; refused: Refusal | null }> {
   try {
     const dir = await projectDir($, start)
-    if (!dir) return null
+    if (!dir) return { dir: null, refused: null }
     const key = (p: string): string => slashed(p).toLowerCase()
     const env = async (read: () => unknown): Promise<string> => {
       try {
@@ -42,12 +67,25 @@ export async function projectWriteDir($: EngineInterface, start?: string): Promi
     const homes = [await env(() => $.env.get('HOME')), await env(() => $.env.get('USERPROFILE'))]
     const temps = [await env(() => $.env.get('TEMP')), await env(() => $.env.get('TMP')), await env(() => $.env.get('TMPDIR'))]
     const k = key(dir)
-    if (!k || /^(?:[a-z]:)?$/.test(k)) return null
-    if ([...homes, ...temps].some((h) => h && key(h) === k)) return null
-    if (/^(?:[a-z]:)?(?:\/private)?(?:\/var)?\/tmp$/.test(k) || /\/appdata\/local\/temp$/.test(k) || /^[a-z]:\/windows\/temp$/.test(k)) return null
-    return dir
+    const no = (kind: Refusal['kind']) => ({ dir: null, refused: { dir: slashed(dir), kind } })
+    if (!k || /^(?:[a-z]:)?$/.test(k)) return no('root')
+    if (homes.some((h) => h && key(h) === k)) return no('home')
+    if (temps.some((h) => h && key(h) === k)) return no('temp')
+    if (/^(?:[a-z]:)?(?:\/private)?(?:\/var)?\/tmp$/.test(k) || /\/appdata\/local\/temp$/.test(k) || /^[a-z]:\/windows\/temp$/.test(k)) return no('temp')
+    return { dir, refused: null }
   } catch {
-    return null
+    return { dir: null, refused: null }
+  }
+}
+
+export async function noProjectNote($: EngineInterface, start?: string, verb: 'written' | 'read' = 'written'): Promise<string> {
+  try {
+    const t = await writeTarget($, start)
+    if (!t.refused) return NO_PROJECT
+    const stale = !!(await $.fs.exists(taskStatePaths(t.refused.dir).json).catch(() => false))
+    return refusalText(t.refused, stale, verb)
+  } catch {
+    return NO_PROJECT
   }
 }
 
@@ -76,10 +114,11 @@ async function readRaw($: EngineInterface, path: string): Promise<Raw> {
   }
 }
 
-export async function loadTaskState($: EngineInterface, opts: { start?: string } = {}): Promise<{ dir: string | null; state: TaskState | null; error: string | null }> {
+export async function loadTaskState($: EngineInterface, opts: { start?: string } = {}): Promise<{ dir: string | null; state: TaskState | null; error: string | null; refused?: Refusal | null }> {
   try {
-    const dir = await projectDir($, opts.start)
-    if (!dir) return { dir: null, state: null, error: null }
+    const t = await writeTarget($, opts.start)
+    const dir = t.dir
+    if (!dir) return { dir: null, state: null, error: null, refused: t.refused }
     const raw = await readRaw($, taskStatePaths(dir).json)
     if (raw.kind === 'absent') return { dir, state: null, error: null }
     if (raw.kind === 'big') return { dir, state: null, error: 'oversize' }
@@ -102,7 +141,7 @@ export async function updateTaskState(
     const nowMs = opts.now ?? Date.now()
     const now = iso(nowMs)
     const dir = await projectWriteDir($, opts.start)
-    if (!dir) return { state: null, wrote: false, note: null }
+    if (!dir) return { state: null, wrote: false, note: await noProjectNote($, opts.start) }
     const paths = taskStatePaths(dir)
     const first = await readRaw($, paths.json)
     if (first.kind === 'error') return { state: null, wrote: false, note: `${paths.json} could not be read; nothing was changed.` }
@@ -160,9 +199,9 @@ export async function updateTaskState(
       note = `${note ? `${note} ` : ''}The task state was saved, but ${paths.md} could not be updated.`
     }
     return { state: wrote, wrote: true, note }
-  } catch {
-    if (wrote) return { state: wrote, wrote: true, note: `${note ? `${note} ` : ''}The task state was saved, but a later step failed.` }
-    return { state: null, wrote: false, note: 'The task state could not be written.' }
+  } catch (err) {
+    if (wrote) return { state: wrote, wrote: true, note: `${note ? `${note} ` : ''}The task state was saved, but a later step failed (${errorBrief(err)}).` }
+    return { state: null, wrote: false, note: `The task state could not be written (${errorBrief(err)}); carry on without it.` }
   }
 }
 
@@ -179,6 +218,7 @@ export async function taskStateOp(
     if (!isWriteOp(i.op)) {
       if (i.op !== 'read') return applyOp(emptyState(ctx.now), i, ctx).answer
       const got = await loadTaskState($, { start: opts.start })
+      if (!got.state && got.refused) return await noProjectNote($, opts.start, 'read')
       if (!got.state) return got.error ? `The task state could not be read (${got.error}).` : `No task state is recorded for this project yet${got.dir ? ` (${taskStatePaths(got.dir).json})` : ''}.`
       return resumeNote(got.state, { mdPath: taskStatePaths(got.dir!).md }) || 'No open items in the task state.'
     }
@@ -192,17 +232,17 @@ export async function taskStateOp(
       const got = await loadTaskState($, { start: opts.start })
       if (!got.state && !got.error) return 'Noted: no task state is recorded here, so nothing is waiting on a keep-going answer; nothing was written.'
     }
-    if (!(await projectWriteDir($, opts.start))) return NO_PROJECT
+    if (!(await projectWriteDir($, opts.start))) return await noProjectNote($, opts.start)
     let answer = ''
     const r = await updateTaskState($, (s) => {
       const res = applyOp(s, i, ctx)
       answer = res.answer
       return res.changed ? res.state : null
     }, { create: true, start: opts.start, now: nowMs })
-    if (r.state === null) return r.note ?? 'The task state could not be changed; carry on without it.'
+    if (r.state === null) return r.note ?? 'The task state was not changed (no cause was reported); carry on without it.'
     return r.note ? `${answer} ${r.note}` : answer
-  } catch {
-    return 'The task state could not be changed; carry on without it.'
+  } catch (err) {
+    return `The task state could not be changed (${errorBrief(err, opts.mask)}); carry on without it.`
   }
 }
 
@@ -263,8 +303,8 @@ export async function writeChecked(
       return { answer: r.answer, wrote: true, ok: true }
     }
     return { answer: `Not written: ${name} was changed by another writer while this op ran; run the op again.`, wrote: false, ok: false }
-  } catch {
-    return { answer: `${name} could not be written; carry on without it.`, wrote: false, ok: false }
+  } catch (err) {
+    return { answer: `${name} could not be written (${errorBrief(err)}); carry on without it.`, wrote: false, ok: false }
   }
 }
 
@@ -297,7 +337,7 @@ export async function projectFileOp(
 ): Promise<{ answer: string; ran: boolean; dir: string | null }> {
   try {
     const dir = await projectWriteDir($, opts.start)
-    if (!dir) return { answer: NO_PROJECT, ran: false, dir: null }
+    if (!dir) return { answer: await noProjectNote($, opts.start), ran: false, dir: null }
     const date = iso(opts.now ?? Date.now()).slice(0, 10)
     const op = String(input.op ?? '')
     if (op.startsWith('plan_')) {
@@ -315,7 +355,7 @@ export async function projectFileOp(
     if ('refuse' in made) return { answer: made.refuse, ran: false, dir }
     const r = await writeChecked($, `${dir}/.agent/lessons.md`, (old) => ({ text: appendLines(old, [made.line], true), answer: `Appended to .agent/lessons.md: ${made.line}` }), { append: true })
     return { answer: r.answer, ran: r.wrote, dir }
-  } catch {
-    return { answer: 'The project file could not be written; carry on without it.', ran: false, dir: null }
+  } catch (err) {
+    return { answer: `The project file could not be written (${errorBrief(err, opts.mask)}); carry on without it.`, ran: false, dir: null }
   }
 }

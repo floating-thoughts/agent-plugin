@@ -6,7 +6,7 @@ import { publishBoards } from './boss'
 import { briefed, flowAfter, flowLock, flowPrompt, flowStart, flowTurnEnd, installFlow, withPending } from './flow'
 import { Guard } from './guard'
 import { FLUSH_EVERY_MS, Outbox } from './outbox'; import { PANEL_EVERY_MS } from './panel'
-import { holdWrite, methodsStart, pushAgain, pushLessons, pushStart } from './phase'
+import { gatePlaces, holdWrite, methodsStart, pushAgain, pushLessons, pushStart } from './phase'
 import { PRICES } from './prices'
 import { engineStore, type KV } from './store'
 import { Svc, type HttpAnswer } from './svc'
@@ -273,7 +273,7 @@ export const register: Register = (on) => {
   })
 
   on('tool.call', async ($, e: Ev, next) => {
-    let rule = 'webmail'; const held = (await mailGate(e)) ?? ((rule = 'no_tools'), noToolsDeny(e)) ?? ((rule = 'plan_hold'), await holdWrite(ready($), e.tool, toolInput(e), () => $.session.cwd(), e.agentId)) ?? ((rule = 'project_lock'), await flowLock($, e, ready($))) ?? (await budgetCheck($, e, ready($)))
+    let rule = 'webmail'; const held = (await mailGate(e)) ?? ((rule = 'no_tools'), noToolsDeny(e)) ?? ((rule = 'plan_hold'), await holdWrite(ready($), e.tool, toolInput(e), () => $.session.cwd(), e.agentId, () => gatePlaces($))) ?? ((rule = 'project_lock'), await flowLock($, e, ready($))) ?? (await budgetCheck($, e, ready($)))
     if (held) return denied($, e, held, rule, ready($))
     const fields = { tool: e.tool, input: toolInput(e), call: e.tool_use_id ?? null }
     const agent = e.agentId ?? null

@@ -86,6 +86,7 @@ export function resultText(result: unknown): string {
 let index: unknown = null
 let errorsSeen = new Set<string>()
 let hintsGiven = new Set<string>()
+let diagnosedTools = new Set<string>()
 
 onRulesClear(() => failureHintReset())
 
@@ -97,6 +98,21 @@ export function failureHintReset(): void {
   index = null
   errorsSeen = new Set()
   hintsGiven = new Set()
+  diagnosedTools = new Set()
+}
+
+export function diagnoseFor(tool: string, error: string): string | null {
+  if (relNum('failure_hint.DIAGNOSE_ON') !== 1 || !tool || diagnosedTools.has(tool)) return null
+  const vague = servedRegex('reliability_b', 'failure_hint.DIAGNOSE_RX')
+  const userDeny = servedRegex('reliability_b', 'failure_hint.USER_DENY_RX')
+  const text = error.trim().slice(0, 4000)
+  if (!vague || !userDeny || !text || userDeny.test(text) || !vague.test(text)) return null
+  const kind = tool.startsWith('mcp__agent-services__') ? 'plugin' : /\bhook\b/i.test(text) ? 'hook' : tool === 'Bash' || tool === 'PowerShell' ? 'shell' : 'other'
+  const where = relText(`failure_hint.text.where_${kind}`)
+  const line = where === undefined ? undefined : relText('failure_hint.text.diagnose', { tool, where })
+  if (line === undefined) return null
+  diagnosedTools.add(tool)
+  return line
 }
 
 export function hintFor(error: string, lessons: string | null): string | null {
@@ -121,15 +137,27 @@ export function hintFor(error: string, lessons: string | null): string | null {
   return line.length > max ? `${line.slice(0, max - 3)}...` : line
 }
 
+export function structuredDeny(e: Obj, done: Obj): boolean {
+  const denied = (o: Obj) => o.deny !== undefined || o.denied === true || o.decision === 'deny' ||
+    (isObj(o.permission) && (o.permission.decision === 'deny' || o.permission.behavior === 'deny'))
+  return denied(done) || denied(e)
+}
+
 export async function failureHint($: EngineInterface, e: Obj, done: Obj, rt?: Ready): Promise<Obj> {
   try {
-    if (!isObj(e) || !isObj(done) || done.deny !== undefined || done.isError !== true) return done
-    if (relNum(`failure_hint.TOOLS.${String(e.tool ?? '')}`) !== 1) return done
+    if (!isObj(e) || !isObj(done) || structuredDeny(e, done)) return done
+    const tool = String(e.tool ?? '')
     const error = resultText(done.result)
-    const refused = servedRegex('reliability_b', 'failure_hint.REFUSED_RX')
-    if (!error.trim() || !refused || refused.test(error.slice(0, 4000))) return done
+    const vague = servedRegex('reliability_b', 'failure_hint.DIAGNOSE_RX')
+    const maybeVague = !!vague && error.trim() !== '' && vague.test(error.trim().slice(0, 4000))
+    const hinted = done.isError === true && relNum(`failure_hint.TOOLS.${tool}`) === 1
+    if (!maybeVague && !hinted) return done
     if (rt !== undefined && !(await rt)) return done
     if ((await routingLevel(engineStore($))) === 'off') return done
+    const note = maybeVague ? diagnoseFor(tool, error) : null
+    const withNote = note ? { ...done, context: [...(Array.isArray(done.context) ? done.context : []), note] } : done
+    const refused = servedRegex('reliability_b', 'failure_hint.REFUSED_RX')
+    if (!hinted || !error.trim() || !refused || refused.test(error.slice(0, 4000))) return withNote
     let lessons: string | null = null
     try {
       const cwd = String(await $.session.cwd()).replace(/[\\/]+$/, '')
@@ -137,8 +165,8 @@ export async function failureHint($: EngineInterface, e: Obj, done: Obj, rt?: Re
       lessons = String(await $.fs.read(`${cwd}/.agent/lessons.md`)).slice(0, limit)
     } catch {}
     const line = hintFor(error, lessons)
-    if (!line) return done
-    return { ...done, context: [...(Array.isArray(done.context) ? done.context : []), line] }
+    if (!line) return withNote
+    return { ...withNote, context: [...(Array.isArray(withNote.context) ? withNote.context : []), line] }
   } catch {
     return done
   }

@@ -5,7 +5,7 @@ import { fitLines, getJob, jobOpen, listJobs, setJobStatus, upsertJob, type Job 
 import { redact } from './redact'
 import { relNum, relText } from './reliability'
 import { NOTE_PREFIX, SUGGESTION_PREFIX } from './review'
-import { loadTaskState, projectDir } from './task_state_io'
+import { loadTaskState, projectDir, projectWriteDir } from './task_state_io'
 import type { TaskState } from './task_state'
 import { vaultMask } from './vault'
 
@@ -354,7 +354,7 @@ export function handoverEmpty(jobs: readonly Job[], state: TaskState | null, fil
 export async function writeHandover($: EngineInterface, why: string, receipts: readonly Receipt[] = []): Promise<boolean> {
   try {
     if (N('HANDOVER_FILES_MAX') === undefined || N('HANDOVER_ROWS_MAX') === undefined) return false
-    const dir = await projectDir($)
+    const dir = await projectWriteDir($)
     if (!dir) return false
     let jobs: Job[] = []
     try {
@@ -397,8 +397,7 @@ export async function handoverNote($: EngineInterface, first: boolean): Promise<
     if (!first) return null
     const head0 = T('note_head')
     if (head0 === undefined) return null
-    const dir = await projectDir($)
-    if (!dir) return null
+    const dir = await projectWriteDir($)
     const lines: string[] = []
     const jobs = await listJobs($)
     const cutAll = jobs.filter((j) => j.status === 'stalled' && (interrupted.includes(j.id) || j.note === RESUME_GONE_NOTE))
@@ -409,10 +408,10 @@ export async function handoverNote($: EngineInterface, first: boolean): Promise<
       lines.push(cutHead)
       for (const j of cut) lines.push(`- ${mask(`${oneLine(j.id, 80)} (${j.kind}): ${oneLine(j.title, 120)}${j.output ? `; output: ${oneLine(j.output, 300)}` : ''}`)}`)
     }
-    const path = `${slashed(dir)}/${HANDOVER_FILE}`
+    const path = dir ? `${slashed(dir)}/${HANDOVER_FILE}` : null
     let text: string | null = null
     try {
-      if (await $.fs.exists(path)) text = String(await $.fs.read(path)).slice(0, 64 * 1024)
+      if (path && await $.fs.exists(path)) text = String(await $.fs.read(path)).slice(0, 64 * 1024)
     } catch {}
     const head = handoverHead(text)
     const noteMs = N('HANDOVER_NOTE_MS')

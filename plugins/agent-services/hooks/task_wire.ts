@@ -7,7 +7,7 @@ import { redact } from './redact'
 import { rulesLive, rulesTable } from './rules'
 import { engineStore } from './store'
 import { appendLines, applyOp, deliveryDraft, emptyState, isFileOp, isWriteOp, nextTaskId, parseTaskState, pendingLineOf, setSteps, taskStateToolSpec, upsertAgent, upsertQuestion, upsertTask, type DeliveryFacts, type OpCtx, type TaskState } from './task_state'
-import { decisionsSince, loadTaskState, projectDir, projectFileOp, taskStateNote, taskStateOp, taskStatePaths, updateTaskState, writeChecked } from './task_state_io'
+import { decisionsSince, errorBrief, loadTaskState, noProjectNote, projectDir, projectFileOp, projectWriteDir, taskStateNote, taskStateOp, taskStatePaths, updateTaskState, writeChecked } from './task_state_io'
 import { vaultMask } from './vault'
 import { keepGoingDue, stallDue, type KeepGoingLedger, type StallAbort, type StallCall, type StallLedger } from './watchdog'
 import { continueVia, jobStallTick, stallOwnAbort, stallPersonPrompt, stallToolEnd } from './stall'
@@ -129,7 +129,7 @@ async function noteWritten($: EngineInterface, path: string, text: string): Prom
 async function update(
   $: EngineInterface, mutate: (s: TaskState) => TaskState | null, opts: { create?: boolean } = {},
 ): ReturnType<typeof updateTaskState> {
-  const dir = await projectDir($)
+  const dir = await projectWriteDir($)
   const path = dir === null ? null : taskStatePaths(dir).json
   const mark = dir !== null && !(await sameBytes($, dir))
   const r = await updateTaskState($, mark ? (s) => {
@@ -162,7 +162,7 @@ export async function taskStateTool($: EngineInterface, e: Obj): Promise<{ resul
     const subagent = typeof e?.agentId === 'string' && e.agentId !== ''
     if (subagent || !isWriteOp(input.op)) {
       const result = await taskStateOp($, input, { subagent, mask: maskText })
-      const dir = input.op === 'read' ? await projectDir($) : null
+      const dir = input.op === 'read' ? await projectWriteDir($) : null
       return { result: dir && !(await trustedState($, dir)) ? `${unverifiedLine()}\n${result}` : result }
     }
     if (isFileOp(input.op)) {
@@ -170,6 +170,7 @@ export async function taskStateTool($: EngineInterface, e: Obj): Promise<{ resul
       if (f.ran && input.op === 'plan_run' && f.dir) await notePlanBase($, f.dir)
       return { result: f.answer }
     }
+    if (input.op !== 'keep_going' && !(await projectWriteDir($))) return { result: await noProjectNote($) }
     if (input.op === 'placeholder_add') await capturePending($)
     const got = await loadTaskState($)
     if (input.op === 'keep_going' && !got.state && !got.error) return { result: 'Noted: no task state is recorded here, so nothing is waiting on a keep-going answer; nothing was written.' }
@@ -213,14 +214,14 @@ export async function taskStateTool($: EngineInterface, e: Obj): Promise<{ resul
       answer = res.answer
       return res.changed ? res.state : null
     }, { create: true })
-    if (r.state === null) return { result: r.note ?? 'The task state could not be changed; carry on without it.' }
+    if (r.state === null) return { result: r.note ?? 'The task state was not changed (no cause was reported); carry on without it.' }
     let more = ''
     if (input.op === 'ask' && /^Question \S+ recorded/.test(answer)) more = await pendingAsked($, r.state, /^Question (\S+) recorded/.exec(answer)![1]!, String(input.undo ?? ''))
     if (input.op === 'answer' && /^Recorded the answer to /.test(answer)) more = await pendingTicked($, r.state, String(input.id ?? '').trim())
     if (input.op === 'deliver' && /recorded as delivered/.test(answer)) more = `\n${await deliveryDraftOf($, r.state, /^Task (\S+) recorded/.exec(answer)?.[1] ?? '')}`
     return { result: `${warn}${answer}${r.note ? ` ${r.note}` : ''}${tail}${proof ? ` ${proof.text}` : ''}${more}` }
-  } catch {
-    return { result: 'The task state could not be changed; carry on without it.' }
+  } catch (err) {
+    return { result: `The task state could not be changed (${errorBrief(err, maskText)}); carry on without it.` }
   }
 }
 
@@ -663,7 +664,7 @@ async function notePlanBase($: EngineInterface, dir: string): Promise<void> {
 async function pendingAsked($: EngineInterface, state: TaskState, id: string, undo: string): Promise<string> {
   try {
     const q = state.questions.find((x) => x.id === id)
-    const dir = await projectDir($)
+    const dir = await projectWriteDir($)
     if (!q || !dir) return ''
     const line = pendingLineOf(q, new Date().toISOString().slice(0, 10), maskText(undo).slice(0, 200))
     const named = (t: string) => pendingLines(t).some((l) => l.open && l.text.split(/\s+/).some((w) => w === `${id}:`))
@@ -680,7 +681,7 @@ async function pendingAsked($: EngineInterface, state: TaskState, id: string, un
 async function pendingTicked($: EngineInterface, state: TaskState, id: string): Promise<string> {
   try {
     const q = state.questions.find((x) => x.id === id)
-    const dir = await projectDir($)
+    const dir = await projectWriteDir($)
     if (!q?.answer || !q.line_hash || !dir) return ''
     const w = await writeChecked($, `${dir}/.agent/pending.md`, (old) => {
       if (old === null) return { refuse: 'gone' }
@@ -701,7 +702,7 @@ async function pendingTicked($: EngineInterface, state: TaskState, id: string): 
 
 async function deliveryDraftOf($: EngineInterface, state: TaskState, taskId: string): Promise<string> {
   try {
-    const dir = await projectDir($)
+    const dir = await projectWriteDir($)
     if (!dir) return ''
     const today = new Date().toISOString().slice(0, 10)
     const prior = state.tasks.filter((t) => t.status === 'delivered' && t.id !== taskId && t.result?.at).map((t) => t.result!.at).sort().pop()
