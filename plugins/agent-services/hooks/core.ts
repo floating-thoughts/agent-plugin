@@ -262,6 +262,7 @@ export function checkArgs(tool: string, args: unknown): void {
     if (typeof st !== 'string' || cpLen(st) < 1 || cpLen(st) > 64) bad('subagent_type')
     if (typeof d !== 'string' || cpLen(d) > 100000) bad('description')
     for (const k of ['model', 'effort']) if (!nil(args[k]) && typeof args[k] !== 'string') bad(k)
+    if (has(args, 'scope')) checkScope(args.scope, (schema.properties.scope as Ev).properties as Ev)
   } else if (tool === 'lesson_lookup') {
     if (typeof args.role !== 'string' || !SERVED_ROLES.includes(args.role)) bad('role')
     if (typeof args.phase !== 'string' || !SERVED_PHASES.includes(args.phase)) bad('phase')
@@ -269,6 +270,20 @@ export function checkArgs(tool: string, args: unknown): void {
     const p = args.context_pct
     if (!isNum(p) || p < 0 || p > 100) bad('context_pct')
     for (const k of COUNTER_ARGS) if (has(args, k) && (!isInt(args[k]) || (args[k] as number) < 0)) bad(k)
+    if (has(args, 'event') && !((schema.properties.event as { enum: unknown[] }).enum).includes(args.event)) bad('event')
+  }
+}
+
+// router_advice scope: only the contract's keys, each of its type and within its bounds (an empty object is allowed).
+function checkScope(scope: unknown, props: Ev): void {
+  if (!isObj(scope)) bad('scope')
+  for (const [k, v] of Object.entries(scope)) {
+    const p = has(props, k) ? (props[k] as { type: string; enum?: unknown[]; minimum?: number; maximum?: number }) : null
+    if (!p) bad(`scope.${k}`)
+    const ok = p.enum ? p.enum.includes(v)
+      : p.type === 'boolean' ? typeof v === 'boolean'
+        : isInt(v) && (p.minimum === undefined || v >= p.minimum) && (p.maximum === undefined || v <= p.maximum)
+    if (!ok) bad(`scope.${k}`)
   }
 }
 
@@ -929,7 +944,7 @@ export class Core {
     left: () => number): Promise<Record<string, unknown>> {
     if (tool === 'router_advice') {
       const r = await this.records.route(session, args.subagent_type, args.description, args.model ?? null, args.effort ?? null,
-        cwd, harness, left(), { main_model: this.sessionsMap.get(session)?.mainModel ?? null, user_asked_review: userAskedReview() })
+        cwd, harness, left(), { main_model: this.sessionsMap.get(session)?.mainModel ?? null, user_asked_review: userAskedReview(), scope: args.scope })
       const out: Record<string, unknown> = {
         decision: r.decision, model: r.model ?? null, effort: r.effort ?? null, reason: r.reason ?? null, hint: r.hint ?? null,
         fallback: r.fallback ?? null,
@@ -975,6 +990,7 @@ export class Core {
       ? { turns: s.turns, tool_calls: s.toolCalls, todos_done: s.todosDone, commits: s.commits, minutes: Math.max(0, Math.floor((this.now() - s.base) / 60)) }
       : {}
     for (const k of COUNTER_ARGS) counts[k] = has(args, k) ? args[k] : own[k] ?? 0
+    if (has(args, 'event')) counts.event = args.event
     const r = await this.records.checkpoint(session, counts as never, left())
     return { now: r.now, keep_lines: r.keep_lines, fallback: r.fallback }
   }

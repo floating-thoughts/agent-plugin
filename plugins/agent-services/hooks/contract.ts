@@ -6,7 +6,7 @@ export type ToolSpec = {
   input_schema: Record<string, unknown>
 }
 
-export const CONTRACT_SHA256 = "47b1b6cd71ab3bd84cf1cff47cd573f4200abd97ef79c474f95113f6985e4c5b"
+export const CONTRACT_SHA256 = "637b3eef61578c7979cf562aaa7916efc12a119231e13b7d08777251bfcdd435"
 
 export const API = "svc/1" as const
 export const PREFIX = "/svc/v1" as const
@@ -27,7 +27,7 @@ export const TOOL_NAMES = ["router_advice", "lesson_lookup", "savings", "checkpo
 export const TOOLS: readonly ToolSpec[] = [
   {
     "name": "router_advice",
-    "description": "Ask the routing service which model and effort a subagent dispatch should use. Sends the service only the first word of the description (at most 32 characters) and its length, the subagent type, the requested model and effort, the harness name, a random session ref, the dispatch count in this session and a salted project hash, and, when known, the main model name, whether the user asked for a review and whether strict routing is on; the description text stays on this machine. The 100,000 limit is the local input limit. Returns the decision (route, pass or deny), the model, the effort, a hint, and brief_rule, a speed-up suggestion the plugin itself adds, labelled, to each dispatched subagent brief (do not copy it); pass_through when the service cannot be reached.",
+    "description": "Ask the routing service which model and effort a subagent dispatch should use. Sends the service only the first word of the description (at most 32 characters) and its length, the subagent type, the requested model and effort, the harness name, a random session ref, the dispatch count in this session and a salted project hash, and, when known, the main model name, whether the user asked for a review, whether strict routing is on and the optional scope; the description text stays on this machine. The 100,000 limit is the local input limit. Returns the decision (route, pass or deny), the model, the effort, a hint, and brief_rule, a speed-up suggestion the plugin itself adds, labelled, to each dispatched subagent brief (do not copy it); pass_through when the service cannot be reached. On a plan, replan or acceptance dispatch, pass scope (the planned work's shape as counts and flags, no text) to get a project size in hint.",
     "input_schema": {
       "type": "object",
       "properties": {
@@ -51,6 +51,49 @@ export const TOOLS: readonly ToolSpec[] = [
             "string",
             "null"
           ]
+        },
+        "scope": {
+          "type": "object",
+          "properties": {
+            "kind": {
+              "type": "string",
+              "enum": [
+                "code",
+                "oneoff_fix",
+                "ops_content",
+                "script",
+                "other"
+              ]
+            },
+            "in_git": {
+              "type": "boolean"
+            },
+            "requirements_clear": {
+              "type": "boolean"
+            },
+            "testable": {
+              "type": "boolean"
+            },
+            "files_expected": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 100000
+            },
+            "sessions_expected": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 1000
+            },
+            "modules_expected": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 1000
+            },
+            "unfamiliar_codebase": {
+              "type": "boolean"
+            }
+          },
+          "additionalProperties": false
         }
       },
       "required": [
@@ -105,7 +148,7 @@ export const TOOLS: readonly ToolSpec[] = [
   },
   {
     "name": "checkpoint_advice",
-    "description": "Ask whether now is a good moment for a checkpoint, given how full the context is and what was done since the last one. Returns now (true or false) and the lines to keep in the summary.",
+    "description": "Ask whether now is a good moment for a checkpoint, given how full the context is and what was done since the last one. Returns now (true or false) and the lines to keep in the summary. Pass event when a work event prompted the question (module_done, topic_switch, milestone, user_request).",
     "input_schema": {
       "type": "object",
       "properties": {
@@ -133,6 +176,15 @@ export const TOOLS: readonly ToolSpec[] = [
         "minutes": {
           "type": "integer",
           "minimum": 0
+        },
+        "event": {
+          "type": "string",
+          "enum": [
+            "module_done",
+            "topic_switch",
+            "milestone",
+            "user_request"
+          ]
         }
       },
       "required": [
@@ -487,7 +539,7 @@ export const CONTRACT = {
  "x-tools": [
   {
    "name": "router_advice",
-   "description": "Ask the routing service which model and effort a subagent dispatch should use. Sends the service only the first word of the description (at most 32 characters) and its length, the subagent type, the requested model and effort, the harness name, a random session ref, the dispatch count in this session and a salted project hash, and, when known, the main model name, whether the user asked for a review and whether strict routing is on; the description text stays on this machine. The 100,000 limit is the local input limit. Returns the decision (route, pass or deny), the model, the effort, a hint, and brief_rule, a speed-up suggestion the plugin itself adds, labelled, to each dispatched subagent brief (do not copy it); pass_through when the service cannot be reached.",
+   "description": "Ask the routing service which model and effort a subagent dispatch should use. Sends the service only the first word of the description (at most 32 characters) and its length, the subagent type, the requested model and effort, the harness name, a random session ref, the dispatch count in this session and a salted project hash, and, when known, the main model name, whether the user asked for a review, whether strict routing is on and the optional scope; the description text stays on this machine. The 100,000 limit is the local input limit. Returns the decision (route, pass or deny), the model, the effort, a hint, and brief_rule, a speed-up suggestion the plugin itself adds, labelled, to each dispatched subagent brief (do not copy it); pass_through when the service cannot be reached. On a plan, replan or acceptance dispatch, pass scope (the planned work's shape as counts and flags, no text) to get a project size in hint.",
    "input_schema": {
     "type": "object",
     "properties": {
@@ -511,6 +563,49 @@ export const CONTRACT = {
        "string",
        "null"
       ]
+     },
+     "scope": {
+      "type": "object",
+      "properties": {
+       "kind": {
+        "type": "string",
+        "enum": [
+         "code",
+         "oneoff_fix",
+         "ops_content",
+         "script",
+         "other"
+        ]
+       },
+       "in_git": {
+        "type": "boolean"
+       },
+       "requirements_clear": {
+        "type": "boolean"
+       },
+       "testable": {
+        "type": "boolean"
+       },
+       "files_expected": {
+        "type": "integer",
+        "minimum": 0,
+        "maximum": 100000
+       },
+       "sessions_expected": {
+        "type": "integer",
+        "minimum": 0,
+        "maximum": 1000
+       },
+       "modules_expected": {
+        "type": "integer",
+        "minimum": 0,
+        "maximum": 1000
+       },
+       "unfamiliar_codebase": {
+        "type": "boolean"
+       }
+      },
+      "additionalProperties": false
      }
     },
     "required": [
@@ -565,7 +660,7 @@ export const CONTRACT = {
   },
   {
    "name": "checkpoint_advice",
-   "description": "Ask whether now is a good moment for a checkpoint, given how full the context is and what was done since the last one. Returns now (true or false) and the lines to keep in the summary.",
+   "description": "Ask whether now is a good moment for a checkpoint, given how full the context is and what was done since the last one. Returns now (true or false) and the lines to keep in the summary. Pass event when a work event prompted the question (module_done, topic_switch, milestone, user_request).",
    "input_schema": {
     "type": "object",
     "properties": {
@@ -593,6 +688,15 @@ export const CONTRACT = {
      "minutes": {
       "type": "integer",
       "minimum": 0
+     },
+     "event": {
+      "type": "string",
+      "enum": [
+       "module_done",
+       "topic_switch",
+       "milestone",
+       "user_request"
+      ]
      }
     },
     "required": [
@@ -2070,7 +2174,8 @@ export const CONTRACT = {
       },
       "items": {
        "type": "array",
-       "maxItems": 30,
+       "maxItems": 1000,
+       "description": "every base and granted kit item of the phase; no item-count limit, 1000 only bounds a runaway answer",
        "items": {
         "type": "object",
         "properties": {
@@ -3452,6 +3557,49 @@ export const CONTRACT = {
      "strict": {
       "type": "boolean",
       "description": "true when the person turned on strict routing (a dispatch without a task type word is refused); absent or false: advice only, never refused for a missing word (0.6.2; absent from older clients)"
+     },
+     "scope": {
+      "type": "object",
+      "properties": {
+       "kind": {
+        "enum": [
+         "code",
+         "oneoff_fix",
+         "ops_content",
+         "script",
+         "other"
+        ]
+       },
+       "in_git": {
+        "type": "boolean"
+       },
+       "requirements_clear": {
+        "type": "boolean"
+       },
+       "testable": {
+        "type": "boolean"
+       },
+       "files_expected": {
+        "type": "integer",
+        "minimum": 0,
+        "maximum": 100000
+       },
+       "sessions_expected": {
+        "type": "integer",
+        "minimum": 0,
+        "maximum": 1000
+       },
+       "modules_expected": {
+        "type": "integer",
+        "minimum": 0,
+        "maximum": 1000
+       },
+       "unfamiliar_codebase": {
+        "type": "boolean"
+       }
+      },
+      "additionalProperties": false,
+      "description": "optional: the planned work's shape as counts and flags, no text; only plan dispatches use it, and the answer comes back in hint (absent from older clients)"
      }
     },
     "required": [
@@ -3614,6 +3762,15 @@ export const CONTRACT = {
       "minimum": 0,
       "maximum": 10000000,
       "description": "0.7.6, optional: tokens in the context now"
+     },
+     "event": {
+      "enum": [
+       "module_done",
+       "topic_switch",
+       "milestone",
+       "user_request"
+      ],
+      "description": "optional: the work event that prompted the question (absent from older clients)"
      }
     },
     "required": [

@@ -290,7 +290,7 @@ export type BoardInput = {
   savings?: unknown // the GET /metrics/savings body collect() took
   report?: unknown // the GET /report body collect() took
   status?: unknown // the account facts collect() took (inOrg reads them)
-  panel?: string[] | null // panel.ts boardLines: tokens, quota, time saved for you, concurrent saving, the method
+  panel?: string[] | null // panel.ts boardLines: tokens, quota, typing time, agent time, concurrent time, the method
 }
 
 const safe = <T>(f: () => T): T | null => {

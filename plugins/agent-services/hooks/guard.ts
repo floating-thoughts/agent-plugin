@@ -8,8 +8,9 @@
 //
 // Memory only: item text, wrapped blocks and the session tokens live in this object and are never written to the
 // store, a file or a log. Of the session answer only session_ref is used; its other fields are not kept. The quota follows the server's limits for served content, with the same definitions: at most
-// MAX_ITEMS items per phase (the contract's item cap of /served/fetch), so MAX_ITEMS x phases per session, and at
-// most MAX_BYTES bytes of item text (UTF-8, before wrap() and without invisible characters).
+// MAX_ITEMS items per phase (the contract's bound of /served/fetch, set far above any real answer: the server sends
+// every item a phase needs), so MAX_ITEMS x phases per session, and at most MAX_BYTES bytes of item text (UTF-8,
+// before wrap() and without invisible characters), a runaway bound that a full kit set stays well under.
 import { CONTRACT } from './contract'
 import { b64Encode, hex } from './e2e'
 import type { Random, SvcResult, Transport } from './engine_types'
@@ -31,7 +32,7 @@ const API = CONTRACT as unknown as {
 const route = (path: string) => API.routes.find((r) => r.method === 'POST' && r.path === path)!
 const SESSION_SCHEMA = route(SESSION_ROUTE).responses['200']
 export const MAX_ITEMS: number = route(FETCH_ROUTE).responses['200'].properties.items.maxItems
-export const MAX_BYTES = 204800
+export const MAX_BYTES = 4194304
 export const MAX_SESSIONS = 64
 export const CALL_DEADLINE_MS = 4000 // each guard request; the tool answer in all is capped by its caller
 export const ROLES: readonly string[] = API.definitions.ServedRole!.enum

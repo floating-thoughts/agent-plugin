@@ -56,7 +56,7 @@ import { safeSet } from './store'
 import type { KV } from './store'
 import { gateNotice, LOCKED_LINE, NOTICE_TEXT, PAUSED_LINE, PLAN_NOTICE, SERVED_CHANNELS, SERVED_ROLES } from './svc'
 import type { Result, Svc } from './svc'
-import { ASKED_FILE, askDue, askedFrom, canAsk, dashboardUrl, readEntry, recordConsent, recordState, savingsOpen,
+import { accountSwitched, ASKED_FILE, askDue, askedFrom, canAsk, dashboardUrl, readEntry, recordConsent, recordState, savingsOpen,
   uploadOn, writeEntry } from './choice'
 import { dataDir, engineDirs, envOf, readTextOf } from './engine_env'
 import { COMPANY_VIEW_LINE, companyCommand } from './boss'
@@ -1186,7 +1186,11 @@ export class Command {
         'later to change it.'
       : ''
     if (on) {
-      const how = sub === 'backfill'
+      // after an account switch the upload floor (choice.ts uploadFloor) sends no earlier day: say so, never promise them
+      const how = sub === 'backfill' && (await accountSwitched(this.d.store))
+        ? 'from today on: the earlier days stay with the account that uploaded them (the account you were signed in ' +
+          'with before), so nothing from before today is sent and only days from today on go to this account'
+        : sub === 'backfill'
         ? 'including the past 30 days: the first upload also sends the summaries of up to 30 earlier days'
         : `from now on only: the first upload sends only the days after ${localDay(at)}, nothing from before`
       return `Savings record is on (upload, ${how}). Your private savings page is published to your claude.ai ` +
@@ -1587,7 +1591,7 @@ export function savingsText(b: unknown, time: TimeFigures | null = null): string
 /** The local time figures (panel.ts timeOf over the stored days) as one sentence plus its disclosure; empty without them. */
 function timeText(t: TimeFigures | null): string {
   if (!t || !(t.agent_seconds > 0)) return ''
-  return ` Spent by you: ${durationText(t.typing_seconds)}; saved for you: ${durationText(t.agent_seconds)}; concurrency save: ${durationText(t.concurrent_seconds)}. ${methodLine()}`
+  return ` Spent by you: ${durationText(t.typing_seconds)}; agent time: ${durationText(t.agent_seconds)}; concurrency save: ${durationText(t.concurrent_seconds)}. ${methodLine()}`
 }
 
 export function estimateError(code: string | null): string {

@@ -3,10 +3,11 @@
 //   Token (incl. cache reads)   This week / This month / All time: tokens and dollars at API prices, from this
 //                               computer's transcripts (usageDaysOf over the scan, kept per day under USAGE_DAYS_KEY)
 //   Quota . context N% (Nk)     Week % and 5-hour % of the plan with the time to their reset, and the context, from
-//                               the engine's session usage (planOf); then "Saved $X", the service's savings figure
-//   Time                        Spent by you: the person's typing time; Saved for you: clock time with at least one agent
+//                               the engine's session usage (planOf); then "Saved (est.) $X", the service's savings figure
+//                               ("off" while the savings record is off)
+//   Time . total so far         Spent by you: the person's typing time; Agent time: clock time with at least one agent
 //                               active; Concurrent: the agents' summed run time less that
-//                               clock time. From the same stored days as the Token column.
+//                               clock time. Totals over the same stored days as the Token column.
 //
 // Unknown figures show "--". methodLine() is the disclosure shown wherever the time figures appear (METHOD_LINE is
 // its built-in form); the service sends the same sentence with its figures. The idle gap, the typing speed and the
@@ -32,11 +33,11 @@ export const METHOD_LINE = methodText(methodTemplate(), IDLE_GAP_MS / 60_000, TY
 
 /** The disclosure's built-in wording; {idle_gap_minutes} and {typing_bytes_per_minute} take the values in use. */
 function methodTemplate(): string {
-  return 'Saved for you is clock time when at least one agent was working (gaps over {idle_gap_minutes} minutes ' +
+  return 'Agent time is clock time when at least one agent was working (gaps over {idle_gap_minutes} minutes ' +
     "count as idle; time with several agents running counts once). It is the agents' own run time, not an estimate " +
     'of how long a person would take. Spent by you is your own time at the keyboard, estimated as typed bytes / ' +
-    "{typing_bytes_per_minute} bytes per minute. Concurrency save = the agents' combined run time minus clock time, " +
-    'i.e. what running them side by side saved compared with one at a time.'
+    "{typing_bytes_per_minute} bytes per minute. Concurrency save (est.) = the agents' combined run time minus clock time, " +
+    'i.e. what running them side by side saved compared with one at a time. All three time figures are totals so far.'
 }
 
 function methodText(template: string, gapMinutes: number, bytesPerMinute: number): string {
@@ -52,6 +53,12 @@ export function typingBytesPerMinute(): number {
 export function methodLine(): string {
   const t = servedValue('timemodel', 'method')
   return methodText(typeof t === 'string' && t ? t : methodTemplate(), idleGapMs() / 60_000, typingBytesPerMinute())
+}
+
+/** The dollar figure's disclosure, shown with the time method wherever the panel's disclosure appears. */
+export function savedNote(): string {
+  return 'Saved (est.) is an estimate against API list prices for the same work with every subagent on the most ' +
+    'capable model (Opus); it is not a bill or a refund.'
 }
 
 type Obj = Record<string, any>
@@ -279,13 +286,14 @@ export function panelOf(days: unknown, p: Plan | null, savings: unknown, today: 
   }
   const ctx = pl.context
   const s = isObj(savings) && !('error' in savings) ? savings : null
+  const off = isObj(savings) && savings.error === 'service_off' // the savings record is off: say so, not "--"
   const usd = s ? num(s.usd) : null
   const quota: Column = {
     title: ctx ? `Quota${DOT}context ${Math.round((ctx.tokens / ctx.window) * 100)}%` : `Quota${DOT}context --`,
     rows: [
       ['Week', ...limit(pl.week, true)],
       ['5-hour', ...limit(pl.five_hour, false)],
-      ['Saved', '', usd === null ? '--' : moneyText(usd)],
+      ['Saved (est.)', '', off ? 'off' : usd === null ? '--' : moneyText(usd)],
     ],
     align: ['left', 'center', 'right'],
   }
@@ -293,10 +301,10 @@ export function panelOf(days: unknown, p: Plan | null, savings: unknown, today: 
   // from the daily upload, so today never showed and the two columns disagreed (one source for every number)
   const { agent_seconds: you, typing_seconds: typing, concurrent_seconds: concurrent } = timeOf(all)
   const time: Column = {
-    title: 'Time',
+    title: `Time${DOT}total so far`, // cumulative: every stored day, not this week
     rows: [
       ['Spent', you > 0 || typing > 0 ? durationText(typing) : '--'],
-      ['Saved', you > 0 ? durationText(you) : '--'],
+      ['Agent time', you > 0 ? durationText(you) : '--'],
       ['Concurrent', you > 0 ? durationText(concurrent) : '--'],
     ],
   }
@@ -311,7 +319,7 @@ export function panelOf(days: unknown, p: Plan | null, savings: unknown, today: 
       ['Index reads', count('index')],
     ],
   }
-  return { columns: [token, quota, time, stats], method: methodLine() }
+  return { columns: [token, quota, time, stats], method: `${savedNote()} ${methodLine()}` }
 }
 
 const rowText = (r: string[]): string => r.filter((x) => x !== '').join(' ')
@@ -327,7 +335,7 @@ export function boardLines(panel: Panel): string[] {
   return [
     ...panelLines(panel).slice(0, 2),
     `Spent: ${typing[1]}`,
-    `Saved: ${you[1]}`,
+    `Agent time: ${you[1]}`,
     `Concurrent: ${concurrent[1]}`,
     panel.method,
   ]

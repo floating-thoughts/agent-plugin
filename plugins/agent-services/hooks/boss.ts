@@ -192,17 +192,17 @@ footer { color: var(--muted); font-size: 13px; margin-top: 24px; }
 <p class="change flat" id="change"></p>
 </div>
 <div class="kpis">
-<div class="kpi"><span>Saved last week</span><strong id="k0"></strong></div>
+<div class="kpi"><span>Saved last week (est.)</span><strong id="k0"></strong></div>
 <div class="kpi"><span>The week before</span><strong id="k1"></strong></div>
 <div class="kpi"><span>People with figures</span><strong id="k2"></strong></div>
 <div class="kpi"><span>Seats used</span><strong id="k3"></strong></div>
 </div>
-<p class="note">These figures are estimates of AI cost savings, not a measure of anyone's work, time or performance. A saving is what the same work would have cost without agent-services. "No data yet" means we have no usage figures from that person for the week. It is not evidence that they did not use Claude Code or did not work: they may have chosen not to share their figures.</p>
+<p class="note">These figures are estimates of AI cost savings, not a measure of anyone's work, time or performance. A saving is an estimate: what the same work would have cost without agent-services, with every subagent on the most capable model (Opus). "No data yet" means we have no usage figures from that person for the week. It is not evidence that they did not use Claude Code or did not work: they may have chosen not to share their figures.</p>
 <section id="people">
-<h2>Saved by each person</h2>
+<h2>Saved by each person (est.)</h2>
 <div class="scroll">
 <table>
-<thead><tr><th>Person (by email)</th><th>Saved last week</th><th>Devices signed in when this page was made</th></tr></thead>
+<thead><tr><th>Person (by email)</th><th>Saved last week (est.)</th><th>Devices signed in when this page was made</th></tr></thead>
 <tbody id="rows">
 </tbody>
 </table>
@@ -240,7 +240,7 @@ footer { color: var(--muted); font-size: 13px; margin-top: 24px; }
     var h = byId("headline");
     h.textContent = "";
     if (D.no_data) { h.textContent = "No figures yet"; } else {
-      h.appendChild(document.createTextNode("Saved last week: "));
+      h.appendChild(document.createTextNode("Saved last week (est.): "));
       var b = document.createElement("b"); b.textContent = String(D.total); h.appendChild(b);
     }
     put("week", "The week of " + (D.week || "") + ".");

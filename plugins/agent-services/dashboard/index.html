@@ -206,7 +206,7 @@ footer { margin-top: 36px; color: var(--faint); font-size: 12.5px; text-align: c
   <div class="section-title"><h2>This week</h2><span class="muted small" id="week-hint"></span></div>
   <section class="card" id="weekly"></section>
 
-  <div class="section-title"><h2>Saved per day</h2><span class="muted small" id="chart-range"></span></div>
+  <div class="section-title"><h2>Saved per day (est.)</h2><span class="muted small" id="chart-range"></span></div>
   <section class="card">
     <div class="chart-box" id="chart"></div>
     <div class="chart-readout" id="chart-readout"></div>
@@ -337,7 +337,7 @@ footer { margin-top: 36px; color: var(--faint); font-size: 12.5px; text-align: c
       wrap.style.position = "relative";
       wrap.style.zIndex = "1";
       if (measured) {
-        add(wrap, el("p", "eyebrow", "Saved with agent-services"));
+        add(wrap, el("p", "eyebrow", "Saved with agent-services (est.)"));
         add(wrap, el("p", "hero-value num", money(sav.usd)));
         var sub = el("p", "hero-sub");
         add(sub, "Compared with what the same work would have cost");
@@ -376,7 +376,7 @@ footer { margin-top: 36px; color: var(--faint); font-size: 12.5px; text-align: c
           (est.made_on ? ", made on " + fmtDay(est.made_on, true) : "") +
           ", compared with running every subagent on the most capable model. Turn on usage sharing to see the measured figure.", false));
       } else {
-        add(wrap, el("p", "eyebrow", "Saved with agent-services"));
+        add(wrap, el("p", "eyebrow", "Saved with agent-services (est.)"));
         add(wrap, el("p", "hero-value num", "$0.00"));
         add(wrap, el("p", "hero-sub", D.metrics_on === false
           ? "Savings are measured from the usage counts you choose to share. Turn on usage sharing and your first figure appears after one full day."
