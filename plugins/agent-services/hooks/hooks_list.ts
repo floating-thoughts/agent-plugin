@@ -70,7 +70,9 @@ export const HOOKS: readonly HookRow[] = [
       'input. The test lock: it denies a subagent\'s Edit, Write, MultiEdit or NotebookEdit of a file that ' +
       'matches a glob in the project\'s .agent/test-lock.json (the main conversation may edit them; Bash is ' +
       'not checked). It times the main conversation\'s foreground Bash, PowerShell and subagent calls and ' +
-      'counts its subagent dispatches, locally.',
+      'counts its subagent dispatches, locally. After the main conversation\'s AskUserQuestion call, while you are ' +
+      'signed in, it keeps your answer when it is one of the two autonomy labels of the working methods ' +
+      '(/agent-services autonomy), locally.',
     shown: 'The deny reason, which starts with "agent-services planning gate" or "agent-services test lock".',
   },
   {
@@ -91,7 +93,8 @@ export const HOOKS: readonly HookRow[] = [
   {
     event: 'tool.call', matcher: 'tool: mcp__agent-services__setup', file: 'command.ts', does: ['answer', 'network', 'file'],
     what: 'Runs one subcommand from a fixed list with the answer you gave (sharing, methods, routing, update, info); ' +
-      'a choice-changing one only in the main conversation of a session you are at.',
+      'a choice-changing one only in the main conversation of a session you are at. It never turns the savings ' +
+      'upload on: only you do.',
     shown: 'The tool call and its answer.',
   },
   {
@@ -123,13 +126,15 @@ export const HOOKS: readonly HookRow[] = [
       'changing it: the service\'s compaction advice, the working methods of the current phase (in full once per ' +
       'session, and again only after /clear, a compaction, a phase change or a new served version; nothing on ' +
       'other prompts), and the plugin ' +
-      'notes (a newer version, and that /agent-services methods diff shows a change; never the setup questions), one ' +
+      'notes (a newer version, and that /agent-services methods diff shows a change; never the setup questions), the ' +
+      'autonomy choice you gave (one line with the working methods), one ' +
       'planning reminder at methods level ' +
       'suggest and, unless the methods level is off, a reminder to run long work in the background and the steps ' +
       'of .agent/steps.json ready to start, and once per session the hint the routing service sent for a subagent ' +
       'without a task type word, each labelled as an agent-services note. It notes locally whether ' +
       'your message asks for a review (the routing request carries only yes or no).',
-    shown: 'A dropped code: a toast and the sign-in answer in its place. The context blocks are not shown.',
+    shown: 'A dropped code: a toast and the sign-in answer in its place. A new served methods version: a line and ' +
+      'a toast, once. The context blocks are not shown.',
   },
   {
     event: 'session.compact', matcher: '', file: 'register.ts', does: ['count', 'ui'],

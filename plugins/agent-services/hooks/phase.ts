@@ -23,8 +23,10 @@
 // injected (register.ts wires them).
 import { normPath } from './paths'
 import { canAsk } from './choice'
-import { levelNow, methodsActive } from './methods'
+import { levelNow, methodsActive, queueNotice, seenVersion } from './methods'
+import { autonomyNote, readAutonomy } from './autonomy'
 export { methodsStart } from './methods' // register.ts wires it beside pushStart
+export { noteAutonomy } from './autonomy' // register.ts tool.call, after the call ran
 
 export const STATE_FILE = 'agent-state.md'
 export const WRITE_TOOLS: readonly string[] = ['Edit', 'Write', 'MultiEdit', 'NotebookEdit']
@@ -335,6 +337,7 @@ export class LessonPush {
   private checked = new Set<Group>() // fetched in this process (sent, or found the same as sent)
   private sent: Sent | null = null // loaded once from d.seen
   private repush = false
+  private version: string | null = null // the served version of the latest block delivered (takeVersion)
 
   constructor(d: PushDeps) {
     this.d = d
@@ -433,7 +436,17 @@ export class LessonPush {
         // kept in memory for this process
       }
     }
-    return pushText(answers)
+    const text = pushText(answers)
+    const v = answers.find((a) => isObj(a) && typeof a.version === 'string' && a.version) as Obj | undefined
+    if (text && v) this.version = String(v.version)
+    return text
+  }
+
+  /** The served version of the latest block delivered, once (null: none since the last call). */
+  takeVersion(): string | null {
+    const v = this.version
+    this.version = null
+    return v
   }
 
   private async running(cwd: () => Promise<string | null>): Promise<boolean> {
@@ -487,11 +500,13 @@ export async function pushStart(r: PushRuntime): Promise<void> {
   }
 }
 
+let onNoteSent = false // level on: the autonomy note was sent in this process (pushLessons)
+
 /** register.ts, a /clear or a compaction of the main agent (agent null): push the current phase's items again on
  * the next prompt. Never throws. */
 export function pushAgain(r: PushRuntime, agent: unknown): void {
   try {
-    if (r && !agent) lessonPush(r).again()
+    if (r && !agent) { lessonPush(r).again(); onNoteSent = false }
   } catch {
     // nothing to push
   }
@@ -499,13 +514,27 @@ export function pushAgain(r: PushRuntime, agent: unknown): void {
 
 /** register.ts prompt.submit: the served-lessons blocks for this prompt, and the planning reminder ([] for a
  * subagent, signed out, at level "off", on error). */
-export async function pushLessons(rt: Promise<PushRuntime>, agent: unknown, cwd: () => Promise<string>): Promise<string[]> {
+export async function pushLessons(rt: Promise<PushRuntime>, agent: unknown, cwd: () => Promise<string>,
+  notify?: (line: string) => void): Promise<string[]> {
   if (agent) return []
   try {
     const r = await rt
     if (!r || (await levelNow()) === 'off') return []
     // the methods came with CLAUDE.md (methods.ts): no push repeats them
-    const text = !methodsActive() ? await lessonPush(r).prompt(async () => cwd()) : null
+    const push = lessonPush(r)
+    let text = !methodsActive() ? await push.prompt(async () => cwd()) : null
+    const version = push.takeVersion()
+    if (text && r.store) {
+      // 0.6.3: the user's kept autonomy choice goes with the methods; a new served version is said to the user once
+      const note = autonomyNote(await readAutonomy(r.store))
+      if (note) text = `${text}\n${note}`
+      const told = version ? await seenVersion(r.store, version) : null
+      if (told) (notify ?? queueNotice)(told) // flow.ts flowPrompt shows a queued one in this same prompt
+    } else if (!text && methodsActive() && !onNoteSent && r.store && (await r.svc.authState()) === 'ok') {
+      // level on: the methods came with CLAUDE.md, so the kept choice goes alone, once, and again after /clear
+      const note = autonomyNote(await readAutonomy(r.store))
+      if (note) { text = note; onNoteSent = true }
+    }
     const remind = takeReminder(r)
     return [text, remind].filter((t): t is string => !!t)
   } catch {

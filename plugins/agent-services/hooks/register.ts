@@ -22,7 +22,7 @@ import { briefed, flowAfter, flowLock, flowPrompt, flowStart, flowTurnEnd, insta
 import { Guard } from './guard'
 import { migrate, OLD_SIGNIN_KEY, OLD_SIGNIN_LINE } from './migrate'
 import { FLUSH_EVERY_MS, Outbox } from './outbox'
-import { holdWrite, lessonHold, methodsStart, pushAgain, pushLessons, pushStart } from './phase'
+import { holdWrite, lessonHold, methodsStart, noteAutonomy, pushAgain, pushLessons, pushStart } from './phase'
 import { PRICES } from './prices'
 import { engineStore, safeDelete, safeGet, type KV } from './store'
 import { Svc, type HttpAnswer } from './svc'
@@ -333,7 +333,7 @@ export const register: Register = (on) => {
       return { deny: denyReason(a.reason, 'tool check') }
     }
     const done: Ev = await next(e) // a tool's input is never changed
-    await flowAfter($, e, ready($)) // flow.ts: timing
+    await flowAfter($, e, ready($)); await noteAutonomy($, e, done, ready($)) // flow.ts: timing; autonomy.ts: the user's choice
     show($, (await send($, 'post_tool', agent, { ...fields, ok: done?.deny === undefined && done?.isError !== true }))?.notice)
     return done
   }).catch(($, e, next) => next(e))

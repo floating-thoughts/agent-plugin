@@ -6,7 +6,7 @@ export type ToolSpec = {
   input_schema: Record<string, unknown>
 }
 
-export const CONTRACT_SHA256 = "ee68c593813bfb31790e11c149eb7c6258d7a3f8f340d541e3a3382200d2fecf"
+export const CONTRACT_SHA256 = "b5de8c87b48d811d7697abdd795e5b07dcb99cedad289cb5d1530f9d564fca0d"
 
 export const API = "svc/1" as const
 export const PREFIX = "/svc/v1" as const
@@ -27,7 +27,7 @@ export const TOOL_NAMES = ["router_advice", "lesson_lookup", "savings", "checkpo
 export const TOOLS: readonly ToolSpec[] = [
   {
     "name": "router_advice",
-    "description": "Ask the routing service which model and effort a subagent dispatch should use. Returns the decision (route, pass or deny), the model, the effort, a hint, and brief_rule, a speed-up suggestion the plugin itself adds, labelled, to each dispatched subagent brief (do not copy it); pass_through when the service cannot be reached.",
+    "description": "Ask the routing service which model and effort a subagent dispatch should use. Sends the service only the first word of the description (at most 32 characters) and its length, the subagent type, the requested model and effort, the harness name, a random session ref, the dispatch count in this session and a salted project hash, and, when known, the main model name, whether the user asked for a review and whether strict routing is on; the description text stays on this machine. The 100,000 limit is the local input limit. Returns the decision (route, pass or deny), the model, the effort, a hint, and brief_rule, a speed-up suggestion the plugin itself adds, labelled, to each dispatched subagent brief (do not copy it); pass_through when the service cannot be reached.",
     "input_schema": {
       "type": "object",
       "properties": {
@@ -487,7 +487,7 @@ export const CONTRACT = {
  "x-tools": [
   {
    "name": "router_advice",
-   "description": "Ask the routing service which model and effort a subagent dispatch should use. Returns the decision (route, pass or deny), the model, the effort, a hint, and brief_rule, a speed-up suggestion the plugin itself adds, labelled, to each dispatched subagent brief (do not copy it); pass_through when the service cannot be reached.",
+   "description": "Ask the routing service which model and effort a subagent dispatch should use. Sends the service only the first word of the description (at most 32 characters) and its length, the subagent type, the requested model and effort, the harness name, a random session ref, the dispatch count in this session and a salted project hash, and, when known, the main model name, whether the user asked for a review and whether strict routing is on; the description text stays on this machine. The 100,000 limit is the local input limit. Returns the decision (route, pass or deny), the model, the effort, a hint, and brief_rule, a speed-up suggestion the plugin itself adds, labelled, to each dispatched subagent brief (do not copy it); pass_through when the service cannot be reached.",
    "input_schema": {
     "type": "object",
     "properties": {

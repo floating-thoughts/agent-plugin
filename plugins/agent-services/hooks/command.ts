@@ -2,8 +2,8 @@
 //
 // - $.command.register declares the command; a command.run hook answers it with { text } only: no model, no Bash,
 //   no Python and no `context` field, so neither the sign-in code nor an answer enters the model's context.
-// - Fourteen words: status, login, logout, setup, sharing, savings, methods, routing, update, offline, estimate, info,
-//   remove, company (USAGE). `code` stays as a hidden sign-in fallback and `served` as a hidden owner tool. The 0.5.0
+// - Fifteen words: status, login, logout, setup, sharing, savings, methods, routing, autonomy, update, offline,
+//   estimate, info, remove, company (USAGE). `code` stays as a hidden sign-in fallback and `served` as a hidden owner tool. The 0.5.0
 //   spellings (data, hooks, outbox, trust, savings <part>, dashboard) still work for one version: they answer as the
 //   new word does, plus one line that names it (renameOf).
 // - The sign-in code is never taken from the command line: typed command arguments are written to prompt history.
@@ -34,6 +34,11 @@
 //   nothing at all (routingOff): no request, no deny, no model change, nothing added to the subagent's prompt;
 //   `routing suggest` asks for advice only; `routing strict` lets the service refuse a dispatch without a task type
 //   word. `routing on` is the 0.6.1 spelling of `routing suggest` (RENAMED).
+// - 0.6.3: the setup tool the model calls can never turn the upload on (no sharing on_backfill, on_from_now or on):
+//   only the user does, through the setup dialog or by typing the command. `sharing on` (and `savings on`) no longer
+//   means on_backfill: it asks the three-option savings question in the dialog, or lists the three commands, and
+//   never turns anything on by itself. Setup also asks the routing level once (ROUTING_QUESTION). `autonomy`
+//   shows or changes the user's autonomy choice (autonomy.ts).
 //
 // The Command class is harness-neutral (its deps are injected); the functions at the end are the Claude Code
 // adapter over `$`.
@@ -57,7 +62,8 @@ import { dataDir, engineDirs, envOf, readTextOf } from './engine_env'
 import { companyCommand } from './boss'
 import { hasTrust, type TrustFile, unbalancedTrust, withoutTrust, withTrust } from './trust'
 import { approveMethods, importLine, LEVEL_KEY, type Level, levelOf, methodsDiff, methodsNoted, methodsNotes,
-  previewMethods, readLevel, settlePending, syncMethodsNow } from './methods'
+  previewMethods, readLevel, seenDiff, settlePending, syncMethodsNow } from './methods'
+import { AUTONOMY_LINE, AUTONOMY_SET, readAutonomy, setAutonomy } from './autonomy'
 import { framing, lineDiff, NOTE_LABEL, pendingNoteText, updateNoteText } from './review'
 import { bandSetup } from './band'
 import { ORG_PAUSED_LINE, ORG_SAVINGS_TEXT, ORG_SET_TEXT, orgChoice, orgNotice, sharingQuestion } from './org'
@@ -80,13 +86,13 @@ export const COMMAND_SPEC = {
   argumentHint:
     '[status | login [<email>] | logout | setup | sharing [on_backfill | on_from_now | off | not_now | preview | ' +
     'page on|off | mail on|off] | ' +
-    'savings | methods [off | suggest | on | preview | diff | accept | keep] | routing [off | suggest | strict] | update | ' +
-    'offline on|off | estimate [preview | send] | info [data | hooks | log [<day>]] | remove | company [mail on|off]]',
+    'savings | methods [off | suggest | on | preview | diff | accept | keep] | routing [off | suggest | strict] | ' +
+    'autonomy [auto | ask | clear] | update | offline on|off | estimate [preview | send] | info [data | hooks | log [<day>]] | remove | company [mail on|off]]',
 } as const
 
 // Every word the command answers: the fourteen of USAGE, then the hidden `code` (sign-in fallback) and `served`.
-export const KNOWN_COMMANDS = ['status', 'login', 'logout', 'setup', 'sharing', 'savings', 'methods', 'routing', 'update',
-  'offline', 'estimate', 'info', 'remove', 'company', 'code', 'served']
+export const KNOWN_COMMANDS = ['status', 'login', 'logout', 'setup', 'sharing', 'savings', 'methods', 'routing',
+  'autonomy', 'update', 'offline', 'estimate', 'info', 'remove', 'company', 'code', 'served']
 /** The subcommands that work while signed out (`methods` alone and `methods off` too, see dispatch). */
 export const AUTH_FAIL_COMMANDS = ['status', 'login', 'code', 'logout', 'update', 'info', 'remove']
 export const ASK_HEADER = 'Sign-in'
@@ -123,11 +129,18 @@ export const METHODS_QUESTION = 'agent-services serves working methods (planning
   'review, delivery, checkpoints). How should Claude use them?'
 export const METHODS_OPTIONS = ['As suggestions (Recommended)', 'As my own instructions', 'Off']
 export const METHODS_HEADER = 'Methods'
-export type Question = 'savings' | 'methods'
+export const ROUTING_QUESTION = 'How should agent-services route your subagents? "Suggest (the default, recommended)": ' +
+  'a subagent whose description does not start with a task type word runs unchanged and gets no routing savings. ' +
+  '"Strict": a subagent whose description does not start with a task type word is refused until it is relabelled, ' +
+  'so every subagent is routed. "Not now": nothing changes and you are asked again in 7 days at the earliest.'
+export const ROUTING_OPTIONS = ['Suggest (the default, recommended)', 'Strict', 'Not now']
+export const ROUTING_HEADER = 'Routing'
+export type Question = 'savings' | 'methods' | 'routing'
 export const QUESTION_COMMANDS: Readonly<Record<Question, string>> = {
   savings: `${COMMAND} sharing on_backfill (upload, including the past 30 days), sharing on_from_now (upload from ` +
     `now on only) or sharing off (don't upload)`,
   methods: `${COMMAND} methods suggest, methods on (after methods preview) or methods off`,
+  routing: `${COMMAND} routing suggest (the default) or routing strict`,
 }
 export const METHODS_LINE: Readonly<Record<string, string>> = {
   suggest: 'Working methods: suggestions (the default). The served methods come with your prompts as agent-services ' +
@@ -140,9 +153,8 @@ export const METHODS_LINE: Readonly<Record<string, string>> = {
 }
 // The tool the model calls with the user's answers (the user asked it to change a choice); it runs the same
 // subcommands as the slash command, limited to these. The 0.5.0 setup words still work for one version (SETUP_ALIASES).
+// 0.6.3: none of them turns the upload on (UPLOAD_ON_WORDS): only the user does that.
 export const SETUP_COMMANDS = [
-  'sharing on_backfill',
-  'sharing on_from_now',
   'sharing not_now',
   'sharing off',
   'sharing preview',
@@ -181,21 +193,22 @@ export const ROUTING_SET: Readonly<Record<RoutingLevel, string>> = {
     'effort, and the service refuses a dispatch whose description does not start with a task type word. ' +
     `${COMMAND} routing suggest goes back to advice only; ${COMMAND} routing off turns routing off.`,
 }
-export const SETUP_ALIASES = ['savings preview', 'savings on', 'savings not_now', 'dashboard allow', 'dashboard not_now',
+export const SETUP_ALIASES = ['savings preview', 'savings not_now', 'dashboard not_now',
   'trust on', 'trust not_now', 'trust off', 'trust preview', 'trust diff', 'trust accept', 'trust keep', 'data', 'hooks',
-  'routing on', 'sharing on']
+  'routing on']
+// What the setup tool refuses with a pointer to the user's own commands: every word that would turn the upload on.
+export const UPLOAD_ON_WORDS = ['sharing on_backfill', 'sharing on_from_now', 'sharing on', 'savings on', 'dashboard allow']
 export const SETUP_SPEC = {
   name: 'setup',
   description:
     "Apply the user's answer to an agent-services setup question, or read what the plugin does. The savings " +
     "record is a private Artifact page on the user's own claude.ai account (only they see it unless they share it), " +
     'a weekly savings email, and one small daily usage summary (token counts and costs per model, counts per task ' +
-    'type and hashed project, savings; no prompt text, file contents or paths). Its question has three answers: ' +
-    '"sharing on_backfill" (the user chose "Upload, including the past 30 days": the first upload also sends up to 30 ' +
-    'earlier days), "sharing on_from_now" (the user chose "Upload from now on only": only days after the choice are ' +
-    'sent) and "sharing off" (the user chose "Don\'t upload": off for good). "sharing on" is the old spelling of ' +
-    '"sharing on_backfill". "sharing not_now" leaves it off and asks again in 7 days at the earliest; "sharing ' +
-    'preview" shows what one upload sends and changes nothing. "methods suggest" (the default) gives Claude the served working ' +
+    'type and hashed project, savings; no prompt text, file contents or paths). This tool cannot turn the upload ' +
+    'on: the user turns uploads on themselves, with /agent-services setup or /agent-services sharing ' +
+    'on_backfill|on_from_now. "sharing off" (the user chose "Don\'t upload": off for good) and "sharing not_now" ' +
+    '(leaves it off and asks again in 7 days at the earliest) apply the user\'s answer; "sharing preview" shows what ' +
+    'one upload sends and changes nothing. "methods suggest" (the default) gives Claude the served working ' +
     'methods (planning, delegating to subagents, testing, review, delivery, checkpoints) as agent-services ' +
     'suggestions; "methods on" makes them the user\'s own instructions through one marked section in the user\'s ' +
     'CLAUDE.md and lets the planning gate hold larger file edits until there is a plan (read "methods preview" with ' +
@@ -282,7 +295,7 @@ export const ERROR_TEXT: Record<string, string> = {
 export const USAGE =
   `Usage: ${COMMAND} [status | login [<email>] | logout | setup | sharing [on_backfill | on_from_now | off | not_now | ` +
   'preview | page on|off | mail on|off] | savings | methods [off | suggest | on | preview | diff | accept | keep] | routing [off | suggest | ' +
-  'strict] | update | offline on|off | estimate [preview | send] | info [data | hooks | log [<day>]] | remove | company [mail on|off]]'
+  'strict] | autonomy [auto | ask | clear] | update | offline on|off | estimate [preview | send] | info [data | hooks | log [<day>]] | remove | company [mail on|off]]'
 
 // The 0.5.0 spellings, kept for one version: [old words, new words] (a trailing '*' passes the rest on).
 export const RENAMED: readonly (readonly [string, string])[] = [
@@ -294,7 +307,6 @@ export const RENAMED: readonly (readonly [string, string])[] = [
   ['trust not_now', 'methods suggest'],
   ['trust *', 'methods *'],
   ['savings preview', 'sharing preview'],
-  ['savings on', 'sharing on_backfill'],
   ['savings off', 'sharing off'],
   ['savings not_now', 'sharing not_now'],
   ['savings status', 'status'],
@@ -303,7 +315,6 @@ export const RENAMED: readonly (readonly [string, string])[] = [
   ['dashboard allow', 'sharing page on'],
   ['dashboard not_now', 'sharing page off'],
   ['routing on', 'routing suggest'], // 0.6.1
-  ['sharing on', 'sharing on_backfill'], // 0.6.1
 ]
 
 /** An old spelling as its new words, with the one line that names the new spelling; null for anything else. Pure. */
@@ -653,12 +664,15 @@ export class Command {
         return rest.length ? USAGE : this.setup()
       case 'sharing':
         return this.sharing(rest)
-      case 'savings':
-        return rest.length ? USAGE : this.savings()
+      case 'savings': // `savings on` (an older spelling) asks, as `sharing on` does
+        return rest.length === 1 && rest[0]!.toLowerCase() === 'on' ? this.sharingChoice()
+          : rest.length ? USAGE : this.savings()
       case 'methods':
         return this.methods(rest)
       case 'routing':
         return this.routing(rest)
+      case 'autonomy':
+        return this.autonomy(rest)
       case 'update':
         return rest.length ? USAGE : this.update()
       case 'offline':
@@ -725,7 +739,8 @@ export class Command {
     const ul = updatesLine()
     if (ul) lines.push(ul)
     if (auth === 'ok') {
-      lines.push(await this.recordLine(), await this.methodsLine(), await this.routingLine())
+      lines.push(await this.recordLine(), await this.methodsLine(), await this.routingLine(),
+        AUTONOMY_LINE[(await readAutonomy(this.d.store)) ?? 'none']!)
       const n = (await this.safe(() => this.openQuestions(), [] as Question[])).length
       if (n) lines.push(`${n} question${n === 1 ? '' : 's'} waiting: run ${COMMAND} setup.`)
     }
@@ -777,6 +792,8 @@ export class Command {
     const s = await recordState(this.d.store)
     if (savingsOpen(s)) out.push('savings')
     if ((await readLevel(this.d.store, this.d.now())) === null) out.push('methods')
+    const routing = await this.safe(() => this.d.store.get(ROUTING_KEY), null as unknown)
+    if (routing === undefined || routing === null) out.push('routing') // asked once; any level set answers it
     return out
   }
 
@@ -837,6 +854,15 @@ export class Command {
   }
 
   private async askOne(q: Question): Promise<string | null> {
+    if (q === 'routing') {
+      const a = await this.dialog(ROUTING_QUESTION, ROUTING_OPTIONS, ROUTING_HEADER)
+      if (a === null) return null
+      if (a === ROUTING_OPTIONS[2]) {
+        return 'Subagent routing stays at suggest (the default); you are asked again in 7 days at the earliest. ' +
+          `${COMMAND} routing suggest or ${COMMAND} routing strict answers it now.`
+      }
+      return this.routing([a === ROUTING_OPTIONS[1] ? 'strict' : 'suggest'])
+    }
     if (q === 'savings') {
       const a = await this.dialog(await sharingQuestion(this.d.store, SHARING_QUESTION), SHARING_OPTIONS, SHARING_HEADER)
       if (a === null) return null
@@ -1000,6 +1026,12 @@ export class Command {
     }
     if (sub === 'diff') {
       const d = await methodsDiff(lineDiff)
+      const seen = d === null && (await this.safe(() => this.level(), 'suggest' as Level)) !== 'on'
+        ? await seenDiff(this.d.store, lineDiff) : null
+      if (seen) {
+        return `The served working methods changed from ${seen.from} to ${seen.to} ("- " ${seen.from}, "+ " ` +
+          `${seen.to}):\n\n${seen.text}\n\nThe new version already applies; nothing needs to be accepted.`
+      }
       return d === null
         ? 'The served working methods are the ones you approved; there is nothing to review.'
         : `The served working methods differ from the ones you approved ("- " approved, "+ " new):\n\n${d}\n\n` +
@@ -1067,9 +1099,21 @@ export class Command {
       return this.setRecord(w[0] === 'on_backfill' ? 'backfill' : 'from_now')
     }
     if (w.length === 1 && w[0] === 'preview') return this.sharingPreview()
+    if (w.length === 1 && w[0] === 'on') return this.sharingChoice() // 0.6.3: asks, never turns it on by itself
     if (w.length === 2 && w[0] === 'page' && (w[1] === 'on' || w[1] === 'off')) return this.setPage(w[1] === 'on')
     if (w.length === 2 && w[0] === 'mail' && (w[1] === 'on' || w[1] === 'off')) return this.setMail(w[1] === 'on')
     return USAGE
+  }
+
+  /** `sharing on` (and `savings on`): the three-option savings question in the dialog where one can be shown, else
+   * the three commands to choose from. Nothing is turned on without the user's own answer. */
+  private async sharingChoice(): Promise<string> {
+    const choose = `Choose one: ${COMMAND} sharing on_backfill (upload, including the past 30 days), ${COMMAND} sharing ` +
+      `on_from_now (upload from now on only) or ${COMMAND} sharing off (don't upload).`
+    if ((await recordState(this.d.store)).org === 'off') return `${ORG_SET_TEXT} Nothing was changed.`
+    if (!this.canAsk()) return `Nothing was turned on. ${choose}`
+    const a = await this.askOne('savings')
+    return a ?? `Not answered; nothing was turned on. ${choose}`
   }
 
   /** The weekly email (a server setting); null when it changed, else the reason. */
@@ -1381,6 +1425,15 @@ export class Command {
     return ROUTING_STATUS[level]
   }
 
+  /** autonomy [auto | ask | clear]: the user's autonomy choice, kept for the signed-in account (autonomy.ts). */
+  private async autonomy(rest: string[]): Promise<string> {
+    const w = (rest[0] ?? '').toLowerCase()
+    if (rest.length === 0) return AUTONOMY_LINE[(await readAutonomy(this.d.store)) ?? 'none']!
+    if (rest.length !== 1 || (w !== 'auto' && w !== 'ask' && w !== 'clear')) return USAGE
+    if (!(await setAutonomy(this.d.store, w === 'clear' ? null : w, this.d.now()))) return errorText('store_unavailable')
+    return AUTONOMY_SET[w]!
+  }
+
   /** routing [off | suggest | strict]: the level of the agent.spawn hook (routing_level.ts). Works signed out:
    * nothing is sent. */
   private async routing(rest: string[]): Promise<string> {
@@ -1622,6 +1675,10 @@ export function serveCommand(
   })).catch(($: EngineInterface, e: any, next: any) => next(e))
   on('tool.call', { tool: `mcp__${COMMAND_NAME}__${SETUP_SPEC.name}` }, async ($: EngineInterface, e: { command?: unknown; agentId?: unknown }) => {
     const c = String(e?.command ?? '')
+    if (UPLOAD_ON_WORDS.includes(c.trim().toLowerCase())) {
+      return { result: 'The setup tool cannot turn the savings upload or its page on: that is the user\'s own choice. The user ' +
+        `turns it on with ${COMMAND} setup or ${COMMAND} sharing on_backfill|on_from_now; nothing was changed.` }
+    }
     if (!SETUP_COMMANDS.includes(c) && !SETUP_ALIASES.includes(c)) {
       return { result: `Unknown setup command; use one of: ${SETUP_COMMANDS.join(', ')}.` }
     }

@@ -18,6 +18,7 @@
 import type { EngineInterface } from 'claude-code'
 import { checkpointCall, checkpointPersonPrompt, checkpointTurnEnd, recheckCheckpoint, setupCheckpoint } from './checkpoint'
 import { notePersonPrompt, servedBrief, takeRouteHint } from './flow_state'
+import { takeNotice } from './methods'
 import { methodsLevel } from './methods_level'
 import { SEP } from './status'
 import { engineStore } from './store'
@@ -290,6 +291,15 @@ export async function flowPrompt($: EngineInterface, e: Obj, rt?: Ready): Promis
     const out = notes.length && (await notesOn($)) ? [notes.join('\n')] : []
     const hint = takeRouteHint() // the routing level decides this one, not the methods level
     if (hint) out.push(routeHintNote(hint))
+    const told = takeNotice() // methods.ts: a new served methods version, for the user (never the model)
+    if (told) {
+      try {
+        $.ui.log(told)
+      } catch {}
+      try {
+        $.ui.toast(told)
+      } catch {}
+    }
     return out
   } catch {
     return []

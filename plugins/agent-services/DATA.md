@@ -1,8 +1,10 @@
 # agent-services: what it sends, keeps and does
 
 This note ships with the plugin. `/agent-services info data` shows it, and so does the setup tool's `info data`
-command. The setup tool changes a choice (`sharing on_backfill`, `methods on` and the like) only in the main conversation of a
-session you are at, to apply your answer; elsewhere it refuses and changes nothing.
+command. The setup tool changes a choice (`sharing off`, `methods on` and the like) only in the main conversation of a
+session you are at, to apply your answer; elsewhere it refuses and changes nothing. It can never turn the savings
+upload on: only you do, in the dialog of `/agent-services setup` or by typing `/agent-services sharing
+on_backfill|on_from_now` (`/agent-services sharing on` asks you the same three-option question).
 `/agent-services info hooks` lists every hook the plugin registers. `/agent-services info log` shows the request log on
 this computer: each request is recorded there as it is sent, with the answer that came back. The log is written to
 disk every few seconds, so a request made in the last seconds before Claude Code stops can be missing from it.
@@ -113,10 +115,11 @@ email address and device count stay visible to the admin while you are a member.
 
 | Where | What |
 |---|---|
-| Claude Code's plugin store, a JSON file in your Claude Code folder (`~/.claude`) | the sign-in credential in plain text (the token, the next token during a rotation, the device key), plus account id, device id, plan, your choices (the savings record, kept for each account that signed in here, and the methods level) and switches, a local key for the project hash, and day counters. Any other plugin and any program running as you can read it; a copy works as your sign-in until the next rotation or sign-out. |
+| Claude Code's plugin store, a JSON file in your Claude Code folder (`~/.claude`) | the sign-in credential in plain text (the token, the next token during a rotation, the device key), plus account id, device id, plan, your choices (the savings record, the autonomy choice and the methods version you were last told about, each kept for each account that signed in here, and the methods level and the routing level) and switches, a local key for the project hash, and day counters. Any other plugin and any program running as you can read it; a copy works as your sign-in until the next rotation or sign-out. |
 | `~/.agent-services/services/outbox/<day>-<session>.jsonl` | the request log: every request as sent (secrets such as the code and the token blanked) and its answer, previews, every call the model made to this plugin's tools with its full arguments (for one, a whole subagent description given to `router_advice`), and savings-page publish attempts. Kept 90 days, at most 2 MiB a file. |
 | `~/.agent-services/dashboard/`, `~/.agent-services/boss/`, `~/.agent-services/services/*.json` | your savings page (a company admin's board, with member emails) and their publish state |
 | `~/.agent-services/methods.md`, `methods.approved.md`, `methods.pending.md` | the working-methods text |
+| `~/.agent-services/methods.seen.md`, `methods.previous.md` | the served working-methods text of the version last seen and of the one before it, so `/agent-services methods diff` can show what changed |
 | `~/.agent-services/services/asked.json` | when a setup question was last asked, by any session (an unanswered question waits 7 days) |
 | `plugin-update.json` (in Claude Code's data folder for this plugin, else `~/.agent-services/services/`) | the update check's state |
 | `~/.agent-services/MIGRATED` | what the one-time move from an older version did |
@@ -145,6 +148,16 @@ text of your messages (only to see whether one asks for a review), and the marke
   hint the routing service sent for a subagent that ran without routing advice (a description without a task type
   word).
 - The speed-up suggestion the routing service sends is added once to the end of each routed subagent's prompt.
+- The autonomy choice: when you answer the working methods' question with "Fully automatic (agent-services
+  recommends this)" or "Check in with me as usual" (Claude Code's AskUserQuestion dialog, in the main conversation,
+  while signed in), the plugin keeps that answer for your account in the plugin store only; nothing of it is sent.
+  While one is kept, the working methods the plugin adds to a prompt (level `suggest`) end with one agent-services
+  note saying which you chose. `/agent-services autonomy` shows it, `autonomy auto | ask` changes it and
+  `autonomy clear` forgets it; `/agent-services status` shows it in one line.
+- A new served version of the working methods (level `suggest`): the first time a prompt brings a version other
+  than the one your account was last told about, a dim line and a toast say "agent-services working methods were
+  updated to <version>. /agent-services methods diff shows what changed." once; the new version applies without an
+  accept. The first version ever seen is recorded without a line.
 - The suggestion and the notes stop while the working methods are switched off (the routing hint note does not: it
   follows the routing level); the suggestion and the routing hint note also stop while subagent routing is off
   (`/agent-services routing off`).
@@ -193,7 +206,7 @@ nobody can be asked in (such as `claude -p`) and for subagents it does nothing. 
 written through a Bash command is never held. Where your company set the daily upload off for everyone, only its
 admin can change it.
 
-The plugin asks its setup questions (the savings record and the methods level) together, only in the dialog of
+The plugin asks its setup questions (the savings record, the methods level and the subagent routing level) together, only in the dialog of
 `/agent-services setup` (or right after a sign-in through that dialog); the model is never told to ask them. While
 one is open, the line above the prompt says how many and names `/agent-services setup`; after the command ran,
 answered or not, that line comes back at most once every 7 days across all sessions. `/agent-services status` only

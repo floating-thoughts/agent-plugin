@@ -16,6 +16,7 @@
 // - Not signed in (any auth state but ok: signed out, locked, paused): a short note instead, so nothing is followed
 //   then. Signed in but nothing fetched (the server unreachable): the approved text stays and is renewed.
 // A session with the methods loaded through CLAUDE.md gets no injected pushes (phase.ts pushLessons).
+// - 0.6.3: a new served version delivered by a push is said to the user once per account (seenVersion).
 import type { EngineInterface } from 'claude-code'
 import { canAsk } from './choice'
 import { engineDirs } from './engine_env'
@@ -332,5 +333,85 @@ export async function methodsStart($: EngineInterface, r: MethodsRuntime | null,
     await syncMethodsNow()
   } catch {
     // nothing this session
+  }
+}
+
+// ------------------------------------------------------------------ the methods update notice (0.6.3)
+// When the served methods version a push delivers (phase.ts, level suggest) differs from the version the signed-in
+// account was last told about, the user is told once (a dim line and a toast); the new version applies without an
+// accept. The first version ever seen is recorded silently. SEEN_KEY keeps the version per account id; the text of
+// the version seen is kept in SEEN_FILE and the one before in PREVIOUS_FILE, so `methods diff` can show the change.
+export const SEEN_KEY = 'methods_seen' // { [account id]: { version, previous?, at } }
+export const SEEN_FILE = 'methods.seen.md'
+export const PREVIOUS_FILE = 'methods.previous.md'
+
+/** The notice for a new served methods version. Pure. */
+export const methodsUpdatedText = (version: string): string =>
+  `agent-services working methods were updated to ${version}. /agent-services methods diff shows what changed.`
+
+type SeenStore = { get(key: string): Promise<unknown>; set(key: string, value: unknown): Promise<void> }
+
+let notice: string | null = null // a notice waiting for flow.ts flowPrompt to show it (a dim line and a toast)
+
+/** Keeps the notice for the user until takeNotice. */
+export function queueNotice(text: string): void {
+  notice = text
+}
+
+/** The notice waiting to be shown, once (null: none). */
+export function takeNotice(): string | null {
+  const t = notice
+  notice = null
+  return t
+}
+
+async function seenEntry(store: SeenStore): Promise<{ acc: string; map: Obj; entry: Obj | null } | null> {
+  const acc = await store.get('account_id')
+  if (typeof acc !== 'string' || !acc) return null
+  const all = await store.get(SEEN_KEY)
+  const map: Obj = isObj(all) ? { ...all } : {}
+  const e = map[acc]
+  return { acc, map, entry: isObj(e) && typeof e.version === 'string' ? e : null }
+}
+
+/** phase.ts, after a push delivered served methods of `version`: the notice when it differs from the version this
+ * account was told about (recorded first, so it is said once), else null; the first version is recorded silently.
+ * Never throws. */
+export async function seenVersion(store: SeenStore, version: string): Promise<string | null> {
+  try {
+    if (!version) return null
+    const s = await seenEntry(store)
+    if (!s || s.entry?.version === version) return null
+    const changed = s.entry !== null
+    s.map[s.acc] = changed ? { version, previous: s.entry!.version, at: Date.now() } : { version, at: Date.now() }
+    await store.set(SEEN_KEY, s.map)
+    void keepSeenText(changed).catch(() => undefined)
+    return changed ? methodsUpdatedText(version) : null
+  } catch {
+    return null
+  }
+}
+
+/** The served text of the version seen into SEEN_FILE; on a change the text before goes to PREVIOUS_FILE. */
+async function keepSeenText(changed: boolean): Promise<void> {
+  if (!files) return
+  if (changed) await files.write(PREVIOUS_FILE, (await files.read(SEEN_FILE)) ?? '')
+  const now = (await fetcher?.()) ?? null
+  if (now !== null) await files.write(SEEN_FILE, now)
+}
+
+/** "methods diff" below level on: the last change of the served version this machine kept, or null when none was
+ * kept. Never throws. */
+export async function seenDiff(store: SeenStore, diff: (a: string, b: string) => string):
+  Promise<{ from: string; to: string; text: string } | null> {
+  try {
+    const s = await seenEntry(store)
+    if (!s?.entry || typeof s.entry.previous !== 'string' || !files) return null
+    const before = await files.read(PREVIOUS_FILE)
+    const after = await files.read(SEEN_FILE)
+    if (blank(before) || blank(after)) return null
+    return { from: s.entry.previous, to: s.entry.version, text: diff(bodyOf(before), bodyOf(after)) }
+  } catch {
+    return null
   }
 }
