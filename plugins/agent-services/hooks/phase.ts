@@ -4,16 +4,18 @@
 //
 // - "on" (the user made the methods their own instructions): file changes (Edit, Write, MultiEdit, NotebookEdit) on
 //   any path but agent-state.md are denied while the document is missing, says `phase: planning` (or has a
-//   malformed first line), or says `phase: running` without a goal and at least one plan step. Small edits pass
-//   (smallEdit: an Edit or MultiEdit that changes at most SMALL_EDIT_LINES lines in all). Writes to agent-state.md
-//   always go through.
+//   malformed first line), or says `phase: running` without the served plan-validity criteria met (a goal and plan
+//   steps). Small edits pass (smallEdit: an Edit or MultiEdit that changes at most the served number of lines in
+//   all). Writes to agent-state.md always go through.
 // - "suggest" (the default): nothing is denied; the first such change of a session brings one reminder line with the
-//   next prompt (GATE_REMINDER).
+//   next prompt (gateReminder).
+// - The criteria, the line count and the texts come from the served workflow table (workflow_table.ts); without it
+//   the gate denies nothing and reminds of nothing (fail open). The deny decision and reading agent-state.md stay here.
 // - "off": the gate does nothing.
 // - Bash and the read tools are never held at any level: a file written through Bash is not seen by the gate.
 // - No session that nobody can be asked in (a -p run, choice.ts canAsk) is held.
-// - lesson_lookup answers only phase `plan` until the document is running; any other phase gets an empty item list
-//   and a short reason, without asking the server. At "off" it gives no items, and at "on" it points to the
+// - lesson_lookup answers only phase `plan` until the document is running (with the served table; without it nothing
+//   is held); any other phase gets an empty item list and a short reason, without asking the server. At "off" it gives no items, and at "on" it points to the
 //   approved text the CLAUDE.md line already loads.
 // - Subagents are never held: the gate is the main agent's startup phase, and a subagent is dispatched by a main
 //   session that has already planned (often in a git worktree with no agent-state.md). The engine's `agentId` on
@@ -25,6 +27,7 @@ import { normPath } from './paths'
 import { canAsk } from './choice'
 import { levelNow, methodsActive, queueNotice, seenVersion } from './methods'
 import { autonomyNote, readAutonomy } from './autonomy'
+import { servedFlag, servedInt, servedText, workflowPart } from './workflow_table'
 export { methodsStart } from './methods' // register.ts wires it beside pushStart
 export { noteAutonomy } from './autonomy' // register.ts tool.call, after the call ran
 
@@ -35,21 +38,20 @@ export const STATE_TEMPLATE = 'phase: planning\n\n## Goal\n\n## Open questions\n
 // STATE_TEMPLATE filled in: the shortest file the gate lets through; every deny reason ends with it
 export const STATE_EXAMPLE = 'phase: running\n\n## Goal\n\nFix the login timeout.\n\n## Open questions\n\n## Plan\n\n' +
   '- Raise the timeout and add a test for it.\n'
-export const PLANNING_REASON = 'agent-services planning gate (a plugin rule): agent-state.md is still in planning (its ' +
-  'first line is not `phase: running`), so file changes wait until planning is finished. Finish the goal check, write the plan under `## Plan` (one `- ` line ' +
-  'per step), then set the first line to `phase: running`. Writes to agent-state.md itself are always allowed. ' +
-  'A valid file:\n\n' + STATE_EXAMPLE
-export const INCOMPLETE_REASON = 'agent-services planning gate (a plugin rule): agent-state.md says `phase: running` but ' +
-  'has no written goal and plan, so file changes still wait. A task can switch to running only with text under ' +
-  'a `## Goal` heading and at least one `- ` step line under a `## Plan` heading (level 2 or 3; any words may follow, ' +
-  'such as `## Plan (release order)`); fill them in, then try again. A valid file:\n\n' + STATE_EXAMPLE
 export const LESSON_REASON = 'finish planning first (agent-state.md phase: planning)'
 export const LESSON_OFF = 'the working methods are off (/agent-services methods suggest turns them back on)'
 export const LESSON_ON = 'the working methods you approved are already loaded by your CLAUDE.md; follow that text'
-export const SMALL_EDIT_LINES = 10 // an Edit or MultiEdit changing at most this many lines passes the gate at "on"
-export const GATE_REMINDER = '[agent-services suggestion, not written by the user] Files were changed while ' +
-  'agent-state.md had no running plan. agent-services suggests planning larger changes first: the goal and the plan ' +
-  'steps in agent-state.md, then `phase: running` as its first line. Nothing was held; this is said once per session.'
+
+// The served planning-gate values (workflow table, section planning_gate); null without the table, and then the gate
+// denies nothing and reminds of nothing (fail open).
+/** The deny reason while agent-state.md is in planning, ending with STATE_EXAMPLE. */
+export const planningReason = (): string | null => servedText('planning_gate', 'planning_reason', { example: STATE_EXAMPLE })
+/** The deny reason for `phase: running` without the served criteria met, ending with STATE_EXAMPLE. */
+export const incompleteReason = (): string | null => servedText('planning_gate', 'incomplete_reason', { example: STATE_EXAMPLE })
+/** The suggest-level reminder, once per session. */
+export const gateReminder = (): string | null => servedText('planning_gate', 'reminder')
+/** An Edit or MultiEdit changing at most this many lines passes the gate at "on". */
+export const smallEditLines = (): number | null => servedInt('planning_gate', 'small_edit_lines', 0)
 
 export type PhaseState = { exists: boolean; phase: 'planning' | 'running'; goal: string; plan: string[] }
 type Read = (path: string) => Promise<string | null>
@@ -81,8 +83,17 @@ export function parseState(text: string | null): PhaseState {
   return { exists: true, phase, goal: goal.join('\n'), plan }
 }
 
-/** Running with a written goal and plan: only then is the work phase open. */
-export const isRunning = (s: PhaseState): boolean => s.phase === 'running' && s.goal !== '' && s.plan.length > 0
+/** Running and meeting the served plan-validity criteria (a written goal, at least plan_steps_min plan steps): only
+ * then is the work phase open. Without the table only the first line counts (the gate denies nothing then anyway). */
+export function isRunning(s: PhaseState): boolean {
+  if (s.phase !== 'running') return false
+  if (!workflowPart('planning_gate')) return true
+  const goal = servedFlag('planning_gate', 'goal_required') === true
+  return (!goal || s.goal !== '') && s.plan.length >= (servedInt('planning_gate', 'plan_steps_min', 0) ?? 0)
+}
+
+/** The work phase is open: no served planning-gate table (nothing is held then, like the gate), or isRunning. */
+export const workOpen = (s: PhaseState): boolean => !workflowPart('planning_gate') || isRunning(s)
 
 const trimDir = (p: string): string => normPath(p).replace(/\/+$/, '')
 
@@ -113,17 +124,19 @@ export const missingReason = (cwd: string): string =>
 /** The deny reason for one tool call, or null to let it go on. Pure: `text` is the state document (null: missing). */
 export function writeDeny(tool: unknown, input: Obj, cwd: string, text: string | null): string | null {
   if (typeof tool !== 'string' || !WRITE_TOOLS.includes(tool)) return null
+  if (!workflowPart('planning_gate')) return null // no served table: the gate fails open
+  if (smallEditLines() === null) return null // a partial table without a usable small_edit_lines: fail open too
   if (isStatePath(input.file_path ?? input.notebook_path ?? input.path, cwd)) return null
   const s = parseState(text)
   if (!s.exists) return missingReason(cwd)
-  if (s.phase === 'planning') return PLANNING_REASON
-  return isRunning(s) ? null : INCOMPLETE_REASON
+  if (s.phase === 'planning') return planningReason()
+  return isRunning(s) ? null : incompleteReason()
 }
 
 /** The reason a lesson_lookup for `phase` is held, or null to fetch it. Pure. */
 export function lessonDeny(phase: unknown, text: string | null): string | null {
   if (phase === 'plan') return null
-  return isRunning(parseState(text)) ? null : LESSON_REASON
+  return workOpen(parseState(text)) ? null : LESSON_REASON
 }
 
 /** The answer of a held lesson_lookup: no items, the reason, and nothing asked of the server. */
@@ -186,12 +199,14 @@ export const lessonHold = (read: Read) => async (args: Obj, cwd: string | null):
 
 const lines = (v: unknown): number => (typeof v === 'string' && v ? v.split(/\r?\n/).length : 0)
 
-/** An Edit or MultiEdit that changes at most SMALL_EDIT_LINES lines in all (each edit counts its longer side).
- * Write and NotebookEdit are never small. Pure. */
+/** An Edit or MultiEdit that changes at most smallEditLines() lines in all (each edit counts its longer side).
+ * Write and NotebookEdit are never small, and nothing is without the served table. */
 export function smallEdit(tool: unknown, input: Obj): boolean {
+  const max = smallEditLines()
+  if (max === null) return false
   const one = (e: unknown) => (e && typeof e === 'object' ? Math.max(lines((e as Obj).old_string), lines((e as Obj).new_string)) : Infinity)
-  if (tool === 'Edit') return one(input) <= SMALL_EDIT_LINES
-  if (tool === 'MultiEdit') return Array.isArray(input.edits) && input.edits.reduce((n: number, e) => n + one(e), 0) <= SMALL_EDIT_LINES
+  if (tool === 'Edit') return one(input) <= max
+  if (tool === 'MultiEdit') return Array.isArray(input.edits) && input.edits.reduce((n: number, e) => n + one(e), 0) <= max
   return false
 }
 
@@ -234,8 +249,9 @@ export async function holdWrite(rt: Promise<Runtime>, tool: unknown, input: Obj,
 /** The suggest-level reminder for this prompt, once per session (null when none is due). */
 function takeReminder(r: object | null): string | null {
   if (!r || reminders.get(r) !== 'due') return null
-  reminders.set(r, 'told')
-  return GATE_REMINDER
+  const text = gateReminder()
+  if (text) reminders.set(r, 'told') // no served text yet: it stays due
+  return text
 }
 
 // ------------------------------------------------------------------ push by phase

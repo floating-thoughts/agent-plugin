@@ -18,6 +18,7 @@ import { localDay } from './counters'
 import { DATA_FIELDS } from './render'
 import { COMMAND, COUNTED, fixed, shortDay } from './status'
 import { plusDays, pyRound, pySum } from './pyfmt'
+import { servedNumber, servedValue } from './rules'
 
 export const BOARD_FIELDS = [...DATA_FIELDS, 'timeline', 'weekly'] as const // the page's data slot
 export const TIMELINE_MAX = 12 // items shown, newest first
@@ -41,6 +42,29 @@ export const LEVER_WORDS: Record<string, string> = {
 export const ADMIN_LINE = 'Your company admin can see your savings figure.'
 export const OFF_LINE = `Turn on the savings record to see a weekly summary: ${COMMAND} sharing on`
 export const WAIT_LINE = 'Your weekly summary appears after your first full day of measured savings.'
+// PHRASES, LEVER_WORDS and the 0.005 USD threshold are the built-in values; the served board table (rules
+// board.json: phrases, lever_words, min_usd) wins while the tables are held.
+
+/** The smallest amount that counts as saved (a saved day, a best day, a lever, a change): served min_usd, else 0.005. */
+export function minUsd(): number {
+  return servedNumber('board', 'min_usd', 0.005, 0.0001, 1)
+}
+
+/** The lever words in use: the served lever_words when it is an object of texts, else LEVER_WORDS. */
+export function leverWords(): Record<string, string> {
+  const v = servedValue('board', 'lever_words')
+  if (!isObj(v)) return LEVER_WORDS
+  const out: Record<string, string> = {}
+  for (const [k, w] of Object.entries(v)) if (typeof w === 'string' && w) out[k] = w
+  return Object.keys(out).length ? out : LEVER_WORDS
+}
+
+/** The [one, many] phrase of a kind: the served phrases entry when it is two texts, else the built-in one. */
+function phrasePair(kind: string): [string, string] | undefined {
+  const v = servedValue('board', 'phrases')
+  const p = isObj(v) ? v[kind] : undefined
+  return Array.isArray(p) && p.length === 2 && p.every((x) => typeof x === 'string') ? [p[0], p[1]] : PHRASES[kind]
+}
 
 type Obj = Record<string, any>
 export type TimelineItem = { at: string; kind: string; count: number; text: string }
@@ -87,7 +111,7 @@ export function kindOf(line: unknown): string | null {
 }
 
 const phrase = (kind: string, n: number): string => {
-  const [one, many] = PHRASES[kind]
+  const [one, many] = phrasePair(kind)!
   return n === 1 ? one : many.replace('{n}', String(n))
 }
 
@@ -168,15 +192,16 @@ export function weeklyOf(savings: unknown, report: unknown, today: string, opts:
     out.since = typeof s.first_day === 'string' ? s.first_day : null
     out.your_pct = num(s.pct)
   }
+  const min = minUsd()
   if (week.length) {
     out.this_week_usd = pyRound(pySum(week.map((r: Obj) => num(r.usd) ?? 0)), 6)
-    out.days_saved = week.filter((r: Obj) => (num(r.usd) ?? 0) >= 0.005).length
+    out.days_saved = week.filter((r: Obj) => (num(r.usd) ?? 0) >= min).length
     const best = week.reduce((a: Obj | null, r: Obj) => ((num(r.usd) ?? 0) > (a ? num(a.usd) ?? 0 : 0) ? r : a), null)
-    if (best && (num(best.usd) ?? 0) >= 0.005) out.best_day = { day: best.day, usd: num(best.usd) }
+    if (best && (num(best.usd) ?? 0) >= min) out.best_day = { day: best.day, usd: num(best.usd) }
     let top: [string, number] | null = null
-    for (const name of Object.keys(LEVER_WORDS)) {
+    for (const name of Object.keys(leverWords())) {
       const v = pySum(week.map((r: Obj) => num(r[`${name}_usd`]) ?? 0))
-      if (v >= 0.005 && (top === null || v > top[1])) top = [name, v]
+      if (v >= min && (top === null || v > top[1])) top = [name, v]
     }
     out.top_lever = top ? top[0] : null
   }
@@ -190,18 +215,20 @@ export function weeklyOf(savings: unknown, report: unknown, today: string, opts:
 export function weeklyLines(w: Obj, metricsOn?: boolean | null): string[] {
   const lines: string[] = []
   const usd = num(w.this_week_usd)
+  const min = minUsd()
+  const levers = leverWords()
   if (metricsOn === false && usd === null) lines.push(OFF_LINE)
   else if (usd === null) lines.push(WAIT_LINE)
   else {
-    if (usd >= 0.005) lines.push(`In the last ${WEEK_DAYS} days agent-services saved you ${money(usd)}.`)
-    else if (usd <= -0.005) lines.push(`In the last ${WEEK_DAYS} days memory cleanups cost ${money(usd)} more than they saved.`)
+    if (usd >= min) lines.push(`In the last ${WEEK_DAYS} days agent-services saved you ${money(usd)}.`)
+    else if (usd <= -min) lines.push(`In the last ${WEEK_DAYS} days memory cleanups cost ${money(usd)} more than they saved.`)
     else lines.push(`Nothing was saved in the last ${WEEK_DAYS} days.`)
     const ch = num(w.change_usd)
-    if (ch !== null && Math.abs(ch) >= 0.005) lines.push(`That is ${money(ch)} ${ch > 0 ? 'more' : 'less'} than the ${WEEK_DAYS} days before.`)
+    if (ch !== null && Math.abs(ch) >= min) lines.push(`That is ${money(ch)} ${ch > 0 ? 'more' : 'less'} than the ${WEEK_DAYS} days before.`)
     const best = isObj(w.best_day) ? w.best_day : null
     const bestDay = best ? shortDay(best.day) : null
     if (best && bestDay && (num(w.days_saved) ?? 0) > 1) lines.push(`Your best day was ${bestDay}: ${money(best.usd)}.`)
-    if (typeof w.top_lever === 'string' && LEVER_WORDS[w.top_lever]) lines.push(`Most of it came from ${LEVER_WORDS[w.top_lever]}.`)
+    if (typeof w.top_lever === 'string' && levers[w.top_lever]) lines.push(`Most of it came from ${levers[w.top_lever]}.`)
   }
   const peer = num(w.peer_pct)
   const yours = num(w.your_pct)

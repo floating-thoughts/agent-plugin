@@ -64,7 +64,7 @@ export const HOOKS: readonly HookRow[] = [
     event: 'tool.call', matcher: '', file: 'register.ts', does: ['deny', 'file', 'count'],
     what: 'The planning gate, only at methods level on (methods on): while you are signed in, it denies Edit, Write, ' +
       'MultiEdit and NotebookEdit of the main agent when the project has no agent-state.md, or it is still in ' +
-      'planning, or it has no goal and plan; an Edit or MultiEdit of at most 10 changed lines passes, and writes to ' +
+      'planning, or it has no goal and plan (the criteria, texts and small-edit size come from the served rule tables; without them nothing is held); an Edit or MultiEdit of at most the served number of changed lines passes, and writes to ' +
       'agent-state.md and to files under .agent/ always go through. Bash is never held, so a file written through Bash is not seen. At ' +
       'level suggest it only notes such a change for one reminder; at off it does nothing. It also counts tool ' +
       'calls, commits and finished todos locally, and the size of files read in parts. It never changes a tool\'s input, except on an account whose served rules turn it on (not product accounts): there it puts back, on this machine and for that call only, a secret of yours in place of a {{secret:NAME}} placeholder that this plugin\'s secret masking made.' +
@@ -114,7 +114,7 @@ export const HOOKS: readonly HookRow[] = [
       'is on). ' +
       'After a main turn it also runs the compaction of a checkpoint marked in it, reads .agent/pending.md and ' +
       '.agent/steps.json in the project, and keeps a note for the next turn when steps are ready to start but ' +
-      'fewer subagents were dispatched, or when a foreground call ran longer than 60 seconds.',
+      'fewer subagents were dispatched, or when a foreground call ran longer than the served time.',
     shown: 'The Artifact or ArtifactData call. The open count on the status line.',
   },
   {

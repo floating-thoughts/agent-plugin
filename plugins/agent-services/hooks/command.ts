@@ -64,7 +64,7 @@ import { hasTrust, type TrustFile, unbalancedTrust, withoutTrust, withTrust } fr
 import { approveMethods, importLine, LEVEL_KEY, type Level, levelOf, methodsDiff, methodsNoted, methodsNotes,
   previewMethods, readLevel, seenDiff, settlePending, syncMethodsNow } from './methods'
 import { AUTONOMY_LINE, AUTONOMY_SET, readAutonomy, setAutonomy } from './autonomy'
-import { framing, lineDiff, NOTE_LABEL, pendingNoteText, updateNoteText } from './review'
+import { framing, hasUpdateNote, lineDiff, NOTE_LABEL, pendingNoteText, updateNoteText } from './review'
 import { bandSetup } from './band'
 import { durationText } from './panel'
 import { ORG_PAUSED_LINE, ORG_SAVINGS_TEXT, ORG_SET_TEXT, orgChoice, orgNotice, readOrg, sharingQuestion } from './org'
@@ -913,9 +913,12 @@ export class Command {
       return framing(st?.account_id, st?.plan)
     }
     if (first) return null // the update notice waits until after the first turn of work
-    const u = (await this.autoUpdateOn()) ? null : await this.safe(update, null)
-    if (u) return { text: updateNoteText(u.installed, u.latest, await facts()), which: 'update' }
-    if (await this.safe(pending, false)) return { text: pendingNoteText(await facts()), which: 'pending' }
+    // update() spends the note (marks the version told): only taken when its served text exists
+    const u = (await this.autoUpdateOn()) || !hasUpdateNote() ? null : await this.safe(update, null)
+    const up = u ? updateNoteText(u.installed, u.latest, await facts()) : null
+    if (up) return { text: up, which: 'update' }
+    const changed = (await this.safe(pending, false)) ? pendingNoteText(await facts()) : null
+    if (changed) return { text: changed, which: 'pending' }
     return null
   }
 

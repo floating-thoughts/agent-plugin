@@ -10,8 +10,9 @@
 // - .agent/steps.json  {"steps": [{"id", "deps": [ids], "status": "todo" | "running" | "done"}]}: at the end of a main
 //   turn that dispatched fewer subagents than there are steps ready to start (todo, every dependency done), the next
 //   turn carries one note naming those steps (the same list is not repeated).
-// - A foreground Bash, PowerShell or subagent call of the main conversation that ran longer than BACKGROUND_AFTER_MS:
-//   the next turn carries one note suggesting background runs (at most BACKGROUND_NOTES_MAX per session).
+// - A foreground Bash, PowerShell or subagent call of the main conversation that ran longer than the served time:
+//   the next turn carries one note suggesting background runs (at most the served number per session).
+// The thresholds and note texts are served (workflow table, section flow); without the table no note is made.
 // - The routing hint (0.6.2): the first hint the routing service sent with a pass (a description without a task type
 //   word) reaches the model once per session, as a note on the next prompt of the main conversation. It follows the
 //   routing level, not the methods level: the agent.spawn hook does nothing at routing off, so no hint is kept.
@@ -26,11 +27,10 @@ import { SEP } from './status'
 import { engineStore } from './store'
 import { authorCheck, ownerCheck, signedIn } from './subagents'
 import { toolInput } from './tools'
+import { servedInt, servedText } from './workflow_table'
 
 type Obj = Record<string, any>
 
-export const BACKGROUND_AFTER_MS = 60_000
-export const BACKGROUND_NOTES_MAX = 3
 export const FLOW_NOTE_LABEL = '[agent-services plugin note, not written by the user]'
 export const BRIEF_LABEL = '[agent-services suggestion, added to this brief by the agent-services plugin]'
 export const LOCK_FILE = '.agent/test-lock.json'
@@ -135,26 +135,37 @@ export function readySteps(text: string | null): string[] {
     .map((s) => String(s.id))
 }
 
-/** The concurrency note, or null when the dispatches cover the ready steps. Pure. */
-export function stepsNote(ready: readonly string[], dispatched: number): string | null {
-  if (ready.length === 0 || dispatched >= ready.length) return null
-  const shown = ready.slice(0, 10).join(', ') + (ready.length > 10 ? `, and ${ready.length - 10} more` : '')
-  return `${FLOW_NOTE_LABEL} ${STEPS_FILE} lists ${ready.length} step(s) ready to start (every dependency done): ` +
-    `${shown}; the last turn dispatched ${dispatched} subagent(s). agent-services suggests dispatching the ` +
-    'independent ones together in one reply, or updating their status in the file if they are already running or done.'
+// The turn notes' numbers and texts come from the served workflow table (section flow, workflow_table.ts); without
+// it each is null and no note is made. The label in front of every note stays local.
+const labelled = (text: string | null): string | null => (text === null ? null : `${FLOW_NOTE_LABEL} ${text}`)
+
+/** How long a foreground call runs before the background reminder is due (ms), or null. */
+export const backgroundAfterMs = (): number | null => {
+  const s = servedInt('flow', 'background_after_seconds')
+  return s === null ? null : s * 1000
 }
 
-/** The background reminder. Pure. */
-export const backgroundNote = (tool: string, ms: number): string =>
-  `${FLOW_NOTE_LABEL} A foreground ${tool === 'Task' ? 'Agent' : tool} call ran for ${Math.round(ms / 1000)} s in the ` +
-  'last turn. agent-services suggests starting work that may take this long in the background (run_in_background: ' +
-  'true) and carrying on meanwhile; you are told when it ends.'
+/** The most background reminders in one session, or null. */
+export const backgroundNotesMax = (): number | null => servedInt('flow', 'background_notes_max', 0)
 
-/** The routing hint note, shown once per session. Pure. */
-export const routeHintNote = (hint: string): string =>
-  `${FLOW_NOTE_LABEL} The agent-services routing service let a subagent dispatch run without routing advice and ` +
-  `sent this hint for it: "${[...hint].slice(0, 500).join('')}" agent-services suggests following it in the next ` +
-  'dispatches; this note is shown once per session.'
+/** The concurrency note, or null when the dispatches cover the ready steps (or without the table). */
+export function stepsNote(ready: readonly string[], dispatched: number): string | null {
+  if (ready.length === 0 || dispatched >= ready.length) return null
+  const max = servedInt('flow', 'steps_shown_max')
+  if (max === null) return null
+  const more = ready.length > max ? servedText('flow', 'steps_more', { more: ready.length - max }) ?? '' : ''
+  return labelled(servedText('flow', 'steps_note', {
+    file: STEPS_FILE, count: ready.length, shown: ready.slice(0, max).join(', ') + more, dispatched,
+  }))
+}
+
+/** The background reminder, or null without the table. */
+export const backgroundNote = (tool: string, ms: number): string | null =>
+  labelled(servedText('flow', 'background_note', { tool: tool === 'Task' ? 'Agent' : tool, seconds: Math.round(ms / 1000) }))
+
+/** The routing hint note, shown once per session, or null without the table. */
+export const routeHintNote = (hint: string): string | null =>
+  labelled(servedText('flow', 'route_hint_note', { hint: [...hint].slice(0, 500).join('') }))
 
 /** The subagent prompt with the served rule added once; unchanged without a rule or when it already holds it. Pure. */
 export function briefedPrompt(prompt: unknown, rule: string | null): string | null {
@@ -253,9 +264,11 @@ async function turnEnd($: EngineInterface, e: Obj): Promise<void> {
   if (note) lastReady = key
   if (ready.length === 0) lastReady = ''
   if (note) queued.push(note)
-  if (longCall && backgroundNotes < BACKGROUND_NOTES_MAX) {
+  const max = backgroundNotesMax()
+  const bg = longCall && max !== null && backgroundNotes < max ? backgroundNote(longCall.tool, longCall.ms) : null
+  if (bg) {
     backgroundNotes++
-    queued.push(backgroundNote(longCall.tool, longCall.ms))
+    queued.push(bg)
   }
   longCall = null
 }
@@ -295,8 +308,10 @@ export async function flowPrompt($: EngineInterface, e: Obj, rt?: Ready): Promis
     void recheckCheckpoint($)
     const notes = queued.splice(0)
     const out = notes.length && (await notesOn($)) ? [notes.join('\n')] : []
-    const hint = takeRouteHint() // the routing level decides this one, not the methods level
-    if (hint) out.push(routeHintNote(hint))
+    // the routing level decides this one, not the methods level; without the table the hint is kept for later
+    const hint = routeHintNote('') !== null ? takeRouteHint() : null
+    const hintNote = hint ? routeHintNote(hint) : null
+    if (hintNote) out.push(hintNote)
     const told = takeNotice() // methods.ts: a new served methods version, for the user (never the model)
     if (told) {
       try {
@@ -337,7 +352,8 @@ export async function flowAfter($: EngineInterface, e: Obj, rt?: Ready): Promise
     const input = toolInput(e)
     const fg = !e.agentId && LONG_TOOLS.includes(e.tool) && input.run_in_background !== true
     const ms = start === undefined ? 0 : Date.now() - start
-    if (fg && ms >= BACKGROUND_AFTER_MS && (!longCall || ms > longCall.ms)) longCall = { tool: e.tool, ms }
+    const after = backgroundAfterMs()
+    if (fg && after !== null && ms >= after && (!longCall || ms > longCall.ms)) longCall = { tool: e.tool, ms }
     const file = input.file_path
     if (EDIT_TOOLS.includes(e.tool) && typeof file === 'string' && slash(file).endsWith(PENDING_FILE)) await refreshPending($)
   } catch {}
