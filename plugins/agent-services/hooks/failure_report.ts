@@ -3,7 +3,7 @@ import { exitOf, stagesOf } from './evidence'
 
 type Obj = Record<string, any>
 type Texts = Record<string, string>
-type FR = { failed?: string[]; neutral?: string[]; cause?: string[]; fix?: string[]; past?: string[]; earlier?: string[]; report_head?: string; side_effect?: string; deny?: string; texts?: Texts }
+type FR = { failed?: string[]; neutral?: string[]; meta?: string[]; cause?: string[]; fix?: string[]; past?: string[]; earlier?: string[]; report_head?: string; side_effect?: string; deny?: string; texts?: Texts }
 export type Entry = {
   key: string; agent: string; tool: string; step: string; sig: string; seq: number; match: string; prompt: number
   denied: boolean; sideEffect: boolean; expensive: boolean
@@ -151,10 +151,14 @@ export function failureGap(text: string, closed: readonly string[] = []): string
   if (cause && fix) return null
   const past = rxOf(f.past)
   const earlier = rxOf(f.earlier)
+  const meta = rxOf(f.meta)
   const shut = closed.map((c) => words(c))
-  for (const s of body.split(/\r?\n|(?<=[.!?])\s+|(?<=[\u3002\uff01\uff1f])/)) {
+  const lines = body.replace(/```[\s\S]*?(?:```|$)/g, ' ').split(/\r?\n/).filter((l) => !/^\s*(?:>\s*)?(?:[-*+\u2022]|\d+[.)]|#{1,6})\s/.test(l))
+  const bare = (q: string) => q.replace(/`[^`]*`|"[^"]*"|\u201c[^\u201d]*\u201d|\u300c[^\u300d]*\u300d|\u300e[^\u300f]*\u300f/g, ' ')
+  for (const s of lines.flatMap((l) => l.split(/(?<=[.!?])\s+|(?<=[\u3002\uff01\uff1f])/))) {
     const quote = s.trim()
-    if (!quote || !failed.test(quote)) continue
+    if (!quote || !failed.test(bare(quote))) continue
+    if (meta?.test(quote)) continue
     const w = words(quote)
     if (shut.some((c) => [...w].some((x) => c.has(x)))) continue
     if (fixRx?.test(quote)) continue
@@ -389,8 +393,9 @@ export function reportStop(agent: string, message: string, earlier: readonly str
       return fill(t.need_report, { list: left.map(label).join('; '), steps: per.join(' ') })
     }
     for (const x of open()) if (x.asked >= 2) x.state = 'exhausted'
-    const closed = entries.filter((x) => x.agent === agent && x.prompt === promptNo && x.state !== 'open').map((x) => `${x.step} ${x.sig}`)
-    const quote = agent || !entries.some((x) => x.prompt === promptNo) ? null : failureGap(message, closed)
+    const mine = entries.filter((x) => x.agent === agent && x.prompt === promptNo)
+    const closed = mine.filter((x) => x.state !== 'open').map((x) => `${x.step} ${x.sig}`)
+    const quote = agent || !mine.length || blocks.some((b) => b.kind === 'expected') ? null : failureGap(message, closed)
     if (quote && !gapSaid.includes(quote) && t.need_report) {
       gapSaid = [...gapSaid, quote].slice(-20)
       return fill(t.need_report, { list: `"${quote}"`, steps: t.need_rerun ? fill(t.need_rerun, { step: quote }) : '' })
