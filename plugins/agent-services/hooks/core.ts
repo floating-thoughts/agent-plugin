@@ -23,6 +23,9 @@ import { Receipts } from './receipts'
 import { Records } from './records'
 import { SessionSummary } from './summary'
 import type { Clock, GateState, KV, Random, ReadText, SvcResult, Transport } from './engine_types'
+import { indexed, isAbsPath, joinPath, normpath, normPath } from './paths'
+
+export { indexed, normpath, normPath } from './paths'
 
 export const HARNESSES = ['claude-code', 'opencode', 'codex', 'cursor', 'gemini', 'other']
 export const KINDS = ['session_start', 'dispatch', 'dispatched', 'step', 'step_end', 'pre_tool', 'post_tool', 'turn_end',
@@ -37,7 +40,7 @@ export const AUTH_FAIL_REASONS = ['login', 'locked'] // plan 3.9
 export const CHECKPOINT_MARK = 'Checkpoint reached:'
 export const CHECKPOINT_NOW = '[agent-services server note, not written by the user] The server suggests a checkpoint now: once this ' +
   'stretch is done, call the checkpoint tool and keep the items below in the summary.'
-export const SAVINGS_OFF_NEXT = 'The savings report is off on this machine (it is opt-in): run /agent-services savings preview ' +
+export const SAVINGS_OFF_NEXT = 'The savings report is turned off on this machine: run /agent-services savings preview ' +
   'to see what it sends, then /agent-services savings on.' // the savings tool's `next` when reason is service_off
 export const DENY_TEXT = 'This subagent dispatch did not pass the routing check. Rewrite it as the hint says, then dispatch again.'
 
@@ -254,71 +257,6 @@ export function openAnswer(tool: string, args: unknown): Record<string, unknown>
   if (tool === 'savings') return { saved: null, fallback: 'local_only', reason: 'core_down' }
   if (tool === 'checkpoint_advice') return { now: false, keep_lines: [], fallback: 'no_suggestion' }
   throw new ValidationError('unknown tool')
-}
-
-// ------------------------------------------------------------------ paths for indexed reads (Windows semantics)
-
-export function normPath(path: string): string {
-  let s = path.replace(/\\/g, '/')
-  const m = /^\/([a-zA-Z])\//.exec(s)
-  if (m) s = m[1] + ':/' + s.slice(3)
-  if (/^[a-z]:/.test(s)) s = s[0]!.toUpperCase() + s.slice(1)
-  return s
-}
-
-const isAbsPath = (p: string): boolean => /^[A-Za-z]:\//.test(p) || p.startsWith('/')
-
-// ntpath.normpath, written with forward slashes.
-export function normpath(p: string): string {
-  let s = p.replace(/\\/g, '/')
-  let drive = ''
-  if (/^[A-Za-z]:/.test(s)) {
-    drive = s.slice(0, 2)
-    s = s.slice(2)
-  }
-  const root = s.startsWith('/') ? '/' : ''
-  const out: string[] = []
-  for (const c of s.split('/')) {
-    if (c === '' || c === '.') continue
-    if (c === '..') {
-      if (out.length && out[out.length - 1] !== '..') out.pop()
-      else if (!root) out.push('..')
-      continue
-    }
-    out.push(c)
-  }
-  const r = drive + root + out.join('/')
-  return r || '.'
-}
-
-const joinPath = (a: string, b: string): string => (/[\\/]$/.test(a) || a === '' ? a + b : a + '/' + b)
-const inDir = (dir: string, name: string): string => (dir.endsWith('/') ? dir + name : dir + '/' + name)
-
-export async function indexed(file: string, readText: ReadText): Promise<boolean> {
-  const parts = file.split('/')
-  for (let i = parts.length - 1; i > 0; i--) {
-    const d = parts.slice(0, i).join('/')
-    const dd = !d || d.endsWith(':') ? d + '/' : d
-    const rel = file.slice(d.length + 1)
-    let text: string | null = null
-    try {
-      text = await readText(inDir(dd, 'DOCINDEX.md'))
-    } catch {
-      text = null
-    }
-    if (text !== null) {
-      const t = text.replace(/\\/g, '/')
-      if (t.includes(rel) || t.includes(file)) return true
-    }
-    let page: string | null = null
-    try {
-      page = await readText(inDir(dd, 'codeindex/files/' + rel.split('/').join('__') + '.md'))
-    } catch {
-      page = null
-    }
-    if (page !== null) return true
-  }
-  return false
 }
 
 // ------------------------------------------------------------------ the core

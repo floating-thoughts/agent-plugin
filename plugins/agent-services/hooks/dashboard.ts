@@ -10,7 +10,8 @@
 // With consent, register.ts's tool.check hook allows exactly this module's own calls (dashboardGrant), so the
 // Artifact tool runs without a permission rule; the user's settings are never written.
 import type { EngineInterface } from 'claude-code'
-import { consentState, dataDir, readConsent } from './command'
+import { consentState, readConsent } from './consent'
+import { dataDir } from './engine_env'
 import { engineStore } from './store'
 
 export const PUBLISH_INTERVAL_MS = 600_000

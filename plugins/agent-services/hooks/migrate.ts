@@ -17,7 +17,8 @@ import { sha256 } from './noble.js'
 import { COUNTER_PREFIX, MAX_COMPACT_ROWS, MAX_INDEX_ROWS, MAX_ROUTE_ROWS, MAX_STEP_MODELS, MAX_STEPS, sessionKey } from './counters'
 import type { DayRecord } from './counters'
 import type { KV } from './engine_types'
-import { localDay, normModel, parseIso } from './metrics'
+import { localDay, parseIso } from './pyfmt'
+import { normModel } from './transcripts'
 
 export const MIGRATED_FILE = 'MIGRATED'
 export const MIGRATED_KEY = 'migrated' // { at, daemon, counters }: the same record in the store

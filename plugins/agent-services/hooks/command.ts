@@ -16,25 +16,46 @@
 //   `estimate send` sends exactly the body previewed in this session (kept in memory for 30 minutes), once.
 // - status shows the auto-update setup state, read only (a port of host/auto_update.py; the plugin never writes the
 //   user's settings), and the terminal update line where the engine has no $.process (plan 3.8).
-// - The dashboard publish consent is asked once in the engine's dialog: right after a sign-in, or at the first
-//   automatic publish that is due (dashboard.ts); never more than once per session, and "Not now" holds for 7 days.
-//   status shows where it stands.
+// - One plain choice, the savings record (board, weekly email, daily upload together; SHARING_QUESTION), is asked at
+//   most once per session: by the model at the first prompt (onboarding note and the setup tool), or in the engine's
+//   dialog right after a sign-in or at status. "Not now" holds for 7 days. The board consent alone is asked only
+//   when the record is on but the board was snoozed on its own. status shows where it stands.
 //
 // The Command class is harness-neutral (its deps are injected); the functions at the end are the Claude Code
 // adapter over `$`.
 import type { EngineInterface } from 'claude-code'
-import { sha256Hex, utf8 } from './e2e'
 import { estimateRequest } from './estimate'
-import { BodyTooLarge, DAILY_ROUTE, optIn, plusDays, READ_LIMIT, scan, walkOrder } from './metrics'
-import type { Facts, MetricsState, Prices, TranscriptFile } from './metrics'
+import { BodyTooLarge, DAILY_ROUTE, optIn, READ_LIMIT } from './metrics'
+import type { MetricsState } from './metrics'
+import { plusDays } from './pyfmt'
+import { scan, walkOrder } from './transcripts'
+import type { Facts, Prices, TranscriptFile } from './transcripts'
 import type { Outbox } from './outbox'
 import { redact } from './redact'
 import { updateCommand } from './status'
 import { probeProcess, selfUpdateLine } from './update'
-import { safeGet, safeSet } from './store'
+import { KEYS, safeGet, safeSet } from './store'
 import type { KV } from './store'
 import { gateNotice, LOCKED_LINE, NOTICE_TEXT, PAUSED_LINE, PLAN_NOTICE, SERVED_CHANNELS, SERVED_ROLES } from './svc'
 import type { Result, Svc } from './svc'
+import { askConsent, claimAsk, CONSENT_KEY, consentState, dashboardUrl, readConsent, sharingState } from './consent'
+import { dataDir, engineDirs, envOf, readTextOf } from './engine_env'
+
+export {
+  askConsent,
+  CONSENT_HEADER,
+  CONSENT_KEY,
+  CONSENT_OPTIONS,
+  CONSENT_QUESTION,
+  CONSENT_SNOOZE_MS,
+  consentState,
+  dashboardUrl,
+  readConsent,
+  resetConsentAsk,
+  sharingState,
+} from './consent'
+export type { Consent, ConsentState } from './consent'
+export { claudeHashOf, dataDir, engineClaudeHash, engineDirs } from './engine_env'
 
 // ------------------------------------------------------------------ constants
 
@@ -44,7 +65,8 @@ export const COMMAND_SPEC = {
   name: COMMAND_NAME,
   description: 'Sign in to agent-services, show its status, or sign out',
   argumentHint:
-    '[status | login [<email>] | code | logout | savings [preview | on | off | status | mail on | mail off] | ' +
+    '[status | login [<email>] | code | logout | sharing [on | not_now | preview] | savings [preview | on | off | ' +
+    'status | mail on | mail off] | ' +
     'estimate [preview | send] | served [pin <role> <version> | unpin <role> | channel <name>] | offline on|off | ' +
     'outbox [<day>]]',
 } as const
@@ -61,27 +83,37 @@ export const OUTBOX_SHOW = 10 // outbox lines shown
 export const OUTBOX_LINE_CHARS = 300
 export const METRICS_STATE_KEY = 'metrics_state' // { previewed_day, enabled_day, last_uploaded_day } (host/metrics.py state)
 
-// the dashboard publish consent (dashboard.ts publishes only while it is "allow")
-export const CONSENT_KEY = 'dashboard_consent' // { answer: 'allow' | 'not_now', at }: at in ms since the epoch
-export const CONSENT_QUESTION =
-  'agent-services can publish your usage dashboard as a private Artifact on claude.ai (only you can see it unless ' +
-  'you share it). Allow it to publish and update it automatically?'
-export const CONSENT_OPTIONS = ['Allow', 'Not now']
-export const CONSENT_HEADER = 'Dashboard'
-export const CONSENT_SNOOZE_MS = 7 * 86400000 // "Not now" is not asked again for this long
 export const SAVINGS_PROMPT_KEY = 'savings_prompt' // { answer: 'not_now', at }: the savings question's "Not now"
-// The tool the model calls with the user's answers to the first-prompt setup question (onboarding below); it runs the
-// same subcommands as the slash command, limited to these.
-export const SETUP_COMMANDS = ['savings preview', 'savings on', 'savings not_now', 'dashboard allow', 'dashboard not_now']
+// The one plain choice (2026-10-31): the savings record is the board (a private Artifact),
+// the weekly email and the daily numbers-only upload together. One answer sets all three (store key KEYS.sharing);
+// each part keeps its own subcommand for finer control (savings off, savings mail off, dashboard not_now). "Not now"
+// is asked again after CONSENT_SNOOZE_MS.
+export const SHARING_QUESTION =
+  'Keep a record of what agent-services saves you? It shows your savings on a private page in your claude.ai ' +
+  'account (only you can see it), emails you a weekly total, and uploads a small daily summary of numbers only ' +
+  '(never your prompts, files or code).'
+export const SHARING_OPTIONS = ['Turn on (Recommended)', 'Not now', 'Show me what is sent']
+export const SHARING_HEADER = 'Savings'
+// The tool the model calls with the user's answer to the first-prompt setup question (onboarding below); it runs the
+// same subcommands as the slash command, limited to these (the first three answer the one question).
+export const SETUP_COMMANDS = [
+  'sharing on',
+  'sharing not_now',
+  'sharing preview',
+  'savings preview',
+  'savings on',
+  'savings not_now',
+  'dashboard allow',
+  'dashboard not_now',
+]
 export const SETUP_SPEC = {
   name: 'setup',
   description:
-    "Apply the user's answer to the agent-services setup question: \"savings preview\" shows what the daily savings " +
-    'upload sends; "savings on" / "savings not_now"; "dashboard allow" / "dashboard not_now". The dashboard is a ' +
-    "private Artifact page on the user's own claude.ai account (only they see it unless they share it) with numbers " +
-    'only: savings, counts, plan and service state. The savings report is one small daily usage summary (counts and ' +
-    'token totals, never prompts, file contents or paths) that the service turns into the saved-dollars figure. Only ' +
-    'call it with an answer the user gave.',
+    "Apply the user's answer to the agent-services setup question. \"sharing on\" turns the savings record on: a " +
+    "private Artifact page on the user's own claude.ai account (only they see it unless they share it), a weekly " +
+    'savings email, and one small daily usage summary (counts and token totals, never prompts, file contents or ' +
+    'paths). "sharing not_now" turns all three off; "sharing preview" shows what is sent and changes nothing. The ' +
+    'other commands change one part only. Only call it with an answer the user gave.',
   inputSchema: {
     type: 'object',
     properties: { command: { type: 'string', enum: SETUP_COMMANDS } },
@@ -90,7 +122,6 @@ export const SETUP_SPEC = {
   },
   isDeferred: false,
 } as const
-const DASHBOARD_URL_RX = /^https:\/\/claude\.ai\/(?:code\/)?artifact\/[A-Za-z0-9_-]+$/ // as dashboard.ts URL_RX
 
 // host/auto_update.py
 export const MARKETPLACE = 'agent-plugin'
@@ -154,7 +185,7 @@ export const ERROR_TEXT: Record<string, string> = {
 
 export const USAGE =
   `Usage: ${COMMAND} [status | login [<email>] | code | logout | savings [preview | on | off | not_now | status | ` +
-  'mail on | mail off] | dashboard [allow | not_now] | estimate [preview | send] | served [status | ' +
+  'mail on | mail off] | sharing [on | not_now | preview] | dashboard [allow | not_now] | estimate [preview | send] | served [status | ' +
   'pin <role> <version> | unpin <role> | channel <name>] | offline on|off | outbox [<day>]]'
 
 // ------------------------------------------------------------------ types
@@ -293,81 +324,6 @@ export function autoUpdateText(a: AutoUpdate | null, updateLine: string | null =
   )
 }
 
-// ------------------------------------------------------------------ the dashboard publish consent
-
-export type Consent = { answer: 'allow' | 'not_now'; at: number }
-export type ConsentState = 'allow' | 'not_now' | 'ask'
-
-let consentAsked = false // asked in this session (one module instance per Claude Code session)
-
-/** The stored answer, or null when there is none (or it is unreadable). */
-export async function readConsent(kv: KV): Promise<Consent | null> {
-  const v = await safeGet(kv, CONSENT_KEY)
-  if (!isObj(v) || (v.answer !== 'allow' && v.answer !== 'not_now') || num(v.at) === null) return null
-  return { answer: v.answer, at: v.at }
-}
-
-/** 'allow'; 'not_now' while that answer is under CONSENT_SNOOZE_MS old; else 'ask' (never answered, or run out). */
-export function consentState(c: Consent | null, now: number): ConsentState {
-  if (!c) return 'ask'
-  if (c.answer === 'allow') return 'allow'
-  return now - c.at < CONSENT_SNOOZE_MS ? 'not_now' : 'ask'
-}
-
-/** Ask once per session in the dialog and keep the answer. null when not asked (already asked in this session, no
- * dialog) or not answered (dismissed, a -p run, a typed answer): nothing is kept then. */
-export async function askConsent(kv: KV, ask: Ask | null | undefined, now: () => number): Promise<'allow' | 'not_now' | null> {
-  if (consentAsked || !ask) return null
-  consentAsked = true
-  let a: string
-  try {
-    a = String(await ask(CONSENT_QUESTION, { options: CONSENT_OPTIONS, header: CONSENT_HEADER })).trim()
-  } catch {
-    return null
-  }
-  if (!CONSENT_OPTIONS.includes(a)) return null
-  const answer = a === CONSENT_OPTIONS[0] ? 'allow' : 'not_now'
-  await safeSet(kv, CONSENT_KEY, { answer, at: now() })
-  return answer
-}
-
-// For the tests: a new session.
-export function resetConsentAsk(): void {
-  consentAsked = false
-}
-
-/** The published dashboard's artifact URL from <data dir>/services/dashboard.json, or null. */
-export async function dashboardUrl(readText: (path: string) => Promise<string | null>, dir: string): Promise<string | null> {
-  try {
-    const t = await readText(`${dir.replace(/[\\/]+$/, '')}/services/dashboard.json`)
-    const s = t === null ? null : JSON.parse(t)
-    return isObj(s) && typeof s.url === 'string' && DASHBOARD_URL_RX.test(s.url) ? s.url : null
-  } catch {
-    return null
-  }
-}
-
-// ------------------------------------------------------------------ the Claude account hash (plan 3.4 item 2)
-
-/** sha256 hex of oauthAccount.accountUuid from .claude.json (under CLAUDE_CONFIG_DIR first, then the home folder);
- * "" when there is none. The raw id never leaves this function. */
-export async function claudeHashOf(readText: (path: string) => Promise<string | null>, dirs: readonly string[]): Promise<string> {
-  for (const d of dirs) {
-    if (!d) continue
-    let data: unknown
-    try {
-      const t = await readText(`${d.replace(/[\\/]+$/, '')}/.claude.json`)
-      if (t === null) continue
-      data = JSON.parse(t)
-    } catch {
-      continue
-    }
-    const uid = isObj(data) && isObj(data.oauthAccount) ? data.oauthAccount.accountUuid : null
-    return typeof uid === 'string' && uid ? sha256Hex(utf8(uid)) : ''
-  }
-  return ''
-}
-
 // ------------------------------------------------------------------ transcripts for the estimate
 
 /** Every *.jsonl under `root` (relative paths with '/'), in os.walk order; a file over READ_LIMIT is listed by size
@@ -432,7 +388,8 @@ export class Command {
     const sub = (words[0] ?? 'status').toLowerCase()
     const rest = words.slice(1)
     const svc = this.d.svc
-    const known = ['status', 'login', 'code', 'logout', 'savings', 'dashboard', 'estimate', 'served', 'offline', 'outbox']
+    const known = ['status', 'login', 'code', 'logout', 'sharing', 'savings', 'dashboard', 'estimate', 'served',
+      'offline', 'outbox']
     if (!known.includes(sub)) return `Unknown subcommand "${sub.slice(0, 40)}". ${USAGE}`
     if (!AUTH_FAIL_COMMANDS.includes(sub)) {
       const st = await svc.authState(true)
@@ -447,6 +404,8 @@ export class Command {
         return this.code(rest)
       case 'logout':
         return rest.length ? USAGE : this.logout()
+      case 'sharing':
+        return this.sharing(rest)
       case 'savings':
         return this.savings(rest)
       case 'dashboard':
@@ -522,48 +481,126 @@ export class Command {
       : 'The dashboard stays unpublished; you are asked again in 7 days.'
   }
 
-  /** The note the model gets with the session's first prompt while the dashboard or the savings report is not set
-   * up: ask the user once (the question tool), then apply the answers with the setup tool. null: nothing to ask. */
+  /** Whether the one savings-record question is due: never answered (or its "Not now" has run out) and the board
+   * not allowed or snoozed on its own. An earlier board "allow" means the record is already set up. */
+  private async sharingDue(): Promise<boolean> {
+    const now = this.d.now()
+    if ((await sharingState(this.d.store, now)) !== 'ask') return false
+    return consentState(await readConsent(this.d.store), now) === 'ask'
+  }
+
+  /** The note the model gets with the session's first prompt while the savings record is not set up: ask the user
+   * the one question (the question tool), then apply the answer with the setup tool. null: nothing to ask. */
   async onboarding(): Promise<string | null> {
     if ((await this.d.svc.authState()) !== 'ok') return null
-    const now = this.d.now()
-    const dash = consentState(await readConsent(this.d.store), now) === 'ask'
-    const snooze = await safeGet(this.d.store, SAVINGS_PROMPT_KEY)
-    const snoozed = isObj(snooze) && num(snooze.at) !== null && now - Number(snooze.at) < CONSENT_SNOOZE_MS
-    const savings = !(await this.d.svc.settings()).services.metrics && !snoozed
-    if (!dash && !savings) return null
+    if (!(await this.sharingDue())) return null
     const tool = 'mcp__agent-services__setup'
-    const items: string[] = []
-    if (dash) {
-      items.push(
-        'Dashboard: ask "Publish your agent-services usage dashboard as a private Artifact on claude.ai (only you ' +
-          'can see it unless you share it) and keep it updated?" with the options Allow and Not now; then call ' +
-          `${tool} with command "dashboard allow" or "dashboard not_now".`,
-      )
-    }
-    if (savings) {
-      items.push(
-        `Savings report: first call ${tool} with command "savings preview" and show the user what it returns (exactly ` +
-          'what one daily upload sends); then ask "Turn on the daily savings report (it uploads that summary once a ' +
-          `day)?" with the options Turn on and Not now; then call ${tool} with command "savings on" or "savings not_now".`,
-      )
-    }
+    const [on, off, show] = SHARING_OPTIONS
     return (
       '[agent-services plugin note, not written by the user] The user has the agent-services plugin installed and ' +
-      `${items.length > 1 ? 'two of its features are' : 'one of its features is'} not set up yet. Before working on ` +
-      'the message, ask the user once with your question tool (AskUserQuestion), one question per item below. ' +
-      'If the user dismisses a question, leave it. Then go on with the message.\n- ' +
-      items.join('\n- ')
+      'its savings record is not set up yet. Before working on the message, ask the user this one question with ' +
+      `your question tool (AskUserQuestion), header "${SHARING_HEADER}", in these words: "${SHARING_QUESTION}" ` +
+      `with the options, in this order, "${on}", "${off}" and "${show}". Then call ${tool} with command ` +
+      `"sharing on", "sharing not_now" or "sharing preview" to match the answer; for "${show}" show the user the ` +
+      'text it returns, and call it with "sharing on" only if the user then says yes. If the user dismisses the ' +
+      'question, leave it. Then go on with the message.'
     )
+  }
+
+  // ---------------- the one savings-record choice
+  private async sharing(rest: string[]): Promise<string> {
+    const sub = (rest[0] ?? '').toLowerCase()
+    if (rest.length !== 1) return USAGE
+    if (sub === 'on') return this.setSharing(true)
+    if (sub === 'not_now' || sub === 'off') return this.setSharing(false)
+    if (sub === 'preview') return this.sharingPreview()
+    return USAGE
+  }
+
+  /** One answer for the board, the weekly email and the daily upload. The email is a server setting, changed while
+   * the upload is on (the route is a metrics route); a failed change is said, the other parts stand. */
+  private async setSharing(on: boolean): Promise<string> {
+    const svc = this.d.svc
+    const at = this.d.now()
+    const mail = async (): Promise<string | null> => {
+      const r = await svc.call('POST', '/metrics/weekly-mail', { on })
+      return r.ok ? null : errorText(r.error)
+    }
+    let mailError: string | null = null
+    if (!on) mailError = await mail()
+    const kept =
+      (await safeSet(this.d.store, KEYS.sharing, { on, at })) &&
+      (await svc.setService('metrics', on)) &&
+      (await safeSet(this.d.store, CONSENT_KEY, { answer: on ? 'allow' : 'not_now', at }))
+    if (!kept) return errorText('store_unavailable')
+    if (on) mailError = await mail()
+    const mailLine = mailError
+      ? `\nThe weekly email setting was not changed: ${mailError} Run ${COMMAND} savings mail ${on ? 'on' : 'off'} ` +
+        'later to change it.'
+      : ''
+    return on
+      ? 'Savings record is on: your private savings page is published to your claude.ai account when Claude ' +
+          'finishes this reply, a weekly email sums up the savings, and a small daily summary of numbers is uploaded. ' +
+          `To turn one part off: ${COMMAND} dashboard not_now (the page), ${COMMAND} savings mail off (the email), ` +
+          `${COMMAND} savings off (the upload).` +
+          mailLine
+      : 'Savings record is off: no page is published, no weekly email is sent and nothing more is uploaded. You are ' +
+          `asked again in 7 days; turn it on any time with ${COMMAND} sharing on.` +
+          mailLine
+  }
+
+  /** What the savings record sends and shows; changes nothing. */
+  private async sharingPreview(): Promise<string> {
+    let upload = 'The daily summary could not be built on this machine right now.'
+    if (this.d.dailyBody) {
+      const day = plusDays(localDay(this.d.now()), -1)
+      try {
+        const text = this.d.svc.preview('POST', DAILY_ROUTE, await this.d.dailyBody(day))
+        if (text !== null) upload = `Exactly what one daily upload sends (for ${day}):\n${text}`
+      } catch {
+        // the description below stands
+      }
+    }
+    return (
+      'Nothing was turned on. The savings record has three parts:\n' +
+      "- A private page on your own claude.ai account (only you can see it unless you share it): savings, counts, " +
+      'plan and service state, numbers only.\n' +
+      '- A weekly email to your account address with the week\'s savings.\n' +
+      `- ${upload}\n` +
+      `Turn it on with ${COMMAND} sharing on, or leave it off with ${COMMAND} sharing not_now.`
+    )
+  }
+
+  /** Ask the one question in the engine's dialog (once per session, shared with askConsent); the answer is applied.
+   * null when not asked or not answered. */
+  private async askSharing(): Promise<string | null> {
+    if (!this.d.ask || !claimAsk()) return null
+    let a: string
+    try {
+      a = String(await this.d.ask(SHARING_QUESTION, { options: SHARING_OPTIONS, header: SHARING_HEADER })).trim()
+    } catch {
+      return null
+    }
+    if (a === SHARING_OPTIONS[0]) return this.setSharing(true)
+    if (a === SHARING_OPTIONS[1]) return this.setSharing(false)
+    if (a === SHARING_OPTIONS[2]) return this.sharingPreview()
+    return null
   }
 
   private async dashboardLine(): Promise<string> {
     let state = consentState(await readConsent(this.d.store), this.d.now())
+    let asked: string | null = null
     if (state === 'ask') {
-      // the person is here (a command runs): ask now, once per session
-      await this.safe(() => askConsent(this.d.store, this.d.ask, this.d.now), null)
+      // the person is here (a command runs): ask now, once per session; the one question while it is due
+      if (await this.sharingDue()) asked = await this.safe(() => this.askSharing(), null)
+      else await this.safe(() => askConsent(this.d.store, this.d.ask, this.d.now), null)
       state = consentState(await readConsent(this.d.store), this.d.now())
     }
+    const head = asked ? asked + '\n' : ''
+    return head + (await this.dashboardState(state))
+  }
+
+  private async dashboardState(state: ConsentState): Promise<string> {
     if (state === 'not_now') return 'Dashboard: you chose Not now.'
     if (state === 'ask') return 'Dashboard: not allowed yet (run /agent-services status to be asked).'
     const url = await this.safe(() => this.d.dashboardUrl?.() ?? Promise.resolve(null), null)
@@ -641,8 +678,11 @@ export class Command {
       lines.push(autoUpdateText(au, up)!)
     }
     lines.push(`To see what this plugin can save you, run ${COMMAND} estimate (it shows what it would send first).`)
-    // the dashboard consent, while signed in and not answered yet (or "Not now" has run out)
-    if (consentState(await readConsent(this.d.store), this.d.now()) === 'ask') {
+    // the one savings-record question (or the board alone), while not answered yet (or "Not now" has run out)
+    if (await this.sharingDue()) {
+      const asked = await this.safe(() => this.askSharing(), null)
+      if (asked) lines.push(asked)
+    } else if (consentState(await readConsent(this.d.store), this.d.now()) === 'ask') {
       await this.safe(() => askConsent(this.d.store, this.d.ask, this.d.now), null)
     }
     return lines.join('\n')
@@ -693,8 +733,8 @@ export class Command {
     if (sub === 'show' && rest.length <= 1) {
       if (!on) {
         return (
-          'Savings are worked out by the service from a daily usage summary that this machine uploads only after ' +
-          `you turn it on. Run ${COMMAND} savings preview to see exactly what one upload sends, then ${COMMAND} ` +
+          'Savings are worked out by the service from a daily usage summary, and that upload is turned off on this ' +
+          `machine. Run ${COMMAND} savings preview to see exactly what one upload sends, then ${COMMAND} ` +
           'savings on.'
         )
       }
@@ -738,11 +778,12 @@ export class Command {
     }
     if (sub === 'not_now' && rest.length === 1) {
       await safeSet(this.d.store, SAVINGS_PROMPT_KEY, { answer: 'not_now', at: this.d.now() })
-      return `The daily usage upload stays off; you are asked again in 7 days (or run ${COMMAND} savings preview).`
+      if (!(await svc.setService('metrics', false))) return errorText('store_unavailable')
+      return `The daily usage upload is off: nothing more is uploaded. Turn it back on with ${COMMAND} savings on.`
     }
     if (sub === 'off' && rest.length === 1) {
       if (!(await svc.setService('metrics', false))) return errorText('store_unavailable')
-      return 'The daily usage upload is off: nothing more is uploaded.'
+      return `The daily usage upload is off: nothing more is uploaded. Turn it back on with ${COMMAND} savings on.`
     }
     if (sub === 'mail' && rest.length === 2 && ['on', 'off'].includes(rest[1]!.toLowerCase())) {
       const want = rest[1]!.toLowerCase() === 'on'
@@ -925,78 +966,6 @@ export async function declareCommand($: EngineInterface): Promise<void> {
     await $.tool.register(JSON.parse(JSON.stringify(SETUP_SPEC)))
   } catch {
     // the command stands without the setup tool
-  }
-}
-
-async function envOf($: EngineInterface, name: string): Promise<string | undefined> {
-  // $.env.get takes literal names only (the engine reads them off the source)
-  switch (name) {
-    case 'HOME':
-      return $.env.get('HOME')
-    case 'USERPROFILE':
-      return $.env.get('USERPROFILE')
-    case 'CLAUDE_CONFIG_DIR':
-      return $.env.get('CLAUDE_CONFIG_DIR')
-    case 'DISABLE_UPDATES':
-      return $.env.get('DISABLE_UPDATES')
-    case 'DISABLE_AUTOUPDATER':
-      return $.env.get('DISABLE_AUTOUPDATER')
-    case 'CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC':
-      return $.env.get('CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC')
-    case 'FORCE_AUTOUPDATE_PLUGINS':
-      return $.env.get('FORCE_AUTOUPDATE_PLUGINS')
-    default:
-      return undefined
-  }
-}
-
-/** <home> and <config dir> as plan 0.2 builds them (HOME, else USERPROFILE; CLAUDE_CONFIG_DIR, else <home>/.claude). */
-export async function engineDirs($: EngineInterface): Promise<{ home: string; configDir: string; configSet: boolean }> {
-  const get = async (n: string) => {
-    try {
-      return (await envOf($, n)) || ''
-    } catch {
-      return ''
-    }
-  }
-  const home = ((await get('HOME')) || (await get('USERPROFILE'))).replace(/[\\/]+$/, '')
-  const cfg = (await get('CLAUDE_CONFIG_DIR')).replace(/[\\/]+$/, '')
-  return { home, configDir: cfg || `${home}/.claude`, configSet: Boolean(cfg) }
-}
-
-/** The data dir, as Python's default_data_dir(): AGENT_SVC_DATA_DIR, else <home>/.agent-services (home is
- * USERPROFILE on Windows). The outbox, the dashboard page and the migration's MIGRATED file live there. */
-export async function dataDir($: EngineInterface): Promise<string> {
-  const text = async (read: () => Promise<unknown>): Promise<string> => {
-    try {
-      return String((await read()) ?? '').trim()
-    } catch {
-      return ''
-    }
-  }
-  const own = await text(() => $.env.get('AGENT_SVC_DATA_DIR'))
-  if (own) return own.replace(/[\\/]+$/, '')
-  const home = await text(() => $.env.get('HOME'))
-  const profile = await text(() => $.env.get('USERPROFILE'))
-  const windows = (await text(() => $.env.get('OS'))) === 'Windows_NT'
-  return `${(windows ? profile || home : home || profile).replace(/[\\/]+$/, '')}/.agent-services`
-}
-
-function readTextOf($: EngineInterface): (path: string) => Promise<string | null> {
-  return async (path) => {
-    try {
-      return String(await $.fs.read(path))
-    } catch {
-      return null
-    }
-  }
-}
-
-/** The Claude account hash for Svc's claudeHash dependency (plan 3.4 item 2). */
-export function engineClaudeHash($: EngineInterface): () => Promise<string> {
-  return async () => {
-    const d = await engineDirs($)
-    return claudeHashOf(readTextOf($), d.configSet ? [d.configDir, d.home] : [d.home])
   }
 }
 

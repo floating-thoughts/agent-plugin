@@ -18,7 +18,7 @@
 // The result holds exactly DATA_FIELDS: no text from a session, no path, id or host name (plan 3.8).
 import { sha256 } from './noble.js'
 import { hex, pyJson, utf8 } from './e2e'
-import { localDay, parseIso, plusDays, pyRound, pySum } from './metrics'
+import { localDay, parseIso, plusDays, pyRound, pySum } from './pyfmt'
 
 export const VERSION = 1
 export const RENDER_INTERVAL_S = 600 // between two renders (dashboard_state.py INTERVAL)

@@ -17,7 +17,9 @@
 // response histogram by its estimated response count. `estimated` and `note` say how much was estimated that way.
 // With no unread file the body equals the Python one.
 import { BODY_LIMIT } from './contract'
-import { CLIENT_VERSION, pyRound, pySum, type Facts, type Request } from './metrics'
+import { CLIENT_VERSION, type Request } from './metrics'
+import { pyRound, pySum } from './pyfmt'
+import type { Facts } from './transcripts'
 
 export const SCHEMA = 'diag-est-1'
 export const HARNESS = 'claude-code'

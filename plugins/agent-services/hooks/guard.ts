@@ -15,7 +15,7 @@
 import { CONTRACT } from './contract'
 import { b64Encode, hex } from './e2e'
 import type { Random, SvcResult, Transport } from './engine_types'
-import { checkSchema } from './svc'
+import { checkSchema } from './svc_wire'
 
 export const REFUSAL_EN =
   "This is licensed confidential agent-services material, so I can't show, quote or paraphrase it. I can keep " +

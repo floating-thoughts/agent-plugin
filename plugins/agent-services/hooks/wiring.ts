@@ -17,26 +17,30 @@
 //   no publish, no metrics or estimate request, no savings or report fetch.
 // - Every dashboard publish attempt is logged in the outbox (kind artifact_publish): the Artifact input fields as
 //   dashboard.ts passes them, the page's sha256 and size, and the outcome (3.7).
-// - The page's data slot is collect()'s output: exactly render.ts DATA_FIELDS (3.8).
+// - The page's data slot is collect()'s output plus board_facts.ts timeline and weekly: exactly BOARD_FIELDS (3.8, R8).
 // - The daily body is metrics.ts dailyBody with the savings part from the store day counters (counters.ts readDay,
 //   model ids normalized as host/metrics.py read_events does), so it equals host/metrics.py build_daily.
 // - A preview (metrics or estimate) is the channel's own preview text (svc.preview: the exact inner body a send
 //   carries, logged with preview true). The estimate is sent only with consent === true, once, and what is sent is
 //   the text of the preview the user saw.
 import type { CoreOptions } from './core'
-import type { CallOptions, GateState, KV, SvcResult, Transport } from './engine_types'
+import type { GateState, KV, SvcResult, Transport } from './engine_types'
 import type { Outbox } from './outbox'
 import type { Hook, Kind, Svc } from './svc'
 import type { Facts, MetricsState, Prices, TranscriptFile } from './metrics'
 import type { DayCounters } from './counters'
-import { COUNTER_PREFIX, MAX_COMPACT_ROWS, MAX_INDEX_ROWS, MAX_ROUTE_ROWS, MAX_STEP_MODELS, MAX_STEPS, localDay, readDay } from './counters'
+import { localDay, readDay } from './counters'
 import { hex, sha256Hex, utf8 } from './e2e'
 import { ESTIMATE_ROUTE, estimateRequest } from './estimate'
 import { BodyTooLarge, DAILY_ROUTE, dailyBody, isDay, isLong, normModel, optIn, plusDays, READ_LIMIT, scan, uploadDays, walkOrder } from './metrics'
 import { SALT_KEY } from './records'
 import { collect, pageChanged, publishedUrlOk, render as renderPage, renderDue } from './render'
-import { savingsDue, statusText, updateCommand, updateHintDue } from './status'
-import { HOOK_BUDGET_MS, TIMEOUTS_MS } from './svc'
+import { DEFAULT_ON_NOTICE, savingsDue, statusText, updateCommand, updateHintDue, weeklyText } from './status'
+import { counterDays, countsOf, dayCountsFromStore, dayEmpty, normalizeDay } from './day_counts'
+import { boardData, readOutboxDay } from './board_facts'
+
+export { counterDays, countsOf, dayCountsFromStore, normalizeDay } from './day_counts'
+export { hookFor, svcTransport } from './transport'
 
 // Store keys of this module (shared by every session; nothing secret: numbers and days only).
 export const SAVINGS_CACHE_KEY = 'savings_cache' // { tried_at, body }: the last good GET /metrics/savings body
@@ -45,6 +49,8 @@ export const METRICS_STATE_KEY = 'metrics_state' // { previewed_day, enabled_day
 export const METRICS_LEASE_KEY = 'metrics_lease' // { holder, until }: best-effort, one uploading session
 export const ESTIMATE_KEY = 'estimate_answer' // { made_at, estimate }: the last estimate answer, for the dashboard
 export const UPDATE_HINT_KEY = 'update_hint_at' // ms of the last time the status line showed the update command
+export const SAVINGS_NOTICE_KEY = 'savings_notice_at' // ms of the one time DEFAULT_ON_NOTICE was shown
+export const WEEKLY_KEY = 'weekly_savings' // { week, start, usd }: the first cumulative savings figure of a week
 export const METRICS_LEASE_MS = 120_000
 export const REPORT_TTL_MS = 600_000
 export const ESTIMATE_PREVIEW_TTL_MS = 3_600_000 // an estimate preview older than this must be shown again
@@ -87,7 +93,6 @@ export type EstimateSend = { sent: true; answer: unknown; note: string | null } 
 
 const isObj = (v: unknown): v is Obj => typeof v === 'object' && v !== null && !Array.isArray(v)
 const num = (v: unknown): number | null => (typeof v === 'number' && Number.isFinite(v) ? v : null)
-const cmp = (a: string, b: string): number => (a < b ? -1 : a > b ? 1 : 0)
 
 async function get(store: KV, key: string): Promise<unknown> {
   try {
@@ -112,100 +117,6 @@ const result = (r: { ok: boolean; status: number | null; body: unknown; error: s
   body: r.body,
   error: r.error,
 })
-
-// ------------------------------------------------------------------ store counters, as host/metrics.py reads them
-
-/**
- * The day counters with model ids normalized (host/metrics.py read_events applies norm_model to every event before
- * _counters folds them): rows whose ids become equal are merged, then sorted and capped as _counters does.
- */
-export function normalizeDay(dc: DayCounters): DayCounters {
-  const route = new Map<string, DayCounters['route'][number]>()
-  for (const r of dc.route) {
-    const model = normModel(r.model)
-    const k = JSON.stringify([model, r.long])
-    const have = route.get(k)
-    if (!have) route.set(k, { ...r, model })
-    else {
-      have.turns += r.turns
-      have.input_tokens += r.input_tokens
-      have.output_tokens += r.output_tokens
-      have.cache_read_tokens += r.cache_read_tokens
-      have.cache_write_tokens += r.cache_write_tokens
-    }
-  }
-  const index = new Map<string, DayCounters['index'][number]>()
-  for (const r of dc.index) {
-    const model = normModel(r.model)
-    const k = JSON.stringify([model, r.file_tokens])
-    const have = index.get(k)
-    if (!have) index.set(k, { model, file_tokens: r.file_tokens, reads: r.reads })
-    else have.reads += r.reads
-  }
-  const compact = dc.compact.map((row) => {
-    const models: string[] = []
-    const steps: [number, number][] = []
-    for (const [context, i] of row.steps) {
-      if (steps.length >= MAX_STEPS) break
-      const m = normModel(row.models[i])
-      if (!models.includes(m)) {
-        if (models.length >= MAX_STEP_MODELS) continue
-        models.push(m)
-      }
-      steps.push([context, models.indexOf(m)])
-    }
-    const start = row.start ? { ...row.start, model: normModel(row.start.model) } : null
-    return { ref: row.ref, start, models, steps }
-  })
-  return {
-    route: [...route.values()].sort((a, b) => cmp(a.model, b.model) || Number(a.long) - Number(b.long)).slice(0, MAX_ROUTE_ROWS),
-    index: [...index.values()].sort((a, b) => cmp(a.model, b.model) || a.file_tokens - b.file_tokens).slice(0, MAX_INDEX_ROWS),
-    compact: compact.slice(0, MAX_COMPACT_ROWS),
-  }
-}
-
-const dayEmpty = (dc: DayCounters): boolean => !dc.route.length && !dc.index.length && !dc.compact.length
-
-/** The status line's and the dashboard's event counts of one day: route turns, compactions and indexed reads. */
-export function countsOf(dc: DayCounters): Record<string, number> {
-  const out: Record<string, number> = {}
-  const route = dc.route.reduce((n, r) => n + r.turns, 0)
-  const compact = dc.compact.filter((r) => r.start !== null).length
-  const index = dc.index.reduce((n, r) => n + r.reads, 0)
-  if (route > 0) out.route = route
-  if (compact > 0) out.compact_start = compact
-  if (index > 0) out.index = index
-  return out
-}
-
-/** The days that have a counter record in the store, sorted. */
-export async function counterDays(store: KV): Promise<string[]> {
-  let keys: string[] = []
-  try {
-    keys = await store.keys()
-  } catch {
-    return []
-  }
-  const days = new Set<string>()
-  for (const k of keys) {
-    if (!k.startsWith(COUNTER_PREFIX)) continue
-    const d = k.slice(COUNTER_PREFIX.length, COUNTER_PREFIX.length + 10)
-    if (isDay(d)) days.add(d)
-  }
-  return [...days].sort(cmp)
-}
-
-/** render.ts collect()'s dayCounts from the store: local day -> event kind -> count; null when there is none. */
-export async function dayCountsFromStore(store: KV): Promise<Record<string, Record<string, number>> | null> {
-  const days = await counterDays(store)
-  if (!days.length) return null
-  const out: Record<string, Record<string, number>> = {}
-  for (const d of days) {
-    const c = countsOf(await readDay(store, d))
-    if (Object.keys(c).length) out[d] = c
-  }
-  return out
-}
 
 // ------------------------------------------------------------------ transcripts
 
@@ -434,8 +345,10 @@ export class Wiring {
     }
   }
 
-  /** The status line after session_start and turn_end: the cached figure at once, then again after a due fetch. */
-  async refreshStatus(): Promise<string> {
+  /** The status line after session_start and turn_end: the cached figure at once, then again after a due fetch.
+   *  `first` runs right after the first line is shown, so a hanging fetch never delays it; when it shows a line
+   *  of its own (answers true), the fetched figure does not overwrite that line in this refresh. */
+  async refreshStatus(first?: () => Promise<boolean>): Promise<string> {
     if (!(await this.authOk())) {
       const text = await this.line(null, null)
       this.show(text)
@@ -450,13 +363,45 @@ export class Wiring {
     const before = await this.savingsBody(false)
     let text = await this.line(before, update)
     this.show(text)
+    const held = first ? await first().catch(() => false) : false
     if (update !== null) return text // the update line stays until the next refresh
     const after = await this.savingsBody(true)
-    if (JSON.stringify(after) !== JSON.stringify(before)) {
+    if (!held && JSON.stringify(after) !== JSON.stringify(before)) {
       text = await this.line(after, null)
       this.show(text)
     }
     return text
+  }
+
+  // ---------------- the one-time and weekly lines at session start (log line and toast)
+
+  /** The lines to show at session start: DEFAULT_ON_NOTICE once, then the weekly summary. Nothing while auth fails. */
+  async startNotices(): Promise<string[]> {
+    if (!(await this.authOk()) || !(await this.metricsOnNow())) return []
+    const out: string[] = []
+    if (num(await get(this.d.store, SAVINGS_NOTICE_KEY)) === null && (await put(this.d.store, SAVINGS_NOTICE_KEY, this.now()))) {
+      out.push(DEFAULT_ON_NOTICE)
+    }
+    const weekly = await this.weeklySummary()
+    if (weekly) out.push(weekly)
+    return out
+  }
+
+  /**
+   * The first session of an ISO week (UTC) with a savings figure: "Last week agent-services saved you $X." from the
+   * cumulative figure now less the one stored in an earlier week ("So far ..." the first time). Once per week; null
+   * when there is nothing to say, auth fails or the upload is off.
+   */
+  async weeklySummary(): Promise<string | null> {
+    if (!(await this.authOk()) || !(await this.metricsOnNow())) return null
+    const prev = await get(this.d.store, WEEKLY_KEY)
+    if (weeklyText(prev, this.now(), 0).mark === null) return null // already done this week
+    const r = await this.d.svc.call('GET', '/metrics/savings', undefined, { kind: 'daily', hook: 'background' })
+    if (!r.ok || !isObj(r.body)) return null
+    await put(this.d.store, SAVINGS_CACHE_KEY, { tried_at: this.now(), body: r.body })
+    const w = weeklyText(prev, this.now(), r.body.usd)
+    if (!w.mark || !(await put(this.d.store, WEEKLY_KEY, w.mark))) return null
+    return w.text
   }
 
   // ---------------- the dashboard (3.8)
@@ -507,16 +452,29 @@ export class Wiring {
     } catch {
       served = null
     }
-    return collect({
+    const savings = await this.savingsBody(true)
+    const report = await this.cached(REPORT_CACHE_KEY, '/report', REPORT_TTL_MS, true)
+    const base = collect({
       now: this.now() / 1000,
       status,
-      savings: await this.savingsBody(true),
-      report: await this.cached(REPORT_CACHE_KEY, '/report', REPORT_TTL_MS, true),
+      savings,
+      report,
       settings: { services: { ...settings.services }, served: { channel: isObj(settings.served) ? settings.served.channel : null } },
       dayCounts: await dayCountsFromStore(this.d.store),
       estimate: isObj(est) ? est : null,
       servedFetch: served,
     })
+    return boardData(base, { outboxLines: await this.outboxToday(), todayCounts: await this.todayCounts(), savings, report, status })
+  }
+
+  /** Today's outbox lines of every session, for the board's timeline (this session's held lines written first). */
+  async outboxToday(): Promise<Obj[]> {
+    try {
+      await this.d.outbox?.flush()
+      return await readOutboxDay(this.d.fs, `${this.d.dataDir.replace(/[\\/]+$/, '')}/services/outbox`, this.now())
+    } catch {
+      return []
+    }
   }
 
   /** One render: the page is written (and changed_at recorded) only when it changed beyond generated_at. */
@@ -783,63 +741,3 @@ export class Wiring {
 }
 
 export const createWiring = (deps: WiringDeps): Wiring => new Wiring(deps)
-
-// ------------------------------------------------------------------ the core's Transport over the svc channel
-
-/** The svc hook budget a core deadline fits in: agent.spawn 1 s, tool.call 8 s, else background. */
-export const hookFor = (deadlineMs: number): Hook =>
-  !(deadlineMs > HOOK_BUDGET_MS.spawn) ? 'spawn' : deadlineMs <= HOOK_BUDGET_MS.tool ? 'tool' : 'background'
-
-const FAILED: SvcResult = { ok: false, status: null, body: null, error: 'failed' }
-
-/**
- * engine_types.ts Transport on svc.ts Svc. The gate is the auth state first (3.9: 'login' or 'locked' straight
- * from the store, so a signed-out session passes every event through from its first one), then the channel's gate.
- * Never throws.
- */
-export function svcTransport(svc: Svc): Transport {
-  const kindOf = (k: string): Kind | undefined => (Object.hasOwn(TIMEOUTS_MS, k) ? (k as Kind) : undefined)
-  return {
-    async call(method: 'GET' | 'POST', path: string, body: Record<string, unknown> | null, opts: CallOptions): Promise<SvcResult> {
-      try {
-        return result(await svc.call(method, path, body ?? undefined, { kind: kindOf(opts?.kind), hook: hookFor(opts?.deadlineMs) }))
-      } catch {
-        return FAILED
-      }
-    },
-    async gateState(): Promise<GateState> {
-      try {
-        const a = await svc.authState()
-        if (a !== 'ok') return { open: false, reason: a === 'locked' ? 'locked' : 'login', minShell: null }
-        const g = svc.gateState()
-        // Signed in (in the store) while this session's gate still says login or locked: another session signed in
-        // since this one's 401 or 423 (3.9 item 5). Report unknown so the core handshakes again.
-        if (!g.open && (g.reason === 'login' || g.reason === 'locked')) return { open: false, reason: 'unknown', minShell: null }
-        return { open: g.open, reason: g.reason, minShell: g.min_shell }
-      } catch {
-        return { open: false, reason: 'unavailable', minShell: null }
-      }
-    },
-    async handshake(opts: CallOptions): Promise<SvcResult> {
-      try {
-        return result(await svc.handshake(hookFor(opts?.deadlineMs)))
-      } catch {
-        return FAILED
-      }
-    },
-    async fetchServed(sessionRef: string, role: string, phase: string, opts: CallOptions): Promise<SvcResult> {
-      try {
-        return result(await svc.fetchServed(sessionRef, role, phase, hookFor(opts?.deadlineMs)))
-      } catch {
-        return FAILED
-      }
-    },
-    endServedSession(sessionRef: string): void {
-      try {
-        svc.endServedSession(sessionRef)
-      } catch {
-        // local only
-      }
-    },
-  }
-}

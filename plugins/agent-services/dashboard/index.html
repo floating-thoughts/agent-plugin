@@ -177,6 +177,15 @@ details.how p { margin: 8px 0 0; font-size: 13px; color: var(--muted); }
 .section-title h2 { font-size: 17px; }
 footer { margin-top: 36px; color: var(--faint); font-size: 12.5px; text-align: center; }
 .empty-note { color: var(--muted); font-size: 14px; margin: 4px 0 0; }
+.tl { list-style: none; margin: 0; padding: 0; }
+.tl li { display: flex; gap: 14px; align-items: baseline; padding: 9px 0; border-top: 1px solid var(--grid); font-size: 14px; }
+.tl li:first-child { border-top: 0; padding-top: 0; }
+.tl .when { flex: none; width: 72px; color: var(--muted); font-size: 13px; font-variant-numeric: tabular-nums; }
+.tl .what { min-width: 0; overflow-wrap: anywhere; }
+.week-lines { margin: 0; padding: 0; list-style: none; }
+.week-lines li { margin: 6px 0; font-size: 14.5px; }
+.week-lines li:first-child { font-size: 18px; font-weight: 650; margin-top: 0; }
+.week-lines li.admin { margin-top: 14px; color: var(--muted); font-size: 13px; }
 </style>
 </head>
 <body>
@@ -190,6 +199,12 @@ footer { margin-top: 36px; color: var(--faint); font-size: 12.5px; text-align: c
   </header>
 
   <section class="card hero" id="hero" aria-live="polite"></section>
+
+  <div class="section-title"><h2>Today</h2><span class="muted small" id="today-hint"></span></div>
+  <section class="card" id="timeline"></section>
+
+  <div class="section-title"><h2>This week</h2><span class="muted small" id="week-hint"></span></div>
+  <section class="card" id="weekly"></section>
 
   <div class="section-title"><h2>Saved per day</h2><span class="muted small" id="chart-range"></span></div>
   <section class="card">
@@ -451,6 +466,47 @@ footer { margin-top: 36px; color: var(--faint); font-size: 12.5px; text-align: c
     document.getElementById("chart-how").appendChild(how("Each bar is one day's savings, worked out by our service from that day's shared usage counts " +
       "and compared with the same work on the most capable model, with no compaction and whole-file reads. Days with no work show no bar. " +
       "A bar below the line means compaction cost a little more than it saved that day.", true));
+  })();
+
+  // ---------------------------------------------------------------- today: what agent-services did (board_facts.ts)
+  (function timeline() {
+    var c = document.getElementById("timeline");
+    var tl = D.timeline || null;
+    var items = tl && Array.isArray(tl.items) ? tl.items : [];
+    if (tl && typeof tl.summary === "string") { c.appendChild(el("p", "small", tl.summary)); }
+    if (items.length) {
+      var ul = el("ul", "tl");
+      if (tl && tl.summary) { ul.style.marginTop = "12px"; }
+      items.forEach(function (it) {
+        if (!it || typeof it.text !== "string") { return; }
+        var li = el("li");
+        var t = new Date(it.at);
+        var when = isNaN(t.getTime()) ? "" : t.toLocaleTimeString("en-US", { hour: "numeric", minute: "2-digit" });
+        add(li, el("span", "when", when), el("span", "what", it.text));
+        ul.appendChild(li);
+      });
+      c.appendChild(ul);
+    } else if (!tl || !tl.summary) {
+      c.appendChild(el("p", "empty-note", "Nothing yet today. What agent-services does for you shows up here as you work."));
+    }
+    document.getElementById("today-hint").textContent = D.today ? fmtDay(D.today, true) : "";
+  })();
+
+  // ---------------------------------------------------------------- this week (board_facts.ts weeklyOf)
+  (function weekly() {
+    var c = document.getElementById("weekly");
+    var w = D.weekly || null;
+    var lines = w && Array.isArray(w.lines) ? w.lines : [];
+    var ul = el("ul", "week-lines");
+    lines.forEach(function (t) {
+      if (typeof t !== "string") { return; }
+      ul.appendChild(el("li", t.indexOf("company admin") >= 0 ? "admin" : null, t));
+    });
+    if (!ul.firstChild) { ul.appendChild(el("li", null, "Your weekly summary appears after your first full day of measured savings.")); }
+    c.appendChild(ul);
+    if (w && typeof D.today === "string" && /^\d{4}-\d{2}-\d{2}$/.test(D.today)) {
+      document.getElementById("week-hint").textContent = fmtDay(addDays(D.today, -((w.days || 7) - 1))) + " – " + fmtDay(D.today);
+    }
   })();
 
   // ---------------------------------------------------------------- benefit cards

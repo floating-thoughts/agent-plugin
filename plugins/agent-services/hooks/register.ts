@@ -15,22 +15,18 @@
 // - Nothing here writes the user's settings or permission rules ($.settings is read only).
 import type { EngineInterface, Register } from 'claude-code'
 import { dataDir, declareCommand, engineClaudeHash, engineDirs, MARKETPLACE, onboardingNote, serveCommand } from './command'
-import { Core } from './core'
-import type { Answer } from './core'
+import { Core, type Answer } from './core'
 import { dashboardGrant, GRANT_REASON, PUBLISH_START_WAIT_MS, publishDashboard } from './dashboard'
 import { Guard } from './guard'
 import { migrate, OLD_SIGNIN_KEY, OLD_SIGNIN_LINE } from './migrate'
 import { FLUSH_EVERY_MS, Outbox } from './outbox'
+import { holdWrite, lessonHold, pushAgain, pushLessons, pushStart, surveyTool } from './phase'
 import { PRICES } from './prices'
-import { engineStore, safeDelete, safeGet } from './store'
-import type { KV } from './store'
-import { Svc } from './svc'
-import type { HttpAnswer } from './svc'
+import { engineStore, safeDelete, safeGet, type KV } from './store'
+import { Svc, type HttpAnswer } from './svc'
 import { engineSleep, installTools, registerTools, SESSION_FALLBACK, svcAuthLine } from './tools'
-import { probeProcess, selfUpdate } from './update'
-import type { Gate } from './update'
-import { createWiring, svcTransport } from './wiring'
-import type { Wiring } from './wiring'
+import { probeProcess, selfUpdate, type Gate } from './update'
+import { createWiring, svcTransport, type Wiring } from './wiring'
 
 type Ev = Record<string, any>
 type Usage = { input: number; output: number; cache_read: number; cache_write: number }
@@ -45,6 +41,7 @@ type Rt = {
   store: KV
   dir: string
   sleep: Sleep
+  readText: (path: string) => Promise<string | null>
 }
 
 export const HARNESS = 'claude-code'
@@ -86,9 +83,7 @@ const capped = <T>(p: Promise<T>, sleep: Sleep, ms: number, dflt: T): Promise<T>
 // A notice is a dim transcript line. The session summary at exit is also a toast: a line logged as the session
 // ends may never be drawn. Both are best effort.
 const show = ($: EngineInterface, notice: string | null | undefined, toast = false) => {
-  if (typeof notice !== 'string' || !notice) {
-    return
-  }
+  if (typeof notice !== 'string' || !notice) return
   try {
     $.ui.log(notice)
   } catch {}
@@ -145,10 +140,8 @@ const engineFs = ($: EngineInterface) => ({
 
 // The status line after session_start and turn_end; once after a new sign-in, the old-sign-in line of the migration.
 async function refreshStatus(setStatus: (text: string) => void, w: Wiring, store: KV): Promise<void> {
-  await w.refreshStatus()
-  if ((await w.authState()) === 'ok' && (await safeGet(store, OLD_SIGNIN_KEY)) === true && (await safeDelete(store, OLD_SIGNIN_KEY))) {
-    setStatus(OLD_SIGNIN_LINE)
-  }
+  const old = async () => (await w.authState()) === 'ok' && (await safeGet(store, OLD_SIGNIN_KEY)) === true && (await safeDelete(store, OLD_SIGNIN_KEY))
+  await w.refreshStatus(async () => ((await old()) ? (setStatus(OLD_SIGNIN_LINE), true) : false))
 }
 
 async function build($: EngineInterface): Promise<Rt | null> {
@@ -161,6 +154,7 @@ async function build($: EngineInterface): Promise<Rt | null> {
     const sleep = engineSleep($)
     const now = () => Date.now()
     const fs = engineFs($)
+    const readText = async (p: string) => maybe(async () => String(await $.fs.read(p)))
     const setStatus = (text: string): void => {
       try {
         $.ui.status(text)
@@ -199,7 +193,7 @@ async function build($: EngineInterface): Promise<Rt | null> {
       transport,
       store,
       guard: new Guard({ transport }),
-      readText: async (p) => maybe(async () => String(await $.fs.read(p))),
+      readText,
       harness: HARNESS,
       ...wiring.coreOptions(),
       status: { update: () => refreshStatus(setStatus, wiring, store) },
@@ -207,7 +201,7 @@ async function build($: EngineInterface): Promise<Rt | null> {
     try {
       $.clock.every(FLUSH_EVERY_MS, () => void outbox.flush().catch(() => undefined))
     } catch {}
-    return { setStatus, session, svc, core, wiring, outbox, store, dir, sleep }
+    return { setStatus, session, svc, core, wiring, outbox, store, dir, sleep, readText }
   } catch {
     return null
   }
@@ -226,14 +220,17 @@ function ready($: EngineInterface): Promise<Rt | null> {
 async function send($: EngineInterface, kind: string, agent: string | null, fields: Ev = {}): Promise<Answer | null> {
   const r = await ready($)
   if (!r) return null
+  if (kind === 'clear' || kind === 'compaction') pushAgain(r, agent) // phase.ts: the phase's items again
   const event = { v: 1, harness: HARNESS, kind, session: r.session, agent, ...fields }
   return capped(r.core.handle(event), r.sleep, EVENT_WAIT_MS, null)
 }
 
-// The background work of a session's start: daily metrics, the outbox sweep, the migration, the self-update.
+// Session-start background: metrics upload, savings lines (startNotices), outbox sweep, migration, self-update.
 function background($: EngineInterface, r: Rt, interactive: boolean): void {
   void r.wiring.metricsTick().catch(() => undefined)
+  void r.wiring.startNotices().then((lines) => lines.forEach((line) => show($, line, true))).catch(() => undefined)
   void r.outbox.sweep().catch(() => undefined)
+  void pushStart(r) // phase.ts: the plan-phase served items, for the first prompt
   void migrate({
     dataDir: r.dir,
     fs: engineFs($),
@@ -248,8 +245,7 @@ function background($: EngineInterface, r: Rt, interactive: boolean): void {
     if ((await r.svc.authState()) !== 'ok') return 'closed'
     return r.svc.gateState().reason === 'upgrade' ? 'upgrade' : 'open'
   }
-  // update.ts: later, in the background; once it finds no $.process it runs nothing and the status line and
-  // /agent-services status show the terminal command instead
+  // update.ts, later; without $.process it runs nothing and the status line and status show the terminal command
   selfUpdate($, interactive, gate, () => void (updates.selfUpdates = false))
 }
 
@@ -258,7 +254,7 @@ export const register: Register = (on) => {
     deps: async () => {
       const r = await (runtime ?? first)
       if (!r) throw new Error('agent-services did not start')
-      return { core: r.core as any, authLine: svcAuthLine(r.svc), sleep: r.sleep, outbox: r.outbox }
+      return { core: r.core as any, authLine: svcAuthLine(r.svc), sleep: r.sleep, outbox: r.outbox, lessonHold: lessonHold(r.readText) }
     },
   })
 
@@ -328,6 +324,8 @@ export const register: Register = (on) => {
   })
 
   on('tool.call', async ($, e: Ev, next) => {
+    const held = await holdWrite(ready($), e.tool, rest(e), () => $.session.cwd()) // phase.ts, signed in only
+    if (held) return { deny: held }
     const fields = { tool: e.tool, input: rest(e), call: e.tool_use_id ?? null }
     const agent = e.agentId ?? null
     const a = await send($, 'pre_tool', agent, fields)
@@ -336,6 +334,7 @@ export const register: Register = (on) => {
       return { deny: a.reason }
     }
     const done: Ev = await next(a?.action === 'rewrite' && a.set ? { ...e, ...a.set } : e)
+    await surveyTool(ready($), e.tool, rest(e), done, () => $.session.cwd()) // phase.ts: R11 survey counts
     show($, (await send($, 'post_tool', agent, { ...fields, ok: done?.deny === undefined && done?.isError !== true }))?.notice)
     return done
   }).catch(($, e, next) => next(e))
@@ -376,6 +375,7 @@ export const register: Register = (on) => {
     show($, a?.notice)
     // The server's advice and the first prompt's setup note: their own labelled context blocks (text untouched)
     const blocks = a?.action === 'inject' && a.context && a.context.length ? [a.context.join('\n')] : []
+    blocks.push(...(await pushLessons(ready($), e.agentId, () => $.session.cwd()))) // phase.ts: served items by phase
     const note = !e.agentId && (await ready($)) ? await onboardingNote($) : null
     if (note) blocks.push(note)
     return blocks.length ? next({ ...e, context: [...(e.context ?? []), ...blocks] }) : next(e)
