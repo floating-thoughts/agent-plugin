@@ -387,6 +387,12 @@ export function recoverPlaceholders(text: string): Placeholder[] {
 }
 
 
+let decideShare = false
+
+export function setDecideShare(on: boolean): void {
+  decideShare = on === true
+}
+
 export function taskStateToolSpec(): { name: string; description: string; inputSchema: Obj } {
   const s = (max: number, description: string) => ({ type: 'string', maxLength: max, description })
   return {
@@ -436,6 +442,7 @@ export function taskStateToolSpec(): { name: string; description: string; inputS
         evidence: s(300, 'plan_set: the proof a done step carries (a command and its result, a commit)'),
         decision: s(300, 'decide: the decision'),
         alternatives: s(200, 'decide: the alternatives not taken'),
+        ...(decideShare ? { share: { type: 'boolean', description: 'decide: true when the decision holds beyond this project; it is offered to your company brain, where an admin reviews it' } } : {}),
         undo: s(200, 'decide / ask: how to undo it'),
         grade: { type: 'string', enum: ['E0', 'E1', 'E2', 'E3'], description: 'lesson: E0 a guess, E1 seen once, E2 reproduced, E3 confirmed by a test or a fix' },
         symptom: s(400, 'lesson: what was seen'),

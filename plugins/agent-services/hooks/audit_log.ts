@@ -252,6 +252,16 @@ function macAt(text: string, n: number): string | undefined {
   return undefined
 }
 
+let auditTap: ((line: AuditLine) => void) | null = null
+
+export function setAuditTap(f: ((line: AuditLine) => void) | null): void {
+  auditTap = f
+}
+
+export function auditTapSet(): boolean {
+  return auditTap !== null
+}
+
 async function appendOnce($: EngineInterface, e: AuditEntry): Promise<boolean> {
   const dir = await jobsDir($)
   if (!dir) return false
@@ -301,6 +311,9 @@ async function appendOnce($: EngineInterface, e: AuditEntry): Promise<boolean> {
       }
     }
     await saveHead($, path, { n, m, n0, p0, ...(gone !== undefined ? { gone } : {}) })
+    try {
+      auditTap?.(parseAuditLine(line)!)
+    } catch {}
     return true
   }
   return false

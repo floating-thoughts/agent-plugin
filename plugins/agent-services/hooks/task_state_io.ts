@@ -226,6 +226,23 @@ export async function silenceHere($: EngineInterface, input: unknown, mask: Mask
   }
 }
 
+export type TaskTap = (ev: { op: string; input: unknown; line?: string; dir?: string | null }) => void
+let taskTap: TaskTap | null = null
+
+export function setTaskTap(f: TaskTap | null): void {
+  taskTap = f
+}
+
+export function taskTapSet(): boolean {
+  return taskTap !== null
+}
+
+const tap = (ev: Parameters<TaskTap>[0]): void => {
+  try {
+    taskTap?.(ev)
+  } catch {}
+}
+
 export async function taskStateOp(
   $: EngineInterface,
   input: unknown,
@@ -257,12 +274,15 @@ export async function taskStateOp(
     }
     if (!(await projectWriteDir($, opts.start))) return await noProjectNote($, opts.start)
     let answer = ''
+    let changed = false
     const r = await updateTaskState($, (s) => {
       const res = applyOp(s, i, ctx)
       answer = res.answer
+      changed = res.changed
       return res.changed ? res.state : null
     }, { create: true, start: opts.start, now: nowMs })
     if (r.state === null) return r.note ?? 'The task state was not changed (no cause was reported); carry on without it.'
+    if (['effect_begin', 'effect_done', 'deliver'].includes(String(i.op)) && changed) tap({ op: String(i.op), input: i })
     return r.note ? `${answer} ${r.note}` : answer
   } catch (err) {
     return `The task state could not be changed (${errorBrief(err, opts.mask)}); carry on without it.`
@@ -372,11 +392,13 @@ export async function projectFileOp(
       if ('refuse' in made) return { answer: made.refuse, ran: false, dir }
       const path = await decisionsFile($, dir)
       const r = await writeChecked($, path, (old) => ({ text: appendLines(old, [made.line], false, ['# Decisions']), answer: `Appended to ${path.split('/').pop()}: ${made.line}` }), { append: true })
+      if (r.wrote) tap({ op: 'decide', input, line: made.line, dir })
       return { answer: r.answer, ran: r.wrote, dir }
     }
     const made = lessonParagraph(input, date, opts.mask)
     if ('refuse' in made) return { answer: made.refuse, ran: false, dir }
     const r = await writeChecked($, `${dir}/.agent/lessons.md`, (old) => ({ text: appendLines(old, [made.line], true), answer: `Appended to .agent/lessons.md: ${made.line}` }), { append: true })
+    if (r.wrote) tap({ op: 'lesson', input, line: made.line, dir })
     return { answer: r.answer, ran: r.wrote, dir }
   } catch (err) {
     return { answer: `The project file could not be written (${errorBrief(err, opts.mask)}); carry on without it.`, ran: false, dir: null }

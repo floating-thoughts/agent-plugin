@@ -244,6 +244,14 @@ export const HOOKS: readonly HookRow[] = [
     shown: 'The tool call, a dim line after the compaction, and the plugin\'s message with the next step.',
   },
   {
+    event: 'tool.call', matcher: 'tool: Agent, Task, SendMessage', file: 'concurrency.ts', does: ['deny'],
+    what: 'Before the main conversation dispatches a subagent (or sends new work to a running one), looks for a ' +
+      'concurrency plan in its recent replies or agent-state.md (Task | Depends on | Owns | How it runs). Without ' +
+      'one it refuses that dispatch once, with the format and an example; a description or prompt starting with ' +
+      '"single use:" skips the check, and read-only fetch or search helpers are not checked. Sends nothing.',
+    shown: 'A refused dispatch with the plugin\'s note; sending the same call again goes through.',
+  },
+  {
     event: 'classic.Stop', matcher: '', file: 'register.ts', does: ['deny'],
     what: 'With the served rule tables (signed in): when a main turn ends on a promise of more of its own work and ' +
       'nothing is running in the background to wake it, it is sent back once to do that work. Runs locally; sends nothing.',

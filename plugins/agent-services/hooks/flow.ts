@@ -80,7 +80,9 @@ export function lockedBy(file: string, cwd: string | null, globs: readonly strin
 }
 
 export const lockReason = (file: string, glob: string): string =>
-  `agent-services test lock: ${file} matches "${oneLine(glob, 200)}" in ${LOCK_FILE}, so a subagent may not change it. Leave the ` +
+  `agent-services test lock: ${file} matches "${oneLine(glob, 200)}" in ${LOCK_FILE}, so a subagent may not change it. The edit was ` +
+  'refused, and every subagent edit of a matching file is refused; no override is open to a subagent (this file never locks the ' +
+  'main conversation). Leave the ' +
   'test as it is and report the change you think it needs to the main session, which may edit it.'
 
 export function pendingCount(text: string | null): number {

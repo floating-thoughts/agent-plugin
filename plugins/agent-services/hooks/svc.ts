@@ -222,7 +222,7 @@ type Res = Result & { sent?: string }
 
 export type GateState = { open: boolean; reason: string | null; min_shell: string | null }
 export type AuthState = 'ok' | 'login' | 'locked' | 'paused'
-type Block = { code: string; until: number | null; token_sha256: string | null }
+type Block = { code: string; until: number | null; token_sha256: string | null; grace_until?: number | null }
 type Settings = {
   offline: boolean
   services: Record<string, boolean>
@@ -398,15 +398,25 @@ export class Svc {
   private async block(): Promise<Block | null> {
     const b = await safeGet(this.kv, KEYS.block)
     if (!isObj(b) || typeof b.code !== 'string') return null
-    return { code: b.code, until: num(b.until), token_sha256: typeof b.token_sha256 === 'string' ? b.token_sha256 : null }
+    return {
+      code: b.code, until: num(b.until), token_sha256: typeof b.token_sha256 === 'string' ? b.token_sha256 : null,
+      grace_until: b.code === 'license_inactive' ? num(b.grace_until) : null,
+    }
   }
-  private async setBlock(code: string, seconds: number | null, token: string | null): Promise<void> {
+  private async setBlock(code: string, seconds: number | null, token: string | null, graceUntil: number | null = null): Promise<void> {
     await safeSet(this.kv, KEYS.block, {
       code,
       until: seconds === null ? null : this.d.now() + seconds * 1000,
       token_sha256: token ? sha256Hex(utf8(token)) : null,
+      ...(graceUntil !== null && code === 'license_inactive' ? { grace_until: graceUntil } : {}),
     })
     this.authCache = null
+  }
+
+  async graceUntil(): Promise<number | null> {
+    const b = await this.pauseBlock()
+    const g = b && b.code === 'license_inactive' ? (b.grace_until ?? null) : null
+    return g !== null && this.d.now() < g ? g : null
   }
 
   async blocked(): Promise<string | null> {
@@ -784,7 +794,8 @@ export class Svc {
         break
       }
       if (ist === 401 && o.signed && code === 'license_inactive') {
-        await this.setBlock(code, BLOCK_SECONDS.org_paused, o.token ?? null)
+        const g = isObj(parsed) && typeof parsed.grace_until === 'string' ? Date.parse(parsed.grace_until) : NaN
+        await this.setBlock(code, BLOCK_SECONDS.org_paused, o.token ?? null, Number.isFinite(g) ? g : null)
         this.pauseCode = code
         this.notice(code)
         this.setGate('paused')
@@ -1013,7 +1024,7 @@ export class Svc {
       return R(false, { error: (await this.blocked()) ?? (pause ? pause.code : 'not_logged_in') })
     }
     if (await this.cooling()) return R(false, { error: 'rate_limited' })
-    if (pause) await this.setBlock(pause.code, BLOCK_SECONDS.org_paused, await getText(this.kv, KEYS.token))
+    if (pause) await this.setBlock(pause.code, BLOCK_SECONDS.org_paused, await getText(this.kv, KEYS.token), pause.grace_until ?? null)
     const err = await this.ensureFresh(d, rotate)
     if (err) {
       const paused = err === 'org_paused' || err === 'license_inactive' || (pause !== null && err !== 'login_expired')
@@ -1149,7 +1160,10 @@ export class Svc {
       }
       const signed = sub !== '/health'
       const key = `${route.method} ${route.path}`
-      if (signed) {
+      const grace = signed && ['POST /sealed/kit/list', 'POST /sealed/kit/get', 'POST /sealed/kit/exported',
+        'POST /sealed/roster', 'POST /sealed/list', 'POST /sealed/get', 'POST /sealed/ledger/receipts'].includes(key) &&
+        (await this.authState()) === 'paused' && (await this.graceUntil()) !== null
+      if (signed && !grace) {
         if ((await this.authState()) !== 'ok') return fail('auth_failed')
         if (await this.cooling()) return fail('rate_limited')
         if (!(await this.ensureOpen(d, hook))) return fail('inactive')
@@ -1161,7 +1175,7 @@ export class Svc {
       if (await this.cooling()) return fail('rate_limited')
       if (signed) {
         const blk = await this.blocked()
-        if (blk) return fail(blk)
+        if (blk && !grace) return fail(blk)
         if (!(await getText(this.kv, KEYS.token)) || !(await getText(this.kv, KEYS.accountId))) return fail('not_logged_in')
         const err = await this.ensureFresh(d, hook === 'background')
         if (err) return fail(err)

@@ -1,12 +1,14 @@
 import type { EngineInterface } from 'claude-code'
-import { RX_INPUT_MAX, RX_SOURCE_MAX, rulesLive, rulesTable } from './rules'
+import { RX_INPUT_MAX, riskyPattern, rulesLive, rulesTable } from './rules'
 import { keepGoingStop, taskNoteAgain, taskTick } from './task_wire'
 import { resumeSubagentStop } from './resume'
 import { evidenceJobEnd } from './evidence'
 import { jobSubagentStop } from './jobs'
+import { reportSubagentStop } from './failure_report'
 import { vaultMask } from './vault'
 import { NOTE_PREFIX } from './review'
 import { continueVia } from './stall'
+import { isFinished } from './quiet'
 
 type Obj = Record<string, any>
 type Rule = { pattern?: string; tool?: string; first_alert_minutes?: number; repeat_minutes?: number; never?: boolean; foreground?: boolean; until?: string; reason?: string }
@@ -36,6 +38,8 @@ let alertsGiven: string[] = []
 let ticking = false
 let loadedAt = Date.now()
 let listedAt = -Infinity
+let shellsQueued = false
+let shellsPrompt = ''
 
 function table(): Table | null {
   const t = rulesTable<Table>('watch')
@@ -79,7 +83,7 @@ export function untilOf(s: unknown): number | null {
 }
 
 function test(pattern: string, text: string, whole = false): boolean | null {
-  if (typeof pattern !== 'string' || pattern.length > RX_SOURCE_MAX) return null
+  if (typeof pattern !== 'string' || riskyPattern(pattern)) return null
   try {
     return new RegExp(whole ? `^(?:${pattern})$` : pattern, 'i').test(String(text).slice(0, RX_INPUT_MAX))
   } catch {
@@ -232,6 +236,7 @@ export async function watchStop($: EngineInterface, e: Obj, next: (e: Obj) => Pr
   if (!t) return next(e)
   const at = await $.clock.now()
   delete walled['']
+  shellsQueued = false
   const listed = (Array.isArray(e.background_tasks) ? e.background_tasks : []).filter(
     (x: Obj) => x?.type !== 'subagent' && /running|pending/i.test(String(x?.status ?? '')))
   const known = new Map(tasks.map((x) => [x.id, x]))
@@ -267,6 +272,8 @@ export async function watchSubagentStop($: EngineInterface, e: Obj, next: (e: Ob
   const done = await next(e)
   try {
     if (!done || done.block !== undefined || !id) return done
+    const rep = reportSubagentStop(id, String(e.last_assistant_message ?? ''))
+    if (rep) return { ...done, block: rep }
     const check = selfCheck(t, id, e.background_tasks, at)
     if (check === null) {
       await jobSubagentStop($, id)
@@ -309,6 +316,8 @@ export function watchDue(at: number, live: string[]): { prompts: string[]; sends
   if (!t) return out
   const timer = timerOf(t)
   const running = new Set(live)
+  tasks = tasks.filter((x) => !isFinished(x.id))
+  autoTasks = autoTasks.filter((x) => !isFinished(x.id))
   const due = shellsDue(tasks.filter((x) => !(shellOwner[x.id] && running.has(shellOwner[x.id]!))), at, shellAsked, loadedAt)
   if (due.length) {
     const s = t.shells ?? {}
@@ -316,7 +325,8 @@ export function watchDue(at: number, live: string[]): { prompts: string[]; sends
       shellAsked[x.id] = at
       return fill(s.line, { description: oneLine(x.description ?? ''), task: x.id, minutes: mins(at - x.startedAt) })
     })
-    out.prompts.push(fill(s.text, { lines: lines.join('\n') }))
+    shellsPrompt = fill(s.text, { lines: lines.join('\n') })
+    out.prompts.push(shellsPrompt)
   }
   for (const [id, w] of Object.entries(walled)) {
     if (id && running.has(id)) {
@@ -348,6 +358,10 @@ export async function watchTick($: EngineInterface): Promise<void> {
   const wall: unknown = table()?.wall?.main
   for (const text of plan.prompts) {
     if (typeof wall === 'string' && text === wall && !(await continueVia($, 'wall', 'stop', { at })).ok) continue
+    if (text === shellsPrompt) {
+      if (shellsQueued) continue
+      shellsQueued = true
+    }
     await $.prompt.submit({ text }).catch(() => undefined)
   }
   for (const s of plan.sends) await $.session.send({ to: { agentId: s.agentId }, text: s.text } as any).catch(() => undefined)
@@ -383,6 +397,7 @@ export async function watchPrompt($: EngineInterface, e: Obj): Promise<string[]>
   await rulesLive()
   try {
     if (e?.agentId || !table()) return []
+    shellsQueued = false
     const notes: string[] = []
     const usage = await $.session.usage()
     for (const a of alertsOf(usage?.rateLimits)) {
@@ -458,4 +473,6 @@ export function watchResetForTest(since = 0): void {
   ticking = false
   loadedAt = since
   listedAt = -Infinity
+  shellsQueued = false
+  shellsPrompt = ''
 }

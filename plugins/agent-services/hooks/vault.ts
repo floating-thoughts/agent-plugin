@@ -1,5 +1,5 @@
 import type { EngineInterface } from 'claude-code'
-import { onRulesClear, RULES_OFF_LINE, RULES_PENDING_LINE, rulesState, rulesTable } from './rules'
+import { onRulesClear, riskyPattern, RULES_OFF_LINE, RULES_PENDING_LINE, rulesState, rulesTable } from './rules'
 
 type Obj = Record<string, any>
 type Pat = { kind: string; re: RegExp; group: number; mixed: boolean }
@@ -30,6 +30,7 @@ function table(): Table | null {
     const pats: Pat[] = []
     for (const p of Array.isArray(src.patterns) ? src.patterns : []) {
       if (typeof p?.kind !== 'string' || !/^[a-z0-9_]+$/.test(p.kind) || typeof p.re !== 'string') continue
+      if (riskyPattern(p.re)) continue
       const flags = typeof p.flags === 'string' ? p.flags : 'u'
       pats.push({
         kind: p.kind,

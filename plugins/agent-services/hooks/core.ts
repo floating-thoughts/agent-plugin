@@ -14,6 +14,7 @@ import { GATE_NOTICES, LOCKED_LINE, PAUSED_LINE as SIGN_IN_LINE, PLAN_NOTICE } f
 import { checkpointToolName, explicitFor, noteCallBrief, noteCallExplicit, noteCallRoute, noteRouteHint, setTableAsk, userAskedOverride, userAskedReview } from './flow_state'
 import { ADVICE_LABEL, adviceIn, takeTurn } from './delegate'
 import { RX_INPUT_MAX, servedRegex } from './rules'
+import { companyIndex, companyKey } from './sealed_wire'
 
 export { normpath, normPath } from './paths'
 
@@ -993,11 +994,12 @@ export class Core {
       return { role, phase, version: b.version ?? null, catalog: has(b, 'catalog') ? b.catalog : '', items: items(b), fallback: null }
     }
     if (tool === 'toolbox') {
+      const co = companyKey(String(args.key ?? '')); if (co) return co
       if (!this.guard || typeof this.guard.fetchToolbox !== 'function') return openAnswer(tool, args)
       const g = await this.guardSession(session, 'auto')
       const b = await this.guard.fetchToolbox(g.session_token, args.key as string, has(args, 'topic') ? args.topic as string : undefined)
       if (args.files === true) return this.toolboxFiles(g.session_token, args.key as string, b, left)
-      return { ...b, fallback: null }
+      return args.key === 'index' ? companyIndex({ ...b, fallback: null }) as Record<string, unknown> : { ...b, fallback: null }
     }
     if (tool === 'savings') {
       const res = this.metrics ? await this.metrics.savings() : OFF
