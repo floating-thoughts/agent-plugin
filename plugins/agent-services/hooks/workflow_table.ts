@@ -1,7 +1,8 @@
-// The served workflow table (rules.ts, table `workflow`): the thresholds, the plan-validity criteria and the advice
-// texts of the planning gate (phase.ts), the turn notes (flow.ts), the checkpoint answers (checkpoint.ts) and the
-// update and changed-methods notes (review.ts). The plugin keeps only the engines; each reads its section here, and
-// without the table (signed out, or not arrived yet) every value is null and the feature does nothing.
+// The served workflow table (rules.ts, table `workflow`): the thresholds and advice texts of the turn notes (flow.ts),
+// the checkpoint answers (checkpoint.ts) and the update and changed-methods notes (review.ts). The planning gate
+// (phase.ts) no longer reads it: its verdict comes from the service (gate_verdict.ts). The plugin keeps only the
+// engines; each reads its section here, and without the table (signed out, or not arrived yet) every value is null
+// and the feature does nothing.
 import { rulesTable } from './rules'
 
 type Obj = Record<string, unknown>

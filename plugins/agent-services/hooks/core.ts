@@ -26,7 +26,8 @@ import { SessionSummary } from './summary'
 import type { Clock, GateState, KV, Random, ReadText, SvcResult, Transport } from './engine_types'
 import { indexed, isAbsPath, joinPath, normpath, normPath } from './paths'
 import { ORG_PAUSED_LINE } from './org'
-import { checkpointToolName, noteRouteHint, userAskedReview } from './flow_state'
+import { checkpointToolName, noteCallBrief, noteRouteHint, userAskedReview } from './flow_state'
+import { adviceIn, takeTurn } from './delegate'
 import { RX_INPUT_MAX, servedRegex } from './rules'
 
 export { indexed, normpath, normPath } from './paths'
@@ -271,6 +272,7 @@ export function checkArgs(tool: string, args: unknown): void {
   } else if (tool === 'lesson_lookup') {
     if (typeof args.role !== 'string' || !SERVED_ROLES.includes(args.role)) bad('role')
     if (typeof args.phase !== 'string' || !SERVED_PHASES.includes(args.phase)) bad('phase')
+    if (has(args, 'event') && !((schema.properties.event as { enum: unknown[] }).enum).includes(args.event)) bad('event')
   } else if (tool === 'checkpoint_advice') {
     const p = args.context_pct
     if (!isNum(p) || p < 0 || p > 100) bad('context_pct')
@@ -628,6 +630,18 @@ export class Core {
     return p
   }
 
+  /** The planning-gate verdict for `state` (phase.ts gateState) through the session's guard (role auto): the
+   * service's `gate` object, 'refused' (an older service), or null (no guard, or any failure). Never throws. */
+  async servedGate(session: unknown, state: Record<string, unknown>): Promise<Record<string, unknown> | 'refused' | null> {
+    if (!this.guard || typeof session !== 'string' || !session) return null
+    try {
+      const g = await this.guardSession(session, 'auto')
+      return await this.guard.gate(g.session_token, state)
+    } catch {
+      return null
+    }
+  }
+
   private deliver(s: Session, e: Ev): Answer | null {
     if (e.agent !== null || !s.injectOn.includes(e.kind as string)) return null
     const ctx = s.pendingContext
@@ -681,6 +695,7 @@ export class Core {
     }
     const notice = r.notice
     const fb = r.fallback
+    noteCallBrief(e.call, r.brief_rule) // flow.ts briefed(): this spawn's own rule
     if (r.decision === 'route') {
       s.dispatches.push([e.call, r.effort ?? null])
       return answer('rewrite', { set: { model: r.model ?? null, effort: r.effort ?? null }, notice, fallback: fb })
@@ -805,10 +820,11 @@ export class Core {
     const cw = e.context_window
     const pct = isInt(ct) && isInt(cw) && cw > 0 ? (100 * ct) / cw : 0
     s.turns += 1
+    const turn = takeTurn() // delegate.ts: the main turn's counts for the turn advice (null: nothing to send)
     if (s.inflight) return answer()
     s.inflight = true
     const tokens = isInt(ct) && ct >= 0 ? ct : null
-    this.spawn(() => this.checkpoint(s, sid, pct, tokens))
+    this.spawn(() => this.checkpoint(s, sid, pct, tokens, turn))
     return answer()
   }
 
@@ -835,7 +851,7 @@ export class Core {
     }
   }
 
-  private async checkpoint(s: Session, session: string, pct: number, tokens: number | null): Promise<void> {
+  private async checkpoint(s: Session, session: string, pct: number, tokens: number | null, turn: unknown = null): Promise<void> {
     try {
       await this.keepCounts(s, session)
       const counts: Record<string, number> = {
@@ -843,7 +859,8 @@ export class Core {
         minutes: Math.max(0, Math.floor((this.now() - s.base) / 60)),
       }
       if (tokens !== null) counts.context_tokens = tokens
-      const r = await this.records.checkpoint(session, counts as never)
+      const r = await this.records.checkpoint(session, { ...counts, turn } as never)
+      if (r && !r.fallback && r.note) adviceIn(r.note, r.cases) // delegate.ts: held for the next prompt (flow.ts)
       if (r && r.now === true && !r.fallback) {
         const lines = (r.keep_lines ?? []).filter((x) => typeof x === 'string')
         const tool = checkpointToolName() // the tool this session has (flow.ts), named so the note is checkable
@@ -980,10 +997,11 @@ export class Core {
       }
       if (this.guard) { // served items reach the agent only wrapped by the guard, with its rule
         const g = await this.guardSession(session, role)
-        const b = await this.guard.fetch(g.session_token, phase)
+        const b = await this.guard.fetch(g.session_token, phase, has(args, 'event') ? args.event as string : undefined)
         return { role, phase, version: b.version ?? null, catalog: has(b as Ev, 'catalog') ? b.catalog : '', items: items(b), rule: g.rule, fallback: null }
       }
-      const res = await this.transport.fetchServed(this.records.sessionRef(session), role, phase, { kind: 'served', deadlineMs: left() })
+      const res = await this.transport.fetchServed(this.records.sessionRef(session), role, phase, { kind: 'served', deadlineMs: left() },
+        undefined, has(args, 'event') ? { event: args.event as string } : { jit: true }) // event items come by event
       if (!res || !res.ok || !isObj(res.body)) return openAnswer(tool, args)
       const b = res.body
       return { role, phase, version: b.version ?? null, catalog: has(b, 'catalog') ? b.catalog : '', items: items(b), fallback: null }

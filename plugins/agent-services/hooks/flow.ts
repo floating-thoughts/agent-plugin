@@ -1,6 +1,6 @@
 // Workflow mechanisms, all local (no request of their own): the checkpoint tool (checkpoint.ts), the review flag
 // for routing (flow_state.ts), the served speed-up rule added to a routed subagent's brief, the test lock, the
-// pending-decisions count on the status line, the background reminder and the concurrency note.
+// pending-decisions count on the status line, and the facts of a turn the turn advice needs (delegate.ts).
 // Project files, read from the session's working directory, never written by the plugin:
 // - .agent/test-lock.json  {"locked": ["tests/**", ...]}: globs of test files a subagent may not change with Edit,
 //   Write, MultiEdit or NotebookEdit (the main conversation may). Bash and other tools are not checked. Beside it,
@@ -8,18 +8,19 @@
 // - .agent/pending.md  one "- [ ] ..." line per decision waiting for the user ("- [x]" once answered): the status
 //   line shows how many are open.
 // - .agent/steps.json  {"steps": [{"id", "deps": [ids], "status": "todo" | "running" | "done"}]}: at the end of a main
-//   turn that dispatched fewer subagents than there are steps ready to start (todo, every dependency done), the next
-//   turn carries one note naming those steps (the same list is not repeated).
-// - A foreground Bash, PowerShell or subagent call of the main conversation that ran longer than the served time:
-//   the next turn carries one note suggesting background runs (at most the served number per session).
-// The thresholds and note texts are served (workflow table, section flow); without the table no note is made.
+//   turn, how many steps are ready to start (todo, every dependency done) goes into the turn's counts, only when that
+//   list changed since it was last counted; the step ids are never sent.
+// - How long a foreground Bash, PowerShell or subagent call of the main conversation ran goes into the turn's counts.
+// The turn advice itself (which note, when, its text) comes from the service with the checkpoint timing answer and
+// reaches the model at the next prompt.
 // - The routing hint (0.6.2): the first hint the routing service sent with a pass (a description without a task type
 //   word) reaches the model once per session, as a note on the next prompt of the main conversation. It follows the
 //   routing level, not the methods level: the agent.spawn hook does nothing at routing off, so no hint is kept.
-// The brief and the turn notes are off when the methods level is off (methods_level.ts).
+// The brief, the turn counts and the turn advice are off when the methods level is off (methods_level.ts).
 import type { EngineInterface } from 'claude-code'
 import { checkpointCall, checkpointPersonPrompt, checkpointTurnEnd, recheckCheckpoint, setupCheckpoint } from './checkpoint'
-import { notePersonPrompt, servedBrief, takeRouteHint } from './flow_state'
+import { countForeground, setTurnFacts, takeAdvice } from './delegate'
+import { briefFor, notePersonPrompt, takeRouteHint } from './flow_state'
 import { takeNotice } from './methods'
 import { methodsLevel } from './methods_level'
 import { setBandPending } from './band'
@@ -27,7 +28,7 @@ import { SEP } from './status'
 import { engineStore } from './store'
 import { authorCheck, ownerCheck, redlineOverride, signedIn } from './subagents'
 import { toolInput } from './tools'
-import { servedInt, servedText } from './workflow_table'
+import { servedText } from './workflow_table'
 
 type Obj = Record<string, any>
 
@@ -135,33 +136,9 @@ export function readySteps(text: string | null): string[] {
     .map((s) => String(s.id))
 }
 
-// The turn notes' numbers and texts come from the served workflow table (section flow, workflow_table.ts); without
-// it each is null and no note is made. The label in front of every note stays local.
+// The routing hint's text comes from the served workflow table (section flow, workflow_table.ts); without it the
+// note is null and the hint is kept. The label in front of it stays local.
 const labelled = (text: string | null): string | null => (text === null ? null : `${FLOW_NOTE_LABEL} ${text}`)
-
-/** How long a foreground call runs before the background reminder is due (ms), or null. */
-export const backgroundAfterMs = (): number | null => {
-  const s = servedInt('flow', 'background_after_seconds')
-  return s === null ? null : s * 1000
-}
-
-/** The most background reminders in one session, or null. */
-export const backgroundNotesMax = (): number | null => servedInt('flow', 'background_notes_max', 0)
-
-/** The concurrency note, or null when the dispatches cover the ready steps (or without the table). */
-export function stepsNote(ready: readonly string[], dispatched: number): string | null {
-  if (ready.length === 0 || dispatched >= ready.length) return null
-  const max = servedInt('flow', 'steps_shown_max')
-  if (max === null) return null
-  const more = ready.length > max ? servedText('flow', 'steps_more', { more: ready.length - max }) ?? '' : ''
-  return labelled(servedText('flow', 'steps_note', {
-    file: STEPS_FILE, count: ready.length, shown: ready.slice(0, max).join(', ') + more, dispatched,
-  }))
-}
-
-/** The background reminder, or null without the table. */
-export const backgroundNote = (tool: string, ms: number): string | null =>
-  labelled(servedText('flow', 'background_note', { tool: tool === 'Task' ? 'Agent' : tool, seconds: Math.round(ms / 1000) }))
 
 /** The routing hint note, shown once per session, or null without the table. */
 export const routeHintNote = (hint: string): string | null =>
@@ -179,11 +156,7 @@ export function briefedPrompt(prompt: unknown, rule: string | null): string | nu
 
 let lastStatus = '' // the status line as the plugin last set it, before the count
 let openDecisions = 0
-let dispatchedThisTurn = 0
-let longCall: { tool: string; ms: number } | null = null
-let backgroundNotes = 0
 let lastReady = ''
-let queued: string[] = []
 
 /** register.ts setStatus: the status line text with the open-decision count added. */
 export function withPending(text: string): string {
@@ -212,12 +185,13 @@ async function notesOn($: EngineInterface): Promise<boolean> {
   return (await methodsLevel(engineStore($))) !== 'off'
 }
 
-/** agent.spawn (register.ts): the routed subagent's event with the served speed-up rule added to its prompt. Forks,
+/** agent.spawn (register.ts): the routed subagent's event with the served brief rule of this spawn's own routing
+ * answer (its tool call id; else the session's latest) added to its prompt. Forks,
  * teammates and workflow agents, a spawn the service did not answer, and methods level off: unchanged. */
 export async function briefed($: EngineInterface, a: { fallback?: unknown } | null, ev: Obj): Promise<Obj> {
   try {
     if (!a || a.fallback || ev.fork === true || ev.isTeammate === true || ev.workflow) return ev
-    const prompt = briefedPrompt(ev.prompt, servedBrief())
+    const prompt = briefedPrompt(ev.prompt, briefFor(ev.tool_use_id))
     if (prompt === null || !(await notesOn($))) return ev
     return { ...ev, prompt }
   } catch {
@@ -260,17 +234,9 @@ async function turnEnd($: EngineInterface, e: Obj): Promise<void> {
   await refreshPending($)
   const ready = readySteps(await readProject($, STEPS_FILE))
   const key = ready.join('\n')
-  const note = key !== lastReady ? stepsNote(ready, dispatchedThisTurn) : null
-  if (note) lastReady = key
-  if (ready.length === 0) lastReady = ''
-  if (note) queued.push(note)
-  const max = backgroundNotesMax()
-  const bg = longCall && max !== null && backgroundNotes < max ? backgroundNote(longCall.tool, longCall.ms) : null
-  if (bg) {
-    backgroundNotes++
-    queued.push(bg)
-  }
-  longCall = null
+  const changed = key !== lastReady
+  lastReady = key
+  setTurnFacts(changed ? ready.length : 0, await notesOn($)) // delegate.ts: read by the core's turn-end request
 }
 
 // ------------------------------------------------------------------ hook parts
@@ -305,10 +271,9 @@ export async function flowPrompt($: EngineInterface, e: Obj, rt?: Ready): Promis
       checkpointPersonPrompt()
       await redlineOverride($, e.text) // the user's own words only: allows spawns past the usage line until the reset
     }
-    dispatchedThisTurn = 0
     void recheckCheckpoint($)
-    const notes = queued.splice(0)
-    const out = notes.length && (await notesOn($)) ? [notes.join('\n')] : []
+    const advice = takeAdvice() // delegate.ts: the service's note on the last turn, labelled
+    const out = advice && (await notesOn($)) ? [advice] : []
     // the routing level decides this one, not the methods level; without the table the hint is kept for later
     const hint = routeHintNote('') !== null ? takeRouteHint() : null
     const hintNote = hint ? routeHintNote(hint) : null
@@ -330,21 +295,19 @@ export async function flowPrompt($: EngineInterface, e: Obj, rt?: Ready): Promis
 
 const started = new WeakMap<object, number>() // a tool.call event -> when flowLock let it through
 
-/** tool.call, before the call runs: the test lock's deny reason, or null; a call let through is timed from here and
- * a main-conversation dispatch is counted. */
+/** tool.call, before the call runs: the test lock's deny reason, or null; a call let through is timed from here. */
 export async function flowLock($: EngineInterface, e: Obj, rt?: Ready): Promise<string | null> {
   try {
     if (!(await signedIn(rt))) return null
     const locked = await lockCheck($, e, rt)
     if (locked) return locked
-    if (!e.agentId && (e.tool === 'Agent' || e.tool === 'Task')) dispatchedThisTurn++
     started.set(e, Date.now())
   } catch {}
   return null
 }
 
-/** tool.call, after the call ran: a foreground long call of the main conversation is kept for the next turn's note;
- * an edit of the pending file refreshes the count. */
+/** tool.call, after the call ran: a foreground call of the main conversation is timed for the turn's counts; an
+ * edit of the pending file refreshes the count. */
 export async function flowAfter($: EngineInterface, e: Obj, rt?: Ready): Promise<void> {
   try {
     if (!(await signedIn(rt))) return
@@ -353,8 +316,7 @@ export async function flowAfter($: EngineInterface, e: Obj, rt?: Ready): Promise
     const input = toolInput(e)
     const fg = !e.agentId && LONG_TOOLS.includes(e.tool) && input.run_in_background !== true
     const ms = start === undefined ? 0 : Date.now() - start
-    const after = backgroundAfterMs()
-    if (fg && after !== null && ms >= after && (!longCall || ms > longCall.ms)) longCall = { tool: e.tool, ms }
+    if (fg) countForeground(ms) // delegate.ts
     const file = input.file_path
     if (EDIT_TOOLS.includes(e.tool) && typeof file === 'string' && slash(file).endsWith(PENDING_FILE)) await refreshPending($)
   } catch {}
@@ -368,7 +330,7 @@ export async function flowTimed<T>($: EngineInterface, e: Obj, run: () => Promis
   return done
 }
 
-/** turn.complete, after next(e): the main conversation's checkpoint compaction and next turn's notes. */
+/** turn.complete, after next(e): the main conversation's checkpoint compaction and the turn's facts. */
 export async function flowTurnEnd($: EngineInterface, e: Obj, rt?: Ready): Promise<void> {
   try {
     if (!e.agentId && (await signedIn(rt))) await turnEnd($, e)

@@ -48,9 +48,12 @@ Claude Code); once you passed it, the plugin sends the check's one-time token wi
 | Each session start, and when the sign-in check is due | the plugin version and the contract version |
 | 7 days before the sign-in expires | a hash of the next token |
 | Every subagent start (forks and teammates are skipped; nothing while `routing off`) | at `routing strict` only, the flag strict (so the service refuses a subagent whose description does not start with a task type word); the first word of the task description (whitespace-separated, at most 32 characters; the rest of the description is never sent), its length in characters, the subagent type (at most 64 characters), the requested model and effort, the harness, the dispatch number in this session, a hashed project id (an HMAC of the project folder with a key kept only on this computer, 16 hex digits), a random per-session id, the main session's model id (so the subagent never runs on a larger model), and yes or no for whether your latest message asked for a review (decided on this computer; your message is never sent) |
-| After every turn of the main agent | counters only: context use in percent and in tokens, turns, tool calls, finished todos, commits, minutes, and the per-session id |
-| Session start (also a resumed session), the first prompt after a project's `agent-state.md` changes between planning and `phase: running`, and after `/clear` or a compaction, only at methods level `suggest` (the default) | the per-session id, the role `auto`, the work phase, the version pinned, the channel (to fetch the working methods; the full text goes to the model once per session and again only after `/clear`, a compaction, a phase change or a new served version) |
+| After every turn of the main agent | counters only: context use in percent and in tokens, turns, tool calls, finished todos, commits, minutes, and the per-session id. Except at methods level `off`, also the counts of that one turn that are not zero (for the turn advice): Read calls, Grep and Glob calls, web calls (WebFetch, WebSearch), the longest run of Read, Grep or Glob calls without an edit in between, the largest Bash or PowerShell result and the largest Read result in thousands of characters, refused tool calls, how often the most repeated failure of the turn has happened in this session (the last error lines of a failed call's result are compared on this computer as a salted hash kept in memory only; neither the lines nor the hash are sent), how many steps in `.agent/steps.json` are ready to start (only when that list changed; the step ids are not sent), subagents dispatched, the longest foreground Bash, PowerShell or subagent call in seconds, and which advice cases the service sent earlier in this session, how many turns ago and how often. No tool name, input, output, path or text is sent; a turn with nothing to count sends none of these |
+| The first foreground Bash or PowerShell call of the main agent with a given command head (except at methods level `off`; not a subagent's call, not one run in the background), at most once per head in a session | the per-session id and the command head: the program's name only (path and extension removed; for `python -m <module>` the module), and only when it is on the public list of common developer commands in the plugin (records.ts KNOWN_HEADS); any other command sends nothing. The arguments, the rest of the command line, paths, the project and run durations are not sent (the project id and the durations go as empty). The plugin waits at most 1 second for the answer; without one it goes on as if none came |
+| Session start (also a resumed session), the first prompt after a project's `agent-state.md` changes between planning and `phase: running`, and after `/clear` or a compaction, only at methods level `suggest` (the default) | the per-session id, the role `auto`, the work phase, the version pinned, the channel and the flag `jit` (this plugin takes the just-in-time items separately, see below) (to fetch the working methods; the full text goes to the model once per session and again only after `/clear`, a compaction, a phase change or a new served version) |
 | Session start, only at methods level `on` (your CLAUDE.md has the agent-services section) | the same, once for each of the six phases |
+| A just-in-time moment of the main agent, while signed in and not at methods level `off` (never for a subagent), at most once per moment in a session: a resumed session (its id was seen at an earlier session start on this computer); a new module (the project's `agent-state.md`, read at a prompt or just before and after the main agent writes it, turns `phase: running` or lists more plan steps than at the reading before); the first edit of a UI file (`.html`, `.htm`, `.css`, `.scss`, `.sass`, `.less`, `.jsx`, `.tsx`, `.vue`, `.svelte`); delivery (every plan step in `agent-state.md` is checked done, `- [x]`). Also when the model calls the `lesson_lookup` tool with an event | the per-session id, the role `auto`, a work phase, the version pinned, the channel and the event name (`resume`, `module_start`, `ui`, `index_request` or `delivery`). No text, file name, path or project is sent; the plugin waits at most 1 second for the answer and otherwise gives it later or not at all |
+| A file change (Edit, Write, MultiEdit, NotebookEdit) of the main agent inside the project (not in a session nobody can be asked in, such as `claude -p`), and a prompt of the main agent at methods level `suggest`, while signed in and not at methods level `off` (never for a subagent; a change to `agent-state.md` or to files under `.agent/` sends nothing): only when the facts below differ from every set already asked in this session, so at most once per set of facts; after a failed request that set is asked again a minute later at the earliest, and after the service refused the field (an older service) never again in the session | the per-session id, the role `auto`, the phase `plan`, the version pinned, the channel, and about the project's `agent-state.md` only: whether it exists, whether its first line says `phase: running`, whether a goal is written (yes or no), how many plan steps it lists (a number, at most 1000), and the methods level (`on` or `suggest`). The file's text, its path and the project are not sent. The answer is the planning-gate verdict (section 5) and carries no working-methods text |
 | Session start, and once a day in a session left open, only after you chose to upload for the account signed in | the daily usage summary, one per active day not uploaded yet. With "Upload, including the past 30 days" never a day more than 30 days before your choice (so the first upload also sends up to 30 earlier days); with "Upload from now on only" only the days after the day of your choice; after a switch to another account on this computer, nothing from before that account's choice |
 | When you change the upload choice (`sharing on_backfill`, `sharing on_from_now` or `sharing off`, or the same answers in `/agent-services setup`; `sharing not_now` sends nothing), and once before an upload when the service has not confirmed your yes yet (for example a yes given before version 0.7.9) | your sharing choice, recorded on the service as a consent record: the purpose `usage_upload` and yes (granted) or no (withdrawn). The service refuses daily summaries from this plugin version on unless your newest record there is a yes, and from any version once it is a no. If recording a yes fails, nothing is uploaded that day and it is tried again at the next upload; a no the service did not confirm is sent again at the next session start |
 | The band, the status line and your savings page refresh | nothing (asks for your savings and report lines) |
@@ -131,9 +134,9 @@ What the engines do on this computer, with the tables:
   long-running background tasks are named to the main conversation; a
   turn that ended at the usage limit is told to carry on later; the `run_command` tool queues `/reload-plugins` or
   `/context` for the idle session and refuses every other command; past 80% of a usage limit the model is told once.
-- Delegation hints: the main conversation's tool calls in each turn are counted in memory on this computer, and
-  when they reach a count or a result size the served table names, the result gets one note suggesting a subagent
-  for that kind of work next time; nothing new is sent.
+- Turn counts: the main conversation's tool calls in each turn are counted in memory on this computer (a
+  subagent's calls never are) and sent as the counts listed in section 1 after the turn; the service decides
+  whether they call for advice (section 5).
 
 `/agent-services check` shows which engines are on in this session.
 
@@ -150,7 +153,7 @@ What the engines do on this computer, with the tables:
 | Sign-in lockout counts: wrong codes and code requests per IP address, IP range, device id, email address and pairs of these, as keyed hashes only (no email address is ever locked) | yes | 24 hours after the last count or the end of its lock |
 | Anti-abuse records: failed signed requests and lockouts, per IP address (not hashed) and per account | yes | about 10 to 15 minutes, deleted at the next failed request after that |
 | Daily usage summaries | the whole summary as sent | 395 days; all of an account's days are dropped once it uploads nothing for 30 days |
-| Subagent and checkpoint requests | the request is not kept; one count per day, account, route and outcome | while the account exists |
+| Subagent, checkpoint and run-limit requests | the request is not kept; one count per day, account, route and outcome | while the account exists |
 | Working-methods sessions | per-session id, role, device id, phase, the item versions delivered and when; no text from you | 395 days |
 | The working-methods channel you fetch (stable or beta) | one row per account | while the account exists |
 | The one-time estimate | not kept; one count per account per day | 30 days |
@@ -213,6 +216,7 @@ fetched, never another member's. For the admin, the same command still shows the
 | `~/.agent-services/MIGRATED` | what the one-time move from an older version did |
 | `~/.agent-services/REMOVED` | left by `/agent-services remove`; while it holds text, the plugin does nothing in any session; a sign-in empties it |
 | `~/.claude/CLAUDE.md` | one marked section importing `~/.agent-services/methods.md`, only after you chose `methods on` |
+| Claude Code's plugin store (see above), key `jit_sessions` | the ids of the last 30 sessions started on this computer and when each started, so a resumed session is known; never sent |
 | Claude Code's plugin store (see above), key `usage_days` | this computer's figures per day for the usage panel: tokens and their cost at API prices, typed bytes, agent seconds and turns; never sent as such |
 | `~/.agent-services/tools/usage_scan.py` | not part of the plugin: a usage scan tool you may put there yourself; when it is there, the plugin runs it (see "Local helpers" below) |
 | `~/.agent-services/services/time-days.json` | per-day figures of every transcript (tokens, cache reads, cost at API prices, typed bytes, agent seconds, turns) written by the usage scan tool, or by the plugin from that tool's answer; read for the usage panel and the daily summary's time figures |
@@ -253,11 +257,10 @@ text of your messages (only to see whether one asks for a review), and the marke
   `.agent/test-lock.json` (`{"locked": ["tests/**"]}`) is denied; the main conversation may edit those files. Changes
   made through Bash or other tools are not checked.
 - The status line shows how many `- [ ]` lines `.agent/pending.md` has (decisions waiting for you).
-- Notes for the model at the next prompt, labelled as agent-services notes: when a foreground Bash, PowerShell or
-  subagent call of the main conversation ran longer than the served time (at most the served number per session), and when
-  `.agent/steps.json` lists more steps ready to start than the last turn dispatched subagents. Once per session, the
-  hint the routing service sent for a subagent that ran without routing advice (a description without a task type
-  word). The times, counts and texts of these notes come from the served rule tables; without them no note is made.
+- Notes for the model at the next prompt: the service's turn advice (section 5), and once per session the hint the
+  routing service sent for a subagent that ran without routing advice (a description without a task type word),
+  labelled as agent-services notes. The routing hint's text comes from the served rule tables; without them that
+  note is not made.
 - The speed-up suggestion the routing service sends is added once to the end of each routed subagent's prompt.
 - The autonomy choice: when you answer the working methods' question with "Fully automatic (agent-services
   recommends this)" or "Check in with me as usual" (Claude Code's AskUserQuestion dialog, in the main conversation,
@@ -288,13 +291,31 @@ Every answer has a fixed shape:
 - Checkpoint timing: now or not, and short lines to keep in a summary (at most 300 characters each), given to the
   model at the next prompt; when it says now, you also see a short notice. The counters are kept per session (under a
   hash of the session id, at most 50 sessions) in Claude Code's plugin store, so a plugin reload does not reset them.
+  When the request carried the turn counts, it may also carry the turn advice: one short line per case (at most
+  1,500 characters in all), each labelled `agent-services suggestion (<case>)`, and the case ids. The plugin gives it
+  to the model at the next prompt, labelled as an agent-services server note (not at methods level `off`); the
+  request log on this computer keeps each answer, advice included. It is advice the service writes for that turn,
+  not working methods text you approved, so it is not part of `methods.md` or the methods diff.
+- Run limits: how long a command with that head may go without new output, its total time limit, whether such commands are better started in the background, and if so a short note (at most 600 characters) labelled `agent-services suggestion (long-commands)`. The plugin keeps the answer in memory for the session and adds the note once to the result of a call with that head, for the model; the request log on this computer keeps the answer. It is advice the service writes, not working methods text you approved.
+- Planning gate: whether the facts sent hold file changes, a reason (served text, at most 4,000 characters, in which
+  the plugin fills in the path of the project's `agent-state.md` and its two fixed templates of that file) and how many
+  changed lines still count as a small edit. The plugin keeps it in memory for the session, per set of facts. At
+  `methods on` the reason is what the model is told when a file change is held; at `suggest` it is the one reminder
+  of the session, given with the next prompt. A file change waits at most 2 seconds for the answer; without one
+  (offline, late, an older service) nothing is held and no reminder is given.
 - Working methods: a version and items of text (at most 20,000 characters each, each checked against its SHA-256),
   given to the model with a prompt (level `suggest`) or written to `methods.md` (level `on`). Served methods are
   plain text you can read and quote. As a safeguard the plugin also strips any invisible characters (zero-width,
   direction-control, variation-selector and tag characters) from served text before the model sees it or
   `methods.md` holds it. The request log keeps each item's id and SHA-256 but not its text.
   When the model calls the `lesson_lookup` tool, at level `suggest` it gets the text served now; at `on` it is
-  pointed to the approved text your CLAUDE.md loads; at `off` it gets no items.
+  pointed to the approved text your CLAUDE.md loads; at `off` it gets no items. With an event it gets that
+  moment's items at `suggest` and at `on`.
+- Just-in-time items: the items of one moment (section 1), served text checked and cleaned like the working
+  methods. The plugin keeps them in memory for the session and gives them to the model once, labelled as
+  agent-services advice, with the result of the tool call that brought the moment or with the next tool result or
+  prompt, at `suggest` and at `on`. They are advice for that moment, not part of `methods.md` or the methods diff;
+  the working methods name them and say when they come.
 - Savings and report: dollar and token figures by day, and short report lines (at most 300 characters each) for the
   band and the savings page.
 - Company summary (admins): the table of section 3.
@@ -317,8 +338,9 @@ Every answer has a fixed shape:
 
 Checkpoint timing has no switch of its own: it stops when you sign out or uninstall, and offline mode stops it;
 those stop subagent routing too. The planning gate follows the methods level: only at `methods on` does it hold file edits
-(Edit, Write, MultiEdit, NotebookEdit) until a project's `agent-state.md` has a plan, and an Edit of at most the served number of
-changed lines passes (so do writes to `agent-state.md` and to files under `.agent/`); without the served rule tables it holds nothing; at `suggest` it holds nothing and adds one reminder to the next prompt; at `off`, in a session
+(Edit, Write, MultiEdit, NotebookEdit) while the service's verdict on a project's `agent-state.md` holds them (section 1 lists
+what is sent for it), and an Edit of at most the number of changed lines that verdict names passes (so do writes to
+`agent-state.md` and to files under `.agent/`); without a verdict (offline, late or an older service) it holds nothing; at `suggest` it holds nothing and adds one reminder to the next prompt; at `off`, in a session
 nobody can be asked in (such as `claude -p`) and for subagents it does nothing. It does not cover Bash: a file
 written through a Bash command is never held. Where your company set the daily upload off for everyone, only its
 admin can change it.

@@ -1,6 +1,6 @@
 // The core's Transport over the svc channel (moved from wiring.ts unchanged): engine_types.ts
 // Transport on svc.ts Svc, with the hook budget each core deadline fits in.
-import type { CallOptions, GateState, SvcResult, Transport } from './engine_types'
+import type { CallOptions, GateState, ServedSelect, SvcResult, Transport } from './engine_types'
 import type { Hook, Kind, Svc } from './svc'
 import { HOOK_BUDGET_MS, TIMEOUTS_MS } from './svc'
 
@@ -56,9 +56,9 @@ export function svcTransport(svc: Svc): Transport {
         return FAILED
       }
     },
-    async fetchServed(sessionRef: string, role: string, phase: string, opts: CallOptions): Promise<SvcResult> {
+    async fetchServed(sessionRef: string, role: string, phase: string, opts: CallOptions, state?: Record<string, unknown>, select?: ServedSelect): Promise<SvcResult> {
       try {
-        return result(await svc.fetchServed(sessionRef, role, phase, hookFor(opts?.deadlineMs)))
+        return result(await svc.fetchServed(sessionRef, role, phase, hookFor(opts?.deadlineMs), state, select))
       } catch {
         return FAILED
       }

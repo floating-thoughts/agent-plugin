@@ -30,7 +30,7 @@ import { engineSleep, installTools, registerTools, SESSION_FALLBACK, svcAuthLine
 import { probeProcess, processRunner, updateCheck, type Gate } from './update'
 import { bandSetter, createWiring, installBand, notePlan, svcTransport, type Wiring } from './wiring'
 import { canAskNow } from './choice'
-import { appendRow, installEngines, mailGate, promptIn, rulesStart, spawnGated, stopCheck, toolRun } from './engines'; import { spawnGate } from './subagents'; import { watchPrompt } from './watch' // rule-table engines
+import { appendRow, denied, installEngines, mailGate, promptIn, rulesStart, spawnGated, stopCheck, toolRun } from './engines'; import { spawnGate } from './subagents'; import { watchPrompt } from './watch' // rule-table engines
 
 type Ev = Record<string, any>
 type Usage = { input: number; output: number; cache_read: number; cache_write: number }
@@ -219,7 +219,7 @@ async function send($: EngineInterface, kind: string, agent: string | null, fiel
 // Session-start background: metrics upload, outbox sweep, migration, update check.
 function background($: EngineInterface, r: Rt, interactive: boolean): void {
   void r.wiring.metricsTick().catch(() => undefined)
-  void r.outbox.sweep().catch(() => undefined); void rulesStart($, r.svc).catch(() => undefined) // engines.ts: rule tables
+  void r.outbox.sweep().catch(() => undefined); void rulesStart($, r.svc, ready($)).catch(() => undefined) // engines.ts: rule tables, just-in-time resume
   void pushStart(r).then(() => methodsStart($, r, interactive)) // phase.ts: plan items; methods.ts: CLAUDE.md file
   void migrate({
     dataDir: r.dir,
@@ -319,13 +319,13 @@ export const register: Register = (on) => {
 
   on('tool.call', async ($, e: Ev, next) => {
     const held = (await mailGate(e)) ?? (await holdWrite(ready($), e.tool, toolInput(e), () => $.session.cwd(), e.agentId)) ?? (await flowLock($, e, ready($))) // phase.ts: main agent; flow.ts: test lock
-    if (held) return { deny: held }
+    if (held) return denied(e, held) // engines.ts: counted for the turn advice
     const fields = { tool: e.tool, input: toolInput(e), call: e.tool_use_id ?? null }
     const agent = e.agentId ?? null
     const a = await send($, 'pre_tool', agent, fields)
     show($, a?.notice)
     if (a?.action === 'deny') {
-      return { deny: denyReason(a.reason, 'tool check') }
+      return denied(e, denyReason(a.reason, 'tool check'))
     }
     const done: Ev = await toolRun($, e, next, ready($)) // engines.ts: a tool's input is never changed (but where served rules unmask secrets)
     await flowAfter($, e, ready($)); await noteAutonomy($, e, done, ready($)) // flow.ts: timing; autonomy.ts: the user's choice

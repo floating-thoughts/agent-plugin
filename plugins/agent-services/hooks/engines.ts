@@ -1,15 +1,20 @@
 // The local engines that run on the served rule tables (rules.ts), wired from register.ts's existing hooks with one
 // call each: command guard (cmdguard.ts), secret masking (vault.ts), row trimming (trim.ts), subagent gates and long
-// reports (subagents.ts), the shell watch (watch.ts) and the delegation hints (delegate.ts). Each engine does nothing without its table (signed out),
-// and nothing here sends a command, prompt, tool input or output anywhere.
+// reports (subagents.ts) and the shell watch (watch.ts). Each engine does nothing without its table (signed out), and
+// nothing here sends a command, prompt, tool input or output anywhere (run_limits.ts sends only a command head from
+// the public list, once per head and session; just_in_time.ts sends only the name of a just-in-time event, once per
+// event and session). The per-turn counters (delegate.ts) are counts only; the core sends them with its turn-end
+// checkpoint request.
 import type { EngineInterface } from 'claude-code'
-import { delegateAfter, delegateTurn } from './delegate'
+import { countDenied, delegateAfter, delegateTurn } from './delegate'
 import { commandRule, installCmdguard, mailAfter, mailDeny, spawnBackground, stopSendBack } from './cmdguard'
 import { loadRules, RULES_OFF_LINE, RULES_PENDING_LINE, rulesLive, rulesSettled, rulesState, rulesTable, rulesVersion } from './rules'
 import { agentResult, notificationEvent } from './subagents'
 import { lineFor, trimAppend, trimCommand, trimOn } from './trim'
 import { vaultAppend, vaultPendingLine, vaultPrompt, vaultSecrets, vaultToolIn, vaultToolOut } from './vault'
 import { installWatch, runCommandTool } from './watch'
+import { runEnd, runLimitsStart } from './run_limits'
+import { jitPrompt, jitStart, jitToolEnd, jitToolStart } from './just_in_time'
 
 type Obj = Record<string, any>
 type Next = (e: Obj) => Promise<any>
@@ -48,8 +53,10 @@ export async function registerRunCommand($: EngineInterface): Promise<void> {
   } catch {}
 }
 
-/** session.start (background): fetch the rule tables; while they are missing, one plain line says what is off. */
-export async function rulesStart($: EngineInterface, svc: RulesSvc): Promise<void> {
+/** session.start (background): fetch the rule tables; while they are missing, one plain line says what is off. Also
+ * the just-in-time check for a resumed session (just_in_time.ts). */
+export async function rulesStart($: EngineInterface, svc: RulesSvc, rt?: Ready): Promise<void> {
+  if (rt) void jitStart(rt as any)
   await registerRunCommand($)
   if ((await loadRules(svc)) !== 'off') return
   try {
@@ -58,17 +65,26 @@ export async function rulesStart($: EngineInterface, svc: RulesSvc): Promise<voi
 }
 
 /** tool.call: run the tool with this plugin's secret placeholders put back for the call only, mask its output again,
- * shorten a long foreground subagent report, and remember mail tabs. */
+ * shorten a long foreground subagent report, remember mail tabs, and add the run-limits note of a shell call's head
+ * and the just-in-time notes that are due (just_in_time.ts). */
 export async function toolRun($: EngineInterface, e: Obj, next: Next, rt: Ready): Promise<Obj> {
   await rulesLive() // a sign-in that no longer holds clears the tables first: then nothing below changes anything
+  const limits = await runLimitsStart(e, rt as any) // run_limits.ts: one request per command head and session, 1 s cap
+  const jit = await jitToolStart(e, rt as any) // just_in_time.ts: a UI file or agent-state.md write; no request otherwise
   const ran: Obj = await next(vaultToolIn(e) ?? e)
   const done = await agentResult($, e, vaultToolOut($, ran) ?? ran, rt as any)
   mailAfter(e, done)
-  return delegateAfter(e, done, rt) // delegate.ts: a served note when the main turn's work suits a subagent
+  return jitToolEnd(e, await runEnd(delegateAfter(e, done), limits), jit, rt as any) // delegate.ts: the main turn's call counted for the turn advice
+}
+
+/** tool.call (register.ts): a call this plugin refuses before it runs, counted as a refusal of the main turn. */
+export function denied(e: Obj, reason: string): Obj {
+  countDenied(e)
+  return { deny: reason }
 }
 
 /** prompt.submit: secrets in the prompt masked, then a long background report shortened (so the report file is
- * saved masked too); the pending line once. */
+ * saved masked too); the pending line once; the just-in-time notes that are due (just_in_time.ts). */
 export async function promptIn($: EngineInterface, e: Obj, rt: Ready): Promise<Obj> {
   const r = (await rt) as { svc?: RulesSvc } | null
   if (r?.svc) void loadRules(r.svc) // not fetched yet (a prompt before session.start ran), or cleared: start it now
@@ -83,7 +99,7 @@ export async function promptIn($: EngineInterface, e: Obj, rt: Ready): Promise<O
       $.ui.log(line)
     } catch {}
   }
-  return shortened
+  return jitPrompt(shortened, rt as any, async () => $.session.cwd())
 }
 
 /** session.append: a re-attached row trimmed to one line, then any secret in it masked. */
@@ -131,7 +147,6 @@ export async function checkLines($: EngineInterface): Promise<string> {
     `Row trimming after a compaction: ${on(lineFor('invoked_skills', 'x') !== null && (await trimOn($)))}.`,
     `Subagent gates and long reports: ${on(subs !== null)}${subs?.redline ? '; the weekly usage line stops new subagents on this account' : ''}${subs?.demand || subs?.coauthor ? '; the requirements-file lock and the commit co-author check are on' : ''}.`,
     `Shell watch: ${on(rulesTable('watch') !== null)}.`,
-    `Delegation hints: ${on(rulesTable('delegate') !== null)}.`,
   ].join('\n')
 }
 

@@ -6,7 +6,7 @@ export type ToolSpec = {
   input_schema: Record<string, unknown>
 }
 
-export const CONTRACT_SHA256 = "aec6987299b6a055a9c4665565631f4a848480586e877143931bde56a722221f"
+export const CONTRACT_SHA256 = "6a6a582ab19bed47496d89828f730567ebbb66695bef931d95636a33b3a38e20"
 
 export const API = "svc/1" as const
 export const PREFIX = "/svc/v1" as const
@@ -105,7 +105,7 @@ export const TOOLS: readonly ToolSpec[] = [
   },
   {
     "name": "lesson_lookup",
-    "description": "Fetch the served lessons for a role and a work phase (plan, implement, test, review, deliver, checkpoint). Returns the version, the catalog line, the items and the rule for using them; an empty list when nothing is served.",
+    "description": "Fetch the served lessons for a role and a work phase (plan, implement, test, review, deliver, checkpoint). Returns the version, the catalog line, the items and the rule for using them; an empty list when nothing is served. Pass event (resume, module_start, ui, index_request, delivery) to get only the just-in-time items of that moment by name; only the event name is sent.",
     "input_schema": {
       "type": "object",
       "properties": {
@@ -126,6 +126,16 @@ export const TOOLS: readonly ToolSpec[] = [
             "review",
             "deliver",
             "checkpoint"
+          ]
+        },
+        "event": {
+          "type": "string",
+          "enum": [
+            "resume",
+            "module_start",
+            "ui",
+            "index_request",
+            "delivery"
           ]
         }
       },
@@ -633,7 +643,7 @@ export const CONTRACT = {
   },
   {
    "name": "lesson_lookup",
-   "description": "Fetch the served lessons for a role and a work phase (plan, implement, test, review, deliver, checkpoint). Returns the version, the catalog line, the items and the rule for using them; an empty list when nothing is served.",
+   "description": "Fetch the served lessons for a role and a work phase (plan, implement, test, review, deliver, checkpoint). Returns the version, the catalog line, the items and the rule for using them; an empty list when nothing is served. Pass event (resume, module_start, ui, index_request, delivery) to get only the just-in-time items of that moment by name; only the event name is sent.",
    "input_schema": {
     "type": "object",
     "properties": {
@@ -654,6 +664,16 @@ export const CONTRACT = {
        "review",
        "deliver",
        "checkpoint"
+      ]
+     },
+     "event": {
+      "type": "string",
+      "enum": [
+       "resume",
+       "module_start",
+       "ui",
+       "index_request",
+       "delivery"
       ]
      }
     },
@@ -1125,6 +1145,16 @@ export const CONTRACT = {
     "deliver",
     "checkpoint"
    ]
+  },
+  "ServedEvent": {
+   "enum": [
+    "resume",
+    "module_start",
+    "ui",
+    "index_request",
+    "delivery"
+   ],
+   "description": "a moment that brings just-in-time items (black-box step 5): resume = the session resumed; module_start = a new module starts; ui = the first edit of a UI file; index_request = the model asked for them by name; delivery = every plan step is done"
   },
   "OrgSummary": {
    "type": "object",
@@ -2588,6 +2618,48 @@ export const CONTRACT = {
        "stable",
        "beta"
       ]
+     },
+     "state": {
+      "type": "object",
+      "properties": {
+       "exists": {
+        "type": "boolean"
+       },
+       "running": {
+        "type": "boolean"
+       },
+       "goal": {
+        "type": "boolean"
+       },
+       "plan_steps": {
+        "type": "integer",
+        "minimum": 0,
+        "maximum": 1000
+       },
+       "level": {
+        "enum": [
+         "on",
+         "suggest"
+        ]
+       }
+      },
+      "required": [
+       "exists",
+       "running",
+       "goal",
+       "plan_steps",
+       "level"
+      ],
+      "additionalProperties": false,
+      "description": "optional (black-box step 7): a planning-gate question, flags and one count about the project's agent-state.md only, no text, path or file name: whether it exists, whether its first line says phase: running, whether a goal is written, how many plan steps it lists (at most 1000), and the methods level; the answer then carries gate and no items (absent from older clients)"
+     },
+     "jit": {
+      "type": "boolean",
+      "description": "optional (black-box step 5): true from a client that takes just-in-time items by event; the phase then comes without the items marked with an event and with the items kept for such clients (absent from older clients, which get every item of the phase)"
+     },
+     "event": {
+      "$ref": "#/definitions/ServedEvent",
+      "description": "optional (black-box step 5): only the event name, no text or path; the answer then carries just the items marked with this event, from any phase (the phase is echoed)"
      }
     },
     "required": [
@@ -2656,6 +2728,33 @@ export const CONTRACT = {
         ],
         "additionalProperties": false
        }
+      },
+      "gate": {
+       "type": "object",
+       "properties": {
+        "hold": {
+         "type": "boolean",
+         "description": "the state holds file changes (the work phase is not open)"
+        },
+        "reason": {
+         "type": "string",
+         "maxLength": 4000,
+         "x-served": true,
+         "description": "level on: the deny reason; level suggest: the one reminder; empty when not held; the client fills {path}, {example} and {template}"
+        },
+        "small_edit_lines": {
+         "type": "integer",
+         "minimum": 0,
+         "maximum": 1000,
+         "description": "an Edit or MultiEdit changing at most this many lines in all passes at level on"
+        }
+       },
+       "required": [
+        "hold",
+        "reason"
+       ],
+       "additionalProperties": false,
+       "description": "optional (black-box step 7): the planning-gate verdict; only when the request carried state"
       }
      },
      "required": [
@@ -2681,7 +2780,7 @@ export const CONTRACT = {
    },
    "x-inventory": {
     "service": "updates",
-    "purpose": "fetch the content the service serves for each phase; sends only the random session id, role, phase, pinned version and channel",
+    "purpose": "fetch the content the service serves for each phase; sends only the random session id, role, phase, pinned version and channel, whether the client takes just-in-time items, the name of a just-in-time event (resume, module_start, ui, index_request, delivery) when one comes, and for the planning gate flags and one count about the project's agent-state.md (no text or path)",
     "default": "on",
     "retention": "request content not stored; access log kept 30 days",
     "sent_to": [
@@ -4138,7 +4237,7 @@ export const CONTRACT = {
        "type": "string",
        "maxLength": 2000,
        "x-served": true,
-       "description": "the speed-up suggestion the plugin adds itself, labelled, to the subagent brief"
+       "description": "the working rules for this task type that the plugin adds itself, labelled, to the subagent brief"
       },
       "brief_forward": {
        "type": "string",
@@ -4227,6 +4326,104 @@ export const CONTRACT = {
        "user_request"
       ],
       "description": "optional: the work event that prompted the question (absent from older clients)"
+     },
+     "turn": {
+      "type": "object",
+      "properties": {
+       "reads": {
+        "type": "integer",
+        "minimum": 0,
+        "maximum": 100000
+       },
+       "searches": {
+        "type": "integer",
+        "minimum": 0,
+        "maximum": 100000
+       },
+       "web": {
+        "type": "integer",
+        "minimum": 0,
+        "maximum": 100000
+       },
+       "lookup_run": {
+        "type": "integer",
+        "minimum": 0,
+        "maximum": 100000
+       },
+       "shell_kchars": {
+        "type": "integer",
+        "minimum": 0,
+        "maximum": 100000
+       },
+       "read_kchars": {
+        "type": "integer",
+        "minimum": 0,
+        "maximum": 100000
+       },
+       "denials": {
+        "type": "integer",
+        "minimum": 0,
+        "maximum": 100000
+       },
+       "same_failure": {
+        "type": "integer",
+        "minimum": 0,
+        "maximum": 100000
+       },
+       "steps_ready": {
+        "type": "integer",
+        "minimum": 0,
+        "maximum": 100000
+       },
+       "subagents_dispatched": {
+        "type": "integer",
+        "minimum": 0,
+        "maximum": 100000
+       },
+       "foreground_seconds": {
+        "type": "integer",
+        "minimum": 0,
+        "maximum": 604800
+       },
+       "history": {
+        "type": "array",
+        "maxItems": 8,
+        "items": {
+         "type": "object",
+         "properties": {
+          "case": {
+           "enum": [
+            "denied",
+            "repeat_failure",
+            "steps",
+            "background",
+            "big_output",
+            "wide_read",
+            "web"
+           ]
+          },
+          "ago": {
+           "type": "integer",
+           "minimum": 0,
+           "maximum": 100000
+          },
+          "times": {
+           "type": "integer",
+           "minimum": 0,
+           "maximum": 100000
+          }
+         },
+         "required": [
+          "case",
+          "ago",
+          "times"
+         ],
+         "additionalProperties": false
+        }
+       }
+      },
+      "additionalProperties": false,
+      "description": "optional (blackbox step 3): counts for the main conversation's last turn only, no text: Read calls, Grep and Glob calls, web calls, the longest run of Read, Grep or Glob calls without an edit, the largest shell and Read result in thousands of characters, refused tool calls, how often the most repeated failure of this turn has happened in this session (compared on this computer), steps ready to start in .agent/steps.json, subagents dispatched, the longest foreground run in seconds, and which advice cases came before and how many turns ago (absent from older clients)"
      }
     },
     "required": [
@@ -4255,6 +4452,28 @@ export const CONTRACT = {
         "maxLength": 300
        },
        "x-served": true
+      },
+      "note": {
+       "type": "string",
+       "maxLength": 1500,
+       "x-served": true,
+       "description": "optional (blackbox step 3): advice on the last turn, one labelled line per case; only when the request carried turn"
+      },
+      "cases": {
+       "type": "array",
+       "maxItems": 8,
+       "items": {
+        "enum": [
+         "denied",
+         "repeat_failure",
+         "steps",
+         "background",
+         "big_output",
+         "wide_read",
+         "web"
+        ]
+       },
+       "description": "optional: the case of each line in note"
       }
      },
      "required": [
@@ -4271,7 +4490,7 @@ export const CONTRACT = {
    },
    "x-inventory": {
     "service": "checkpoint",
-    "purpose": "asks whether now is a good time to compact the context (sends only counters)",
+    "purpose": "asks whether now is a good time to compact the context, and for advice on the last turn (sends only counters)",
     "default": "on (on by default while Services is on)",
     "retention": "counts per decision per day; request bodies not stored",
     "sent_to": [
@@ -4339,6 +4558,16 @@ export const CONTRACT = {
        "minimum": 0,
        "maximum": 604800,
        "description": "0 = no limit"
+      },
+      "background": {
+       "type": "boolean",
+       "description": "optional (blackbox step 6): true when commands with this head often run for minutes and are better started in the background"
+      },
+      "note": {
+       "type": "string",
+       "maxLength": 600,
+       "x-served": true,
+       "description": "optional: advice for the model, only when background is true; the plugin gives it once per head and session"
       }
      },
      "required": [
@@ -4355,7 +4584,7 @@ export const CONTRACT = {
    },
    "x-inventory": {
     "service": "limits",
-    "purpose": "bounded runs (boundrun) ask how long this command may go without output before it stops, and what its total time limit is",
+    "purpose": "the first foreground shell call with a command head from the public list asks, once per head and session, how long such a command may go without output, its total time limit, and whether it is better run in the background (sends only the head)",
     "default": "on (on by default while Services is on)",
     "retention": "counts per decision per day; request bodies not stored",
     "sent_to": [

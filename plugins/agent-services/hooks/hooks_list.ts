@@ -29,7 +29,7 @@ export const HOOK_EFFECTS: Readonly<Record<string, string>> = {
 export const HOOKS: readonly HookRow[] = [
   {
     event: 'session.start', matcher: '', file: 'register.ts', does: ['network', 'file', 'process', 'ui', 'count'],
-    what: 'Registers the tools and the slash command. In the background: the sign-in check, the daily usage upload ' +
+    what: 'Registers the tools and the slash command. In the background: the sign-in check, whether this session id was seen at an earlier start (a resumed session; the id is kept in the plugin store and the service is asked once for the resume items, sending only the event name), the daily usage upload ' +
       '(only after you chose to upload, never before your own answer, also when your company turned the savings ' +
       'record on; with "Upload from now on only" nothing from before the day you chose), the request-log cleanup (90 days), the working methods for the first ' +
       'prompt (only at methods level suggest) and the CLAUDE.md methods file (only at methods on), a one-time move ' +
@@ -63,7 +63,7 @@ export const HOOKS: readonly HookRow[] = [
     shown: 'The dim line at the subagent\'s start names it.',
   },
   {
-    event: 'tool.call', matcher: '', file: 'register.ts', does: ['deny', 'file', 'count'],
+    event: 'tool.call', matcher: '', file: 'register.ts', does: ['deny', 'file', 'count', 'network', 'context'],
     what: 'The planning gate, only at methods level on (methods on): while you are signed in, it denies Edit, Write, ' +
       'MultiEdit and NotebookEdit of the main agent when the project has no agent-state.md, or it is still in ' +
       'planning, or it has no goal and plan (the criteria, texts and small-edit size come from the served rule tables; without them nothing is held); an Edit or MultiEdit of at most the served number of changed lines passes, and writes to ' +
@@ -76,7 +76,9 @@ export const HOOKS: readonly HookRow[] = [
       'counts its subagent dispatches, locally. After the main conversation\'s AskUserQuestion call, while you are ' +
       'signed in, it keeps your answer when it is one of the two autonomy labels of the working methods ' +
       '(/agent-services autonomy), locally. ' +
-      'With the served rule tables (signed in): browser tools and WebFetch are denied on webmail sites and on a tab seen showing one (navigating that tab away or closing it stays allowed); secrets in a tool\'s output are masked again; a subagent report longer than the served cap is saved whole in a file in the agent-services data folder and the conversation gets its opening and the file\'s path; the test-author lock denies another subagent\'s change to a test file an agent wrote in this session; only on an account whose served rules include them (not product accounts), a locked requirements file the rules name takes only an amendment appended at its end by the main conversation (never a shell command), and a commit whose Co-Authored-By names another model than the agent runs on is denied; when the calls of the main conversation in one turn reach a count or a result size the served delegation table names, the result gets the note of that table suggesting a subagent for such work (counted in memory only). None of this sends anything.',
+      'With the served rule tables (signed in): browser tools and WebFetch are denied on webmail sites and on a tab seen showing one (navigating that tab away or closing it stays allowed); secrets in a tool\'s output are masked again; a subagent report longer than the served cap is saved whole in a file in the agent-services data folder and the conversation gets its opening and the file\'s path; the test-author lock denies another subagent\'s change to a test file an agent wrote in this session; only on an account whose served rules include them (not product accounts), a locked requirements file the rules name takes only an amendment appended at its end by the main conversation (never a shell command), and a commit whose Co-Authored-By names another model than the agent runs on is denied; when the calls of the main conversation in one turn reach a count or a result size the served delegation table names, the result gets the note of that table suggesting a subagent for such work (counted in memory only). None of this sends anything.' +
+      ' Run limits (signed in, not at methods level off): the first foreground Bash or PowerShell call of the main conversation with a command head from the public list asks the service about that head, once per head and session (only the head is sent; it waits at most 1 second, then goes on without an answer); when the answer says such commands are better run in the background, its note is added once to the result of a call with that head.' +
+      ' Just-in-time items (signed in, not at methods level off, main conversation): the first edit of a UI file, or a write of agent-state.md that makes it running, adds plan steps or checks every step done, asks the service once per moment and session for that moment\'s items (only the event name is sent; agent-state.md is read on this computer before and after the write); the labelled note goes with this call\'s result when it comes within 1 second, else with a later one.',
     shown: 'The deny reason, which starts with "agent-services planning gate" or "agent-services test lock".',
   },
   {
@@ -139,7 +141,7 @@ export const HOOKS: readonly HookRow[] = [
       'autonomy choice you gave (one line with the working methods), one ' +
       'planning reminder at methods level ' +
       'suggest and, unless the methods level is off, a reminder to run long work in the background and the steps ' +
-      'of .agent/steps.json ready to start, and once per session the hint the routing service sent for a subagent ' +
+      'of .agent/steps.json ready to start, the just-in-time items that are due (a resumed session, a new module or every plan step done in agent-state.md, read on this computer; the service gets only the event name, once per moment and session), and once per session the hint the routing service sent for a subagent ' +
       'without a task type word, each labelled as an agent-services note. It notes locally whether ' +
       'your message asks for a review (the routing request carries only yes or no). ' +
       'With the served rule tables (signed in): secrets in your prompt (API keys, tokens, private keys, passwords after key= or --password) are replaced by {{secret:NAME}} placeholders before the model sees them; the real values stay in memory for this session only, never written or sent (/agent-services secrets lists the names). A long background subagent report is shortened the same way as in tool.call, and the shell watch adds its notes (queued run_command output, usage-limit alerts) for the main conversation.',
