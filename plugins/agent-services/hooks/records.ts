@@ -1,0 +1,369 @@
+
+import { sha256 } from './noble.js'
+import type { KV, Random, SvcResult, Transport } from './engine_types'
+import { noteBrief } from './flow_state'
+import { routingLevel, routingModels, sessionPick, userPickOf } from './routing_level'
+import { scrub } from './redact'
+
+export type RouteFlags = { main_model?: unknown; user_asked_review?: unknown; user_asked_override?: unknown; scope?: unknown; want_table?: unknown;
+  plan_done?: unknown; prior_failures?: unknown }
+
+export const KNOWN_HEADS: ReadonlySet<string> = new Set([
+  'python', 'node', 'deno', 'bun', 'npm', 'npx', 'pnpm', 'yarn', 'pytest', 'pip', 'pip3', 'uv', 'uvx', 'poetry',
+  'cargo', 'rustc', 'go', 'gradle', 'gradlew', 'mvn', 'java', 'javac', 'dotnet', 'msbuild', 'make', 'cmake',
+  'ninja', 'docker', 'kubectl', 'git', 'gh', 'bash', 'sh', 'zsh', 'pwsh', 'powershell', 'cmd', 'mypy', 'ruff',
+  'tox', 'nox', 'black', 'flake8', 'pylint', 'eslint', 'tsc', 'jest', 'vitest', 'playwright', 'terraform',
+])
+export const ROUTER_NOTICE =
+  'The routing service is temporarily unavailable; this subagent dispatch runs as written, with the model and effort the caller set.'
+export const NO_LICENSE_NOTICE =
+  'This account has no active license (company seat or paid plan), so routing is off; this subagent dispatch runs as written, with the model and effort the caller set.'
+export const SALT_KEY = 'salt'
+export const ROUTE_DEADLINE_MS = 1000
+export const BACKGROUND_DEADLINE_MS = 30000
+
+const PYTHONS = /^(python|python3|python3\.\d+|py|pythonw)$/
+const SUFFIXES = ['.exe', '.cmd', '.bat', '.ps1', '.sh', '.py']
+const EFFORTS = ['low', 'medium', 'high', 'xhigh', 'max']
+const MODEL_RX = /^[A-Za-z0-9.[\]_:-]+$/
+const SUBTYPE_RX = /^[A-Za-z0-9 _.:-]+$/
+const CAP = 1000000
+const DUR_CAP = 604800
+const HARNESSES = ['claude-code', 'opencode', 'codex', 'other']
+const PY_SPACE = /[\t\n\v\f\r \x1c-\x1f\x85\xa0\u1680\u2000-\u200a\u2028\u2029\u202f\u205f\u3000]+/
+
+const enc = new TextEncoder()
+const hex = (b: Uint8Array): string => Array.from(b, (x) => x.toString(16).padStart(2, '0')).join('')
+
+export function hmacSha256(key: Uint8Array, msg: Uint8Array): Uint8Array {
+  const k = new Uint8Array(64)
+  k.set(key.length > 64 ? sha256(key) : key)
+  const inner = new Uint8Array(64 + msg.length)
+  const outer = new Uint8Array(64 + 32)
+  for (let i = 0; i < 64; i++) {
+    inner[i] = k[i]! ^ 0x36
+    outer[i] = k[i]! ^ 0x5c
+  }
+  inner.set(msg, 64)
+  outer.set(sha256(inner), 64)
+  return sha256(outer)
+}
+
+export function typeWord(description: unknown): string {
+  const parts = typeof description === 'string' ? description.split(PY_SPACE).filter((x) => x) : []
+  if (!parts.length || scrub(parts[0]!) !== parts[0]) return ''
+  return [...parts[0]!].slice(0, 32).join('')
+}
+
+function base(word: string): string {
+  let b = (word.split(/[\\/]/).pop() ?? '').toLowerCase()
+  for (const suf of SUFFIXES) {
+    if (b.endsWith(suf)) {
+      b = b.slice(0, -suf.length)
+      break
+    }
+  }
+  return b
+}
+
+export function headWord(argv: unknown[] | null | undefined): string {
+  if (!argv || !argv.length) return 'other'
+  const b = base(String(argv[0]))
+  if (PYTHONS.test(b)) {
+    const args = argv.slice(1).map(String)
+    for (let i = 0; i < args.length - 1; i++) {
+      if (args[i] === '-m') {
+        const mod = args[i + 1]!.split('.')[0]!.toLowerCase()
+        return KNOWN_HEADS.has(mod) ? mod : 'python'
+      }
+    }
+    return 'python'
+  }
+  return KNOWN_HEADS.has(b) ? b : 'other'
+}
+
+export function projectHash(salt: Uint8Array, projectDir: string): string {
+  const key = projectDir.replace(/\\/g, '/').replace(/\/+$/, '').toLowerCase()
+  return hex(hmacSha256(salt, enc.encode('project:' + key))).slice(0, 16)
+}
+
+function num(v: unknown): number {
+  if (typeof v === 'number') return v
+  if (typeof v === 'boolean') return v ? 1 : 0
+  if (typeof v === 'string' && v.trim() && !Number.isNaN(Number(v.trim()))) return Number(v.trim())
+  return NaN
+}
+
+const intOf = (v: unknown): number => {
+  const x = num(v)
+  return Number.isNaN(x) ? 0 : Math.trunc(Math.min(Math.max(x, 0), CAP))
+}
+
+const pctOf = (v: unknown): number => {
+  const x = num(v)
+  return Number.isNaN(x) ? 0 : Math.min(Math.max(x, 0), 100)
+}
+
+function durations(values: unknown[] | null | undefined): number[] {
+  const out: number[] = []
+  for (const v of (values ?? []).slice(-5)) {
+    const x = num(v)
+    if (Number.isNaN(x)) continue
+    out.push(Math.min(Math.max(x, 0), DUR_CAP))
+  }
+  return out
+}
+
+export type RouteAnswer = {
+  decision: string
+  model: unknown
+  effort: unknown
+  reason: unknown
+  hint: unknown
+  fallback: string | null
+  notice: string | null
+  brief_rule?: string
+  brief_forward?: string
+  note?: string
+  table?: string
+}
+
+export type CheckpointCounts = {
+  context_pct: unknown
+  turns: unknown
+  tool_calls: unknown
+  todos_done: unknown
+  commits: unknown
+  minutes: unknown
+  context_tokens?: unknown
+  event?: unknown
+  turn?: unknown
+}
+
+export type RecordsOptions = { store: KV; random: Random; harness?: string }
+
+export class Records {
+  readonly harness: string
+  private readonly svc: Transport
+  private readonly store: KV
+  private readonly random: Random
+  private readonly refs = new Map<string | null, string>()
+  private readonly dispatch = new Map<string | null, number>()
+  private readonly notified = new Set<string | null>()
+  private saltP: Promise<Uint8Array> | null = null
+
+  constructor(svc: Transport, opts: RecordsOptions) {
+    this.svc = svc
+    this.store = opts.store
+    this.random = opts.random
+    const h = opts.harness ?? 'claude-code'
+    this.harness = HARNESSES.includes(h) ? h : 'other'
+  }
+
+  salt(): Promise<Uint8Array> {
+    if (!this.saltP) this.saltP = this.loadSalt()
+    return this.saltP
+  }
+
+  private async loadSalt(): Promise<Uint8Array> {
+    const parse = (v: unknown): Uint8Array | null =>
+      typeof v === 'string' && /^[0-9a-f]{64}$/.test(v) ? Uint8Array.from(v.match(/../g)!, (h) => parseInt(h, 16)) : null
+    try {
+      const have = parse(await this.store.get(SALT_KEY))
+      if (have) return have
+    } catch {
+    }
+    const raw = this.random(32)
+    try {
+      await this.store.set(SALT_KEY, hex(raw))
+      const back = parse(await this.store.get(SALT_KEY))
+      if (back) return back
+    } catch {
+    }
+    return raw
+  }
+
+  private ref(session: unknown): string {
+    const key = typeof session === 'string' ? session : null
+    let r = this.refs.get(key)
+    if (r === undefined) this.refs.set(key, (r = hex(this.random(16))))
+    return r
+  }
+
+  sessionRef(session: unknown): string {
+    return this.ref(session)
+  }
+
+  private async phash(projectDir: unknown): Promise<string | null> {
+    return typeof projectDir === 'string' ? projectHash(await this.salt(), projectDir) : null
+  }
+
+  private async post(path: string, body: Record<string, unknown>, kind: string, deadlineMs: number,
+    errors?: (string | null)[], statuses?: (number | null)[]): Promise<Record<string, unknown> | null> {
+    let r
+    try {
+      r = await this.svc.call('POST', path, body, { kind, deadlineMs })
+    } catch {
+      return null
+    }
+    if (!r || !r.ok || !r.body || typeof r.body !== 'object' || Array.isArray(r.body)) {
+      if (errors) errors.push(r ? r.error : null)
+      if (statuses) statuses.push(r ? r.status : null)
+      return null
+    }
+    return r.body as Record<string, unknown>
+  }
+
+  private async addFlags(body: Record<string, unknown>, flags: RouteFlags): Promise<void> {
+    const mm = flags.main_model
+    body.main_model = typeof mm === 'string' && mm && [...mm].length <= 64 && MODEL_RX.test(mm) ? mm : null
+    body.user_asked_review = flags.user_asked_review === true
+    if ((await routingLevel(this.store)) === 'strict') {
+      body.strict = true
+      if (flags.user_asked_override === true) body.user_asked_override = true
+    }
+    const allowed = await routingModels(this.store)
+    if (allowed) body.allowed = allowed
+    const sc = flags.scope
+    if (sc && typeof sc === 'object' && !Array.isArray(sc) && Object.keys(sc).length) body.scope = { ...sc }
+    body.explain = true
+    const pick = userPickOf(sessionPick())
+    if (pick) body.user_pick = pick
+    if (flags.want_table === true) body.want_table = true
+    if (flags.plan_done === true) body.plan_done = true
+    const pf = flags.prior_failures
+    if (typeof pf === 'number' && Number.isInteger(pf) && pf >= 1) body.prior_failures = Math.min(pf, 1000)
+  }
+
+  async table(session: unknown, flags: RouteFlags): Promise<string | null> {
+    const req: Record<string, unknown> = {
+      session_ref: this.ref(session), type_word: '', subagent_type: 'models table', requested_model: null,
+      requested_effort: null, harness: this.harness, desc_len: 0, dispatch_no: 0, project_hash: null,
+    }
+    await this.addFlags(req, { ...flags, want_table: true })
+    const ans = await this.post('/router/decide', req, 'router', 8000)
+    return typeof ans?.table === 'string' ? ans.table : null
+  }
+
+  async route(session: unknown, subagentType: unknown, description: unknown, model: unknown = null, effort: unknown = null,
+    projectDir: unknown = null, harness: unknown = null, deadlineMs = ROUTE_DEADLINE_MS, flags: RouteFlags | null = null): Promise<RouteAnswer> {
+    const key = typeof session === 'string' ? session : null
+    const ref = this.ref(session)
+    const n = (this.dispatch.get(key) ?? 0) + 1
+    this.dispatch.set(key, n)
+    const desc = typeof description === 'string' ? description : ''
+    const st = typeof subagentType === 'string' ? subagentType : ''
+    const body: Record<string, unknown> = {
+      session_ref: ref,
+      type_word: typeWord(desc),
+      subagent_type: [...st].slice(0, 64).join(''),
+      requested_model: typeof model === 'string' && model ? model : null,
+      requested_effort: typeof effort === 'string' && EFFORTS.includes(effort) ? effort : null,
+      harness: harness === null || harness === undefined ? this.harness
+        : typeof harness === 'string' && HARNESSES.includes(harness) ? harness : 'other',
+      desc_len: Math.min([...desc].length, 100000),
+      dispatch_no: Math.min(n, CAP),
+      project_hash: await this.phash(projectDir),
+    }
+    if (flags) await this.addFlags(body, flags)
+    let ans: Record<string, unknown> | null = null
+    const errors: (string | null)[] = []
+    const rm = body.requested_model as string | null
+    if (SUBTYPE_RX.test(body.subagent_type as string) && (rm === null || ([...rm].length <= 64 && MODEL_RX.test(rm)))) {
+      const statuses: (number | null)[] = []
+      ans = await this.post('/router/decide', body, 'router', deadlineMs, errors, statuses)
+      if (ans === null && flags && statuses.includes(422)) {
+        delete body.main_model
+        delete body.user_asked_review
+        delete body.strict
+        delete body.user_asked_override
+        delete body.scope
+        delete body.allowed
+        delete body.explain
+        delete body.user_pick
+        delete body.want_table
+        delete body.plan_done
+        delete body.prior_failures
+        errors.length = 0
+        ans = await this.post('/router/decide', body, 'router', deadlineMs, errors)
+      }
+    }
+    if (ans !== null && ['route', 'pass', 'deny'].includes(ans.decision as string)) {
+      const out: RouteAnswer = {
+        decision: ans.decision as string, model: ans.model ?? null, effort: ans.effort ?? null, reason: ans.reason ?? null,
+        hint: ans.hint ?? null, fallback: null, notice: null,
+      }
+      if (typeof ans.brief_rule === 'string') out.brief_rule = ans.brief_rule
+      if (typeof ans.brief_forward === 'string') out.brief_forward = ans.brief_forward
+      if (typeof ans.note === 'string') out.note = ans.note
+      if (typeof ans.table === 'string') out.table = ans.table
+      noteBrief(out.brief_rule)
+      return out
+    }
+    const pass: RouteAnswer = { decision: 'pass', model: null, effort: null, reason: null, hint: null, fallback: 'pass_through', notice: null }
+    if (errors.length === 1 && errors[0] === 'not_in_plan') return pass
+    const first = !this.notified.has(key)
+    this.notified.add(key)
+    const noLicense = errors.length === 1 && errors[0] === 'no_license'
+    pass.notice = first ? (noLicense ? NO_LICENSE_NOTICE : ROUTER_NOTICE) : null
+    return pass
+  }
+
+  async checkpoint(session: unknown, c: CheckpointCounts, deadlineMs = BACKGROUND_DEADLINE_MS):
+    Promise<{ now: boolean; keep_lines: string[]; fallback: string | null; note?: string; cases?: string[] }> {
+    const body = {
+      session_ref: this.ref(session), context_pct: pctOf(c.context_pct), turns: intOf(c.turns),
+      tool_calls: intOf(c.tool_calls), todos_done: intOf(c.todos_done), commits: intOf(c.commits), minutes: intOf(c.minutes),
+    } as Record<string, unknown>
+    const tk = c.context_tokens
+    if (typeof tk === 'number' && Number.isInteger(tk) && tk >= 0) body.context_tokens = Math.min(tk, 10000000)
+    if (typeof c.event === 'string') body.event = c.event
+    const t = c.turn
+    if (t && typeof t === 'object' && !Array.isArray(t) && Object.keys(t).length) body.turn = { ...t }
+    const statuses: (number | null)[] = []
+    let ans = await this.post('/checkpoint/timing', body, 'checkpoint', deadlineMs, undefined, statuses)
+    if (ans === null && ('context_tokens' in body || 'event' in body || 'turn' in body) && statuses.includes(422)) {
+      delete body.context_tokens
+      delete body.event
+      delete body.turn
+      ans = await this.post('/checkpoint/timing', body, 'checkpoint', deadlineMs)
+    }
+    if (ans !== null && typeof ans.now === 'boolean' && Array.isArray(ans.keep_lines)) {
+      const out: { now: boolean; keep_lines: string[]; fallback: null; note?: string; cases?: string[] } =
+        { now: ans.now, keep_lines: ans.keep_lines.filter((x): x is string => typeof x === 'string'), fallback: null }
+      if (typeof ans.note === 'string' && ans.note) out.note = ans.note
+      if (Array.isArray(ans.cases)) out.cases = ans.cases.filter((x): x is string => typeof x === 'string')
+      return out
+    }
+    return { now: false, keep_lines: [], fallback: 'no_suggestion' }
+  }
+
+  async limits(argv: unknown[] | null, session: unknown = null, projectDir: unknown = null, priorDurations: unknown[] = [],
+    deadlineMs = BACKGROUND_DEADLINE_MS): Promise<Record<string, unknown>> {
+    const body = {
+      session_ref: this.ref(session), head: headWord(argv ?? []), project_hash: await this.phash(projectDir),
+      prior_durations: durations(priorDurations),
+    }
+    const ans = await this.post('/limits/run', body, 'run_limits', deadlineMs)
+    if (ans !== null) {
+      const idle = ans.idle_seconds
+      const mx = ans.max_seconds
+      if (typeof idle === 'number' && typeof mx === 'number' && idle >= 1 && mx >= 0) {
+        const out: Record<string, unknown> = { idle_seconds: idle, max_seconds: mx, source: 'service', fallback: null }
+        if (typeof ans.background === 'boolean') out.background = ans.background
+        if (typeof ans.note === 'string' && ans.note) out.note = ans.note
+        return out
+      }
+    }
+    return { source: 'default', fallback: 'open_defaults' }
+  }
+}
+
+const DAILY_PATH = '/metrics/daily'
+
+export async function dailyPost(svc: Transport, body: Record<string, unknown>): Promise<SvcResult> {
+  const r = await svc.call('POST', DAILY_PATH, body, { kind: 'daily', hook: 'background' })
+  if (r.ok || r.status !== 422 || !('overhead' in body)) return r
+  const { overhead: _overhead, ...rest } = body
+  return svc.call('POST', DAILY_PATH, rest, { kind: 'daily', hook: 'background' })
+}
