@@ -6,7 +6,7 @@
 //                               the engine's session usage (planOf); then "Saved $X", the service's savings figure
 //   Time                        Spent by you: the person's typing time; Saved for you: clock time with at least one agent
 //                               active; Concurrent: the agents' summed run time less that
-//                               clock time. The service's figures when it has them, else this computer's.
+//                               clock time. From the same stored days as the Token column.
 //
 // Unknown figures show "--". methodLine() is the disclosure shown wherever the time figures appear (METHOD_LINE is
 // its built-in form); the service sends the same sentence with its figures. The idle gap, the typing speed and the
@@ -137,7 +137,10 @@ export async function refreshUsage(
     const all = { ...kept, ...usageDaysOf(facts, from ?? '0000-00-00') }
     // the owner tool's days replace earlier days too
     for (const [d, x] of Object.entries(usageDaysOf({ by_day: {}, time_by_day: {}, full_days: facts.full_days } as unknown as Facts, '0000-00-00'))) {
-      all[d] = { ...(all[d] ?? x), ...Object.fromEntries(Object.entries(facts.full_days?.[d] ?? {}).filter(([k, v]) => k in x && typeof v === 'number')) }
+      // x already holds the tool's figures with its cache reads added to tokens: take them from x, not the raw file
+      // (the raw `tokens` leaves cache reads out, which made the panel show about a third of the tokens)
+      const full = facts.full_days?.[d] ?? {}
+      all[d] = { ...(all[d] ?? x), ...Object.fromEntries(Object.entries(x).filter(([k]) => typeof (full as Obj)[k] === 'number')) }
     }
     const names = Object.keys(all).sort().slice(-800)
     const next: Record<string, UsageDay> = {}
@@ -269,12 +272,12 @@ export function panelOf(days: unknown, p: Plan | null, savings: unknown, today: 
     ],
     align: ['left', 'center', 'right'],
   }
-  // the service's time figures when it has them, else this computer's (all its stored days)
-  const t = s && isObj(s.time) && num(s.time.agent_seconds) !== null ? s.time : null
+  // the same stored days as the Token column (refreshed every 10 minutes), never the service's figures: those come
+  // from the daily upload, so today never showed and the two columns disagreed (one source for every number)
   const sum = (k: keyof UsageDay) => Object.values(all).reduce((n, d) => n + (num(d[k]) ?? 0), 0)
-  const you = t ? t.agent_seconds : sum('agent_seconds')
-  const typing = t ? (num(t.typing_seconds) ?? 0) : (sum('typed_bytes') * 60) / typingBytesPerMinute()
-  const concurrent = t ? (num(t.concurrent_seconds) ?? 0) : Math.max(0, sum('agent_sum_seconds') - you)
+  const you = sum('agent_seconds')
+  const typing = (sum('typed_bytes') * 60) / typingBytesPerMinute()
+  const concurrent = Math.max(0, sum('agent_sum_seconds') - you)
   const time: Column = {
     title: 'Time',
     rows: [

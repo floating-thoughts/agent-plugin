@@ -11,10 +11,14 @@ import type { KV } from './engine_types'
 import type { WiringFs } from './wiring'
 import { localDay } from './counters'
 import { isDay } from './metrics'
+import { sha256Hex } from './e2e'
 
 export const USAGE_TOOL_KEY = 'usage_tool' // store: { at, ok, error?, launcher?, lock?, holder? }: the last run
 export const USAGE_TOOL_EVERY_MS = 15 * 60 * 1000 // at most one run per 15 minutes on this computer
 export const USAGE_TOOL_TIMEOUT_MS = 300_000 // a full scan took 110 s on the owner's computer (2026-11-04)
+// The tool versions the plugin runs: sha256 of the file with CRLF read as LF. Any other file at that path (an edit,
+// a file another program or an agent wrote) is never run, so writing that one file cannot run code from the plugin.
+export const USAGE_TOOL_SHA256: readonly string[] = ['896270070a3c13198093dbcca628eb3007080e7b51d6f8458623627cb7862d3e']
 
 /** $.process.run as register.ts passes it (argv array, no shell). */
 export type ProcessRun = (
@@ -104,6 +108,15 @@ export async function refreshToolDays(d: ToolDeps): Promise<string> {
   } catch {}
   if (!present) {
     await safeSet(d.store, USAGE_TOOL_KEY, { at: d.now, ok: false, error: 'absent' })
+    return 'absent'
+  }
+  let pinned = false
+  try {
+    const text = String(await d.fs.read(tool)).replace(/\r\n/g, '\n')
+    pinned = USAGE_TOOL_SHA256.includes(sha256Hex(new TextEncoder().encode(text)))
+  } catch {}
+  if (!pinned) {
+    await safeSet(d.store, USAGE_TOOL_KEY, { at: d.now, ok: false, error: 'unknown_tool' })
     return 'absent'
   }
   const holder = `${d.now}-${Math.random()}`

@@ -163,7 +163,8 @@ async function build($: EngineInterface): Promise<Rt | null> {
     })
     const transport = svcTransport(svc)
     // no $.process here: update.ts runs nothing, and the status line shows the terminal update command
-    if (!(await capped(probeProcess($), sleep, PROBE_WAIT_MS, true))) updates.selfUpdates = false
+    const hasProcess = await capped(probeProcess($), sleep, PROBE_WAIT_MS, true)
+    if (!hasProcess) updates.selfUpdates = false
     const wiring = createWiring({
       svc,
       store,
@@ -176,7 +177,7 @@ async function build($: EngineInterface): Promise<Rt | null> {
       outbox,
       clock: now,
       projectsRoot: `${dirs.configDir}/projects`,
-      holder: session, run: processRunner($, updates.selfUpdates !== false), // usage_tool.ts: the local scan tool
+      holder: session, run: processRunner($, hasProcess === true), // usage_tool.ts: the local scan tool
       clientVersion: await shellVersion($), // the release version in every body (was the fixed 0.1.0)
       update: updates,
     })

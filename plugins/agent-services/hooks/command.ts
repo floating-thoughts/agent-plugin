@@ -1171,7 +1171,7 @@ export class Command {
       const yes = 'Send the weekly email'
       const a = await this.dialog('Also send you a weekly email that sums up your estimated savings? You can stop it ' +
         'from any email with one click.', [yes, 'No email'], 'Weekly email')
-      if (a === yes) mailError = await this.mail(true)
+      mailError = await this.mail(a === yes) // "No email" also turns off an email that an older version turned on
       mailAsk = a === yes && !mailError ? ' The weekly email is on.' : ` No weekly email is sent (${COMMAND} sharing mail on turns it on).`
     } else if (on) {
       mailAsk = ` No weekly email is sent unless you turn it on: ${COMMAND} sharing mail on.`
