@@ -52,5 +52,5 @@ export const TRUST_HEADER = 'Methods'
 export const TRUST_QUESTION =
   'Use the working methods agent-services serves (planning, delegating to subagents, testing, review) as your own ' +
   'instructions? agent-services would add one short section to your CLAUDE.md saying so; the methods themselves are ' +
-  'not copied there, and /agent-services trust off removes it.'
+  'not copied there (they are open: ask Claude to show them any time), and /agent-services trust off removes it.'
 export const TRUST_OPTIONS = ['Add it (Recommended)', 'Not now', 'Show me the section']
