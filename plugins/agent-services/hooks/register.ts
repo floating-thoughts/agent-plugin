@@ -3,7 +3,8 @@
 // says. Nothing is decided or kept here: rules, counters and savings live in the core. Every answer's notice goes to
 // the log. When the core cannot be reached the answer is allow (core.ts), so a hook never blocks the session.
 import type { EngineInterface, Register } from 'claude-code'
-import { coreEvent, type Answer } from './core'
+import { coreEvent, dataDir, STATUS_MAX, type Answer } from './core'
+import { publishDashboard } from './dashboard'
 
 type Ev = Record<string, any>
 type Usage = { input: number; output: number; cache_read: number; cache_write: number }
@@ -33,24 +34,56 @@ const maybe = async <T>(f: () => Promise<T> | T): Promise<T | null> => {
   }
 }
 
-const send = async ($: EngineInterface, kind: string, agent: string | null, fields: Ev = {}): Promise<Answer> => {
-  const session = await $.session.id()
-  const answer = await coreEvent($, { v: 1, harness: 'claude-code', kind, session, agent, ...fields })
-  if (typeof answer.notice === 'string' && answer.notice) {
-    try {
-      $.ui.log(answer.notice)
-    } catch {
-      // the log is best effort
-    }
+// A notice is a dim transcript line. The session summary at exit is also a toast: a line logged as the session
+// ends may never be drawn. Both are best effort.
+const show = ($: EngineInterface, notice: string | null, toast = false) => {
+  if (typeof notice !== 'string' || !notice) {
+    return
   }
+  try {
+    $.ui.log(notice)
+  } catch {}
+  try {
+    if (toast) $.ui.toast(notice)
+  } catch {}
+}
+
+// `later`: the caller shows the notice itself (after /clear has run, so the new transcript keeps the line).
+const send = async ($: EngineInterface, kind: string, agent: string | null, fields: Ev = {}, later = false) => {
+  const session = await $.session.id()
+  const answer: Answer = await coreEvent($, { v: 1, harness: 'claude-code', kind, session, agent, ...fields })
+  if (!later) show($, answer.notice)
   return answer
+}
+
+// The core's one-line status (services/status.txt) pinned under the prompt; while the core answers inactive (the
+// gate is closed: it writes nothing then) the sign-in line instead. Any failure leaves the line as it is.
+const SIGNED_OUT = 'agent-services \u00b7 signed out: /agent-services:agent-services login <email>'
+const showStatus = async ($: EngineInterface, a: Answer): Promise<void> => {
+  try {
+    if (a.fallback === 'inactive') {
+      return $.ui.status(SIGNED_OUT)
+    }
+    if (a.fallback !== null) {
+      return
+    }
+    const raw = String((await $.fs.read(`${await dataDir($)}/services/status.txt`)) ?? '')
+    const text = raw.replace(/[\u0000-\u001f\u007f-\u009f]+/g, ' ').trim().slice(0, STATUS_MAX).trim()
+    if (text) {
+      $.ui.status(text)
+    }
+  } catch {
+    // no file yet or no status line: nothing to show
+  }
 }
 
 export const register: Register = on => {
   on('session.start', async ($, e: Ev, next) => {
     const cwd = e.cwd ?? (await maybe(() => $.session.cwd())) ?? null
-    await send($, 'session_start', null, { cwd, inject_on: ['prompt'] })
-    return next(e)
+    const a = await send($, 'session_start', null, { cwd, inject_on: ['prompt'] })
+    const out = await next(e)
+    await showStatus($, a)
+    return out
   }).catch(($, e, next) => next(e))
 
   on('agent.spawn', async ($, e: Ev, next) => {
@@ -101,13 +134,17 @@ export const register: Register = on => {
   on('turn.complete', async ($, e: Ev, next) => {
     const done = await next(e)
     const u: Ev | null = await maybe(() => $.session.usage())
-    await send($, 'turn_end', e.agentId ?? null, {
+    const a = await send($, 'turn_end', e.agentId ?? null, {
       reason: e.reason ?? null,
       model: e.usage?.model ?? null,
       usage: usage(e.usage),
       context_tokens: u?.context?.tokens ?? null,
       context_window: u?.context?.window ?? null,
     })
+    await showStatus($, a)
+    if (!e.agentId) {
+      await publishDashboard($) // dashboard.ts: at most one Artifact publish per interval, never throws
+    }
     return done
   }).catch(($, e, next) => next(e))
 
@@ -140,12 +177,15 @@ export const register: Register = on => {
   }).catch(($, e, next) => next(e))
 
   on('command.run', { command: 'clear' }, async ($, e: Ev, next) => {
-    await send($, 'clear', null)
-    return next(e)
+    const a = await send($, 'clear', null, {}, true)
+    const done = await next(e)
+    show($, a.notice)
+    return done
   }).catch(($, e, next) => next(e))
 
   on('classic.SessionEnd', async ($, e: Ev, next) => {
-    await send($, 'session_end', null)
+    const a = await send($, 'session_end', null, {}, true)
+    show($, a.notice, true)
     return next(e)
   }).catch(($, e, next) => next(e))
 }

@@ -474,6 +474,10 @@ class Metrics:
             return Result(ok=False, error="service_off")
         return self.conn.call("GET", "/metrics/savings")
 
+    def weekly_mail(self, on: bool) -> Result:
+        """The weekly savings email setting; sent whether or not the usage upload is on (Connector._ungated)."""
+        return self.conn.call("POST", "/metrics/weekly-mail", {"on": on})
+
     def delete(self) -> Result:
         with self._lock:
             res = self.conn.call("DELETE", "/metrics")
@@ -525,6 +529,15 @@ def local_route(m: Metrics, method: str, path: str, body: dict) -> tuple[int, di
         return _answer(m.savings())
     if key == ("POST", "/local/metrics/delete"):
         return _answer(m.delete())
+    if key == ("POST", "/local/metrics/mail"):
+        on = body.get("on")
+        if not isinstance(on, bool):
+            return 400, {"error": "bad_request"}
+        r = m.weekly_mail(on)
+        if not r.ok:
+            return 200, {"error": r.error or "failed"}
+        b = r.body if isinstance(r.body, dict) else {}
+        return 200, {"ok": True, "on": b.get("on") if isinstance(b.get("on"), bool) else on}
     return 404, {"error": "not_found"}
 
 

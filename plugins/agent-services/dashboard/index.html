@@ -1,0 +1,651 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>agent-services dashboard</title>
+<style>
+:root {
+  --bg: #f6f5f1;
+  --surface: #ffffff;
+  --surface-2: #f1efe9;
+  --border: #e4e1d8;
+  --text: #1d1c19;
+  --muted: #6b675e;
+  --faint: #9a958a;
+  --accent: #1f7a5a;
+  --accent-soft: #e2f1ea;
+  --accent-ink: #145a41;
+  --bar: #2f9a72;
+  --bar-neg: #c4673d;
+  --grid: #ebe8e0;
+  --warn: #a5621c;
+  --warn-soft: #f8ecdc;
+  --bad: #b23b3b;
+  --bad-soft: #f7e3e1;
+  --off: #8e8a80;
+  --locked: #c9c5bb;
+  --gold: #b68a1e;
+  --gold-soft: #f6eed5;
+  --shadow: 0 1px 2px rgba(30, 28, 22, 0.05), 0 4px 16px rgba(30, 28, 22, 0.04);
+  --radius: 14px;
+  color-scheme: light;
+}
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    --bg: #141412;
+    --surface: #1d1c1a;
+    --surface-2: #252421;
+    --border: #33312d;
+    --text: #efede7;
+    --muted: #a8a397;
+    --faint: #7a766c;
+    --accent: #4cc596;
+    --accent-soft: #1c3229;
+    --accent-ink: #7fdcb6;
+    --bar: #43b688;
+    --bar-neg: #e08a5f;
+    --grid: #2b2a26;
+    --warn: #e0a65a;
+    --warn-soft: #362a1a;
+    --bad: #e57b74;
+    --bad-soft: #3a2220;
+    --off: #8a867c;
+    --locked: #4a4842;
+    --gold: #e2bd57;
+    --gold-soft: #352d17;
+    --shadow: 0 1px 2px rgba(0, 0, 0, 0.3), 0 4px 16px rgba(0, 0, 0, 0.2);
+    color-scheme: dark;
+  }
+}
+:root[data-theme="dark"] {
+  --bg: #141412;
+  --surface: #1d1c1a;
+  --surface-2: #252421;
+  --border: #33312d;
+  --text: #efede7;
+  --muted: #a8a397;
+  --faint: #7a766c;
+  --accent: #4cc596;
+  --accent-soft: #1c3229;
+  --accent-ink: #7fdcb6;
+  --bar: #43b688;
+  --bar-neg: #e08a5f;
+  --grid: #2b2a26;
+  --warn: #e0a65a;
+  --warn-soft: #362a1a;
+  --bad: #e57b74;
+  --bad-soft: #3a2220;
+  --off: #8a867c;
+  --locked: #4a4842;
+  --gold: #e2bd57;
+  --gold-soft: #352d17;
+  --shadow: 0 1px 2px rgba(0, 0, 0, 0.3), 0 4px 16px rgba(0, 0, 0, 0.2);
+  color-scheme: dark;
+}
+* { box-sizing: border-box; }
+html, body { margin: 0; padding: 0; }
+body {
+  background: var(--bg);
+  color: var(--text);
+  font-family: ui-sans-serif, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+  font-size: 15px;
+  line-height: 1.5;
+  -webkit-font-smoothing: antialiased;
+  overflow-x: hidden;
+}
+.wrap { max-width: 1040px; margin: 0 auto; padding: 28px 16px 56px; }
+.num { font-variant-numeric: tabular-nums; }
+header.top { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 12px; margin-bottom: 20px; }
+.brand { display: flex; align-items: center; gap: 10px; font-weight: 650; letter-spacing: -0.01em; font-size: 16px; }
+.brand svg { flex: none; }
+.meta { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; color: var(--muted); font-size: 13px; }
+.pill { display: inline-flex; align-items: center; gap: 6px; padding: 3px 10px; border-radius: 999px; background: var(--surface); border: 1px solid var(--border); font-size: 12.5px; color: var(--muted); white-space: nowrap; }
+.pill strong { color: var(--text); font-weight: 600; }
+.card { background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius); box-shadow: var(--shadow); padding: 20px; min-width: 0; }
+.hero { padding: 28px 24px; position: relative; overflow: hidden; }
+.hero::after { content: ""; position: absolute; right: -80px; top: -80px; width: 260px; height: 260px; border-radius: 50%; background: radial-gradient(closest-side, var(--accent-soft), transparent); pointer-events: none; }
+.eyebrow { font-size: 12px; text-transform: uppercase; letter-spacing: 0.08em; color: var(--muted); font-weight: 600; margin: 0 0 6px; }
+.hero-value { font-size: clamp(40px, 9vw, 64px); font-weight: 700; letter-spacing: -0.03em; line-height: 1.05; margin: 0; }
+.hero-sub { margin: 10px 0 0; color: var(--muted); font-size: 16px; max-width: 46ch; }
+.hero-sub strong { color: var(--accent-ink); font-weight: 650; }
+.tag { display: inline-block; font-size: 11px; font-weight: 700; letter-spacing: 0.06em; text-transform: uppercase; padding: 2px 8px; border-radius: 6px; vertical-align: middle; }
+.tag.est { background: var(--warn-soft); color: var(--warn); }
+.tag.meas { background: var(--accent-soft); color: var(--accent-ink); }
+.hero-stats { display: flex; flex-wrap: wrap; gap: 10px 28px; margin-top: 20px; position: relative; z-index: 1; }
+.hero-stat .k { font-size: 12.5px; color: var(--muted); }
+.hero-stat .v { font-size: 20px; font-weight: 650; letter-spacing: -0.01em; }
+.grid { display: grid; gap: 16px; margin-top: 16px; }
+.g4 { grid-template-columns: repeat(4, minmax(0, 1fr)); }
+.g2 { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+@media (max-width: 900px) { .g4 { grid-template-columns: repeat(2, minmax(0, 1fr)); } }
+@media (max-width: 620px) { .g4, .g2 { grid-template-columns: minmax(0, 1fr); } .hero { padding: 22px 18px; } .card { padding: 16px; } }
+h2 { font-size: 15px; font-weight: 650; margin: 0; letter-spacing: -0.005em; }
+.card-head { display: flex; align-items: baseline; justify-content: space-between; gap: 8px; margin-bottom: 12px; flex-wrap: wrap; }
+.card-head .hint { color: var(--muted); font-size: 12.5px; }
+.benefit .icon { width: 34px; height: 34px; border-radius: 10px; background: var(--accent-soft); color: var(--accent-ink); display: grid; place-items: center; margin-bottom: 12px; }
+.benefit .big { font-size: 28px; font-weight: 700; letter-spacing: -0.02em; line-height: 1.1; margin-top: 4px; }
+.benefit .unit { font-size: 13px; color: var(--muted); margin-left: 4px; font-weight: 500; letter-spacing: 0; }
+.benefit .line { color: var(--muted); font-size: 13px; margin-top: 6px; }
+.benefit .line strong { color: var(--text); font-weight: 600; }
+.benefit .save { margin-top: 10px; font-size: 14px; font-weight: 600; color: var(--accent-ink); }
+.benefit .save.none { color: var(--faint); font-weight: 500; }
+details.how { margin-top: 12px; border-top: 1px dashed var(--border); padding-top: 8px; }
+details.how summary { cursor: pointer; color: var(--muted); font-size: 12.5px; list-style: none; display: inline-flex; align-items: center; gap: 6px; user-select: none; }
+details.how summary::-webkit-details-marker { display: none; }
+details.how summary::before { content: "+"; display: inline-grid; place-items: center; width: 16px; height: 16px; border-radius: 50%; border: 1px solid var(--border); font-size: 11px; line-height: 1; }
+details.how[open] summary::before { content: "\2212"; }
+details.how summary:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; border-radius: 4px; }
+details.how p { margin: 8px 0 0; font-size: 13px; color: var(--muted); }
+.chart-box { width: 100%; }
+.chart-box svg { display: block; width: 100%; height: auto; }
+.chart-empty { color: var(--muted); font-size: 14px; padding: 28px 0; text-align: center; }
+.chart-readout { font-size: 13px; color: var(--muted); min-height: 20px; margin-top: 6px; }
+.chart-readout strong { color: var(--text); }
+.chips { display: flex; flex-wrap: wrap; gap: 8px; }
+.chip { display: inline-flex; align-items: center; gap: 8px; padding: 6px 12px; border-radius: 999px; border: 1px solid var(--border); background: var(--surface-2); font-size: 13px; }
+.dot { width: 8px; height: 8px; border-radius: 50%; background: var(--off); flex: none; }
+.chip.ok .dot { background: var(--accent); box-shadow: 0 0 0 3px var(--accent-soft); }
+.chip.warn .dot { background: var(--warn); box-shadow: 0 0 0 3px var(--warn-soft); }
+.chip.off { color: var(--muted); }
+.chip .st { color: var(--muted); font-size: 12px; }
+.kv { display: grid; grid-template-columns: auto 1fr; gap: 6px 16px; font-size: 14px; margin: 0; }
+.kv dt { color: var(--muted); }
+.kv dd { margin: 0; font-weight: 600; text-align: right; }
+.compare-row { display: flex; align-items: center; gap: 12px; margin: 10px 0; }
+.compare-row .lbl { width: 96px; flex: none; font-size: 13px; color: var(--muted); }
+.compare-row .track { flex: 1; height: 10px; background: var(--surface-2); border-radius: 999px; overflow: hidden; min-width: 0; }
+.compare-row .fill { height: 100%; background: var(--bar); border-radius: 999px; }
+.compare-row .fill.peer { background: var(--faint); }
+.compare-row .val { width: 64px; flex: none; text-align: right; font-weight: 600; font-size: 14px; }
+.delta { font-weight: 650; }
+.delta.up { color: var(--accent-ink); }
+.delta.down { color: var(--bar-neg); }
+.muted { color: var(--muted); }
+.small { font-size: 13px; }
+.ach-strip { display: grid; grid-template-columns: repeat(auto-fill, minmax(128px, 1fr)); gap: 12px; }
+.ach { border: 1px solid var(--border); border-radius: 12px; padding: 14px 12px; background: var(--surface-2); text-align: center; min-width: 0; }
+.ach .medal { width: 44px; height: 44px; margin: 0 auto 8px; border-radius: 50%; display: grid; place-items: center; background: var(--gold-soft); color: var(--gold); }
+.ach .name { font-weight: 650; font-size: 13.5px; }
+.ach .desc { font-size: 12px; color: var(--muted); margin-top: 4px; }
+.ach.locked { opacity: 0.72; }
+.ach.locked .medal { background: var(--surface); color: var(--locked); border: 1px dashed var(--locked); }
+.ach.locked .name { color: var(--muted); }
+.ach .prog { height: 4px; background: var(--surface); border-radius: 999px; margin-top: 10px; overflow: hidden; }
+.ach .prog i { display: block; height: 100%; background: var(--faint); }
+.section-title { display: flex; align-items: baseline; justify-content: space-between; gap: 12px; margin: 32px 0 12px; flex-wrap: wrap; }
+.section-title h2 { font-size: 17px; }
+footer { margin-top: 36px; color: var(--faint); font-size: 12.5px; text-align: center; }
+.empty-note { color: var(--muted); font-size: 14px; margin: 4px 0 0; }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <header class="top">
+    <div class="brand">
+      <svg width="26" height="26" viewBox="0 0 26 26" aria-hidden="true"><rect width="26" height="26" rx="8" fill="var(--accent)"/><path d="m7 15.5l4 4 8-11" fill="none" stroke="var(--surface)" stroke-width="2.6" stroke-linecap="round" stroke-linejoin="round"/></svg>
+      <span>agent-services</span>
+    </div>
+    <div class="meta" id="meta"></div>
+  </header>
+
+  <section class="card hero" id="hero" aria-live="polite"></section>
+
+  <div class="section-title"><h2>Saved per day</h2><span class="muted small" id="chart-range"></span></div>
+  <section class="card">
+    <div class="chart-box" id="chart"></div>
+    <div class="chart-readout" id="chart-readout"></div>
+    <div id="chart-how"></div>
+  </section>
+
+  <div class="section-title"><h2>What it did for you</h2><span class="muted small" id="benefit-hint"></span></div>
+  <section class="grid g4" id="benefits"></section>
+
+  <section class="grid g2">
+    <div class="card" id="compare"></div>
+    <div class="card" id="guidance"></div>
+  </section>
+
+  <div class="section-title"><h2>Achievements</h2><span class="muted small" id="ach-count"></span></div>
+  <section class="card"><div class="ach-strip" id="achievements"></div></section>
+
+  <div class="section-title"><h2>Services</h2><span class="muted small" id="svc-hint"></span></div>
+  <section class="card"><div class="chips" id="services"></div><div id="svc-how"></div></section>
+
+  <footer id="footer"></footer>
+</div>
+
+<script type="application/json" id="data">null</script>
+<script>
+(function () {
+  "use strict";
+  var SVG_NS = "http://www.w3.org/2000/svg";
+  var D = null;
+  try { D = JSON.parse(document.getElementById("data").textContent || "null"); } catch (e) { D = null; }
+  if (!D || typeof D !== "object") { D = {}; }
+
+  // ---------------------------------------------------------------- helpers (DOM only, no HTML strings)
+  function el(tag, cls, text) {
+    var n = document.createElement(tag);
+    if (cls) { n.className = cls; }
+    if (text !== undefined && text !== null) { n.textContent = String(text); }
+    return n;
+  }
+  function add(parent) {
+    for (var i = 1; i < arguments.length; i++) {
+      var c = arguments[i];
+      if (c === null || c === undefined || c === false) { continue; }
+      parent.appendChild(typeof c === "string" ? document.createTextNode(c) : c);
+    }
+    return parent;
+  }
+  function svg(tag, attrs) {
+    var n = document.createElementNS(SVG_NS, tag);
+    for (var k in attrs) { if (Object.prototype.hasOwnProperty.call(attrs, k)) { n.setAttribute(k, String(attrs[k])); } }
+    return n;
+  }
+  function isNum(v) { return typeof v === "number" && isFinite(v); }
+  function money(v) {
+    if (!isNum(v)) { return "—"; }
+    var a = Math.abs(v);
+    var digits = a >= 100 || (a >= 10 && a === Math.round(a)) ? 0 : 2;
+    var s = a.toLocaleString("en-US", { minimumFractionDigits: digits, maximumFractionDigits: digits });
+    return (v < 0 ? "−$" : "$") + s;
+  }
+  function count(v) { return isNum(v) ? Math.round(v).toLocaleString("en-US") : "—"; }
+  function pct(v) { return isNum(v) ? (v * 100).toFixed(Math.abs(v) < 0.1 ? 1 : 0) + "%" : "—"; }
+  function peerPct(v) { return isNum(v) ? v.toFixed(1) + "%" : "—"; }
+  function fmtDay(s, long) {
+    if (typeof s !== "string" || !/^\d{4}-\d{2}-\d{2}$/.test(s)) { return "—"; }
+    var p = s.split("-");
+    var d = new Date(Date.UTC(+p[0], +p[1] - 1, +p[2]));
+    var o = long ? { year: "numeric", month: "long", day: "numeric", timeZone: "UTC" } : { month: "short", day: "numeric", timeZone: "UTC" };
+    return d.toLocaleDateString("en-US", o);
+  }
+  function addDays(s, n) {
+    var p = s.split("-");
+    var d = new Date(Date.UTC(+p[0], +p[1] - 1, +p[2] + n));
+    return d.toISOString().slice(0, 10);
+  }
+  function how(text, measured) {
+    var d = el("details", "how");
+    var s = el("summary", null, "How this is measured");
+    var p = el("p");
+    add(p, el("span", "tag " + (measured ? "meas" : "est"), measured ? "Measured" : "Estimated"), " ", text);
+    add(d, s, p);
+    return d;
+  }
+  function icon(path) {
+    var s = svg("svg", { width: 18, height: 18, viewBox: "0 0 24 24", fill: "none", stroke: "currentColor", "stroke-width": 2, "stroke-linecap": "round", "stroke-linejoin": "round", "aria-hidden": "true" });
+    path.split("|").forEach(function (d) { s.appendChild(svg("path", { d: d })); });
+    return s;
+  }
+
+  var sav = D.savings || null;
+  var counts = D.counts || null;
+  var levers = (sav && sav.levers) || {};
+  var est = D.estimate || null;
+  var act = D.activity || null;
+  var guard = D.guard_blocks || null;
+  var measured = !!(sav && isNum(sav.usd) && (sav.days || 0) > 0);
+
+  function leverRuns(name, localKey) {
+    var server = levers[name] && isNum(levers[name].runs) ? levers[name].runs : null;
+    var local = counts && counts.all_time && isNum(counts.all_time[localKey]) ? counts.all_time[localKey] : null;
+    if (server === null) { return local; }
+    if (local === null) { return server; }
+    return Math.max(server, local);
+  }
+  var routedTotal = leverRuns("route", "routed");
+
+  // ---------------------------------------------------------------- header
+  (function meta() {
+    var m = document.getElementById("meta");
+    var acc = D.account || {};
+    var plans = { full: "Full plan", guard: "Guard plan", diagnostic: "Diagnostic plan" };
+    if (acc.plan && plans[acc.plan]) { var p = el("span", "pill"); add(p, el("strong", null, plans[acc.plan])); m.appendChild(p); }
+    if (acc.license_until) { m.appendChild(el("span", "pill", "Licensed until " + fmtDay(acc.license_until, true))); }
+    else if (acc.signed_in === false) { m.appendChild(el("span", "pill", "Not signed in")); }
+    if (act && isNum(act.streak_days) && act.streak_days > 1) { m.appendChild(el("span", "pill", act.streak_days + "-day streak")); }
+  })();
+
+  // ---------------------------------------------------------------- hero
+  (function hero() {
+    var h = document.getElementById("hero");
+    var wrap = el("div");
+    wrap.style.position = "relative";
+    wrap.style.zIndex = "1";
+    if (measured) {
+      add(wrap, el("p", "eyebrow", "Saved with agent-services"));
+      add(wrap, el("p", "hero-value num", money(sav.usd)));
+      var sub = el("p", "hero-sub");
+      if (isNum(sav.pct) && sav.pct > 0) {
+        add(sub, "That is ", el("strong", null, pct(sav.pct)), " less than the same work would have cost");
+      } else {
+        add(sub, "Compared with what the same work would have cost");
+      }
+      add(sub, sav.first_day ? " since " + fmtDay(sav.first_day, true) + "." : ".");
+      add(wrap, sub);
+      var stats = el("div", "hero-stats");
+      function stat(k, v) { var s = el("div", "hero-stat"); add(s, el("div", "k", k), el("div", "v num", v)); stats.appendChild(s); }
+      if (isNum(sav.api_usd)) { stat("Your usage cost", money(sav.api_usd)); }
+      if (isNum(sav.days)) { stat("Days measured", count(sav.days)); }
+      if (isNum(routedTotal)) { stat("Tasks routed", count(routedTotal)); }
+      if (act && isNum(act.active_days)) { stat("Active days", count(act.active_days)); }
+      add(wrap, stats);
+      add(wrap, how("Our service compares what your sessions actually cost with what the same work would have cost " +
+        "without agent-services: every subagent on the most capable model, the full conversation carried forward " +
+        "with no compaction, and whole files read instead of indexed lookups. It is worked out from the usage counts you " +
+        "chose to share" + (isNum(sav.days) ? ", over " + count(sav.days) + " day" + (sav.days === 1 ? "" : "s") : "") +
+        ". Compaction can occasionally cost more than it saves; those days count against the total.", true));
+    } else if (est && (isNum(est.low_usd) || isNum(est.high_usd))) {
+      var lo = isNum(est.low_usd) ? est.low_usd : est.high_usd;
+      var hi = isNum(est.high_usd) ? est.high_usd : est.low_usd;
+      var eb = el("p", "eyebrow");
+      add(eb, "Expected savings ", el("span", "tag est", "Estimated"));
+      add(wrap, eb);
+      add(wrap, el("p", "hero-value num", lo === hi ? money(lo) : money(lo) + " – " + money(hi)));
+      var period = isNum(est.period_days) ? (est.period_days === 30 ? "a month" : "every " + count(est.period_days) + " days") : "a month";
+      var s2 = el("p", "hero-sub");
+      add(s2, "What agent-services should save you " + period);
+      if (isNum(est.pct_low) || isNum(est.pct_high)) {
+        var pl = isNum(est.pct_low) ? est.pct_low : est.pct_high, ph = isNum(est.pct_high) ? est.pct_high : est.pct_low;
+        add(s2, ", about ", el("strong", null, pl === ph ? pct(pl) : pct(pl) + "–" + pct(ph)), " of your usage cost");
+      }
+      add(s2, ". Measured savings replace this estimate once your first full day is counted.");
+      add(wrap, s2);
+      add(wrap, how("This is an estimate, not a measurement. It comes from a look at your recent usage" +
+        (isNum(est.basis_days) ? " over " + count(est.basis_days) + " days" : "") +
+        (est.made_on ? ", made on " + fmtDay(est.made_on, true) : "") +
+        ", compared with running every subagent on the most capable model. Turn on usage sharing to see the measured figure.", false));
+    } else {
+      add(wrap, el("p", "eyebrow", "Saved with agent-services"));
+      add(wrap, el("p", "hero-value num", "$0.00"));
+      add(wrap, el("p", "hero-sub", D.metrics_on === false
+        ? "Savings are measured from the usage counts you choose to share. Turn on usage sharing and your first figure appears after one full day."
+        : "Your first measured savings appear here after your first full day of work."));
+      add(wrap, how("Savings are measured, never guessed: once a day the counts of what agent-services did " +
+        "are compared with what the same work would have cost on the most capable model with no compaction and whole-file reads.", true));
+    }
+    h.appendChild(wrap);
+  })();
+
+  // ---------------------------------------------------------------- daily chart
+  (function chart() {
+    var box = document.getElementById("chart");
+    var readout = document.getElementById("chart-readout");
+    var rows = (sav && sav.by_day) || [];
+    if (!rows.length) {
+      box.appendChild(el("div", "chart-empty", "Daily savings show up here once the first day is measured."));
+      return;
+    }
+    var map = {};
+    rows.forEach(function (r) { map[r.day] = r; });
+    var end = D.today && D.today > rows[rows.length - 1].day ? D.today : rows[rows.length - 1].day;
+    var days = [];
+    var n = Math.min(30, Math.max(7, Math.round((Date.parse(end) - Date.parse(rows[0].day)) / 86400000) + 1));
+    for (var i = n - 1; i >= 0; i--) { days.push(addDays(end, -i)); }
+    document.getElementById("chart-range").textContent = fmtDay(days[0]) + " – " + fmtDay(days[days.length - 1]);
+    var vals = days.map(function (d) { return map[d] && isNum(map[d].usd) ? map[d].usd : 0; });
+    var max = Math.max.apply(null, vals.concat([0]));
+    var min = Math.min.apply(null, vals.concat([0]));
+    if (max - min <= 0) { max = 1; }
+    var ticks = 4;
+    var raw = (max - min) / ticks, mag = Math.pow(10, Math.floor(Math.log(raw) / Math.LN10)), nice = mag;
+    [1, 2, 2.5, 5, 10].some(function (m) { nice = m * mag; return m * mag >= raw; });
+    min = Math.floor(min / nice) * nice;
+    max = min + nice * Math.max(1, Math.ceil((max - min) / nice));
+    ticks = Math.round((max - min) / nice);
+    var W = Math.max(300, Math.min(1000, Math.round(box.clientWidth || 720))), H = W < 480 ? 190 : 220, L = 44, R = 8, T = 10, B = 26;
+    var pw = W - L - R, ph = H - T - B;
+    function y(v) { return T + (max - v) / (max - min) * ph; }
+    var s = svg("svg", { viewBox: "0 0 " + W + " " + H, role: "img", "aria-label": "Dollars saved per day" });
+    for (var t = 0; t <= ticks; t++) {
+      var v = min + (max - min) * t / ticks;
+      var yy = y(v);
+      s.appendChild(svg("line", { x1: L, x2: W - R, y1: yy, y2: yy, stroke: "var(--grid)", "stroke-width": 1 }));
+      var lab = svg("text", { x: L - 8, y: yy + 4, "text-anchor": "end", "font-size": 11, fill: "var(--faint)" });
+      lab.textContent = money(Math.round(v * 100) / 100).replace(".00", "");
+      s.appendChild(lab);
+    }
+    var step = pw / days.length, bw = Math.max(3, Math.min(22, step * 0.66));
+    var zero = y(0);
+    days.forEach(function (d, i) {
+      var v = vals[i];
+      var x = L + step * i + (step - bw) / 2;
+      var top = v >= 0 ? y(v) : zero, h = Math.max(v === 0 ? 0 : 1.5, Math.abs(y(v) - zero));
+      var g = svg("g", { tabindex: 0 });
+      var hit = svg("rect", { x: L + step * i, y: T, width: step, height: ph, fill: "transparent" });
+      var bar = svg("rect", { x: x, y: top, width: bw, height: h, rx: Math.min(4, bw / 3), fill: v >= 0 ? "var(--bar)" : "var(--bar-neg)" });
+      var tt = svg("title", {});
+      tt.textContent = fmtDay(d) + ": " + money(v) + " saved";
+      g.appendChild(tt); g.appendChild(hit); g.appendChild(bar);
+      function show() {
+        readout.textContent = "";
+        add(readout, el("strong", null, fmtDay(d, true)), " · " + money(v) + " saved");
+        var r = map[d];
+        if (r) {
+          var parts = [];
+          if (isNum(r.route_usd) && r.route_usd) { parts.push("routing " + money(r.route_usd)); }
+          if (isNum(r.compact_usd) && r.compact_usd) { parts.push("compaction " + money(r.compact_usd)); }
+          if (isNum(r.index_usd) && r.index_usd) { parts.push("indexed reads " + money(r.index_usd)); }
+          if (parts.length) { add(readout, " (" + parts.join(", ") + ")"); }
+        }
+        bar.setAttribute("opacity", "0.8");
+      }
+      function hide() { bar.removeAttribute("opacity"); }
+      g.addEventListener("mouseenter", show); g.addEventListener("focus", show);
+      g.addEventListener("mouseleave", hide); g.addEventListener("blur", hide);
+      s.appendChild(g);
+      if (i === 0 || i === days.length - 1 || (days.length > 10 && W >= 480 && i % 7 === (days.length - 1) % 7 && i > 2 && i < days.length - 3)) {
+        var edge = i === 0 ? "start" : i === days.length - 1 ? "end" : "middle";
+        var dl = svg("text", { x: edge === "start" ? L + step * i + (step - bw) / 2 : edge === "end" ? L + step * i + (step + bw) / 2 : L + step * i + step / 2, y: H - 8, "text-anchor": edge, "font-size": 11, fill: "var(--faint)" });
+        dl.textContent = fmtDay(d);
+        s.appendChild(dl);
+      }
+    });
+    s.appendChild(svg("line", { x1: L, x2: W - R, y1: zero, y2: zero, stroke: "var(--border)", "stroke-width": 1.2 }));
+    box.appendChild(s);
+    var best = Math.max.apply(null, vals);
+    readout.textContent = best > 0 ? "Best day: " + money(best) + ". Hover or tap a bar for the day." : "Hover or tap a bar for the day.";
+    document.getElementById("chart-how").appendChild(how("Each bar is one day's savings, worked out by our service from that day's shared usage counts " +
+      "and compared with the same work on the most capable model, with no compaction and whole-file reads. Days with no work show no bar. " +
+      "A bar below the line means compaction cost a little more than it saved that day.", true));
+  })();
+
+  // ---------------------------------------------------------------- benefit cards
+  (function benefits() {
+    var g = document.getElementById("benefits");
+    var today = counts && counts.today ? counts.today : null;
+    function card(o) {
+      var c = el("article", "card benefit");
+      var ic = el("div", "icon"); ic.appendChild(icon(o.icon)); c.appendChild(ic);
+      add(c, el("h2", null, o.title));
+      var big = el("div", "big num", o.value);
+      if (o.unit && o.value !== "—") { add(big, el("span", "unit", o.unit)); }
+      add(c, big);
+      if (o.today !== null && o.today !== undefined) {
+        var ln = el("div", "line"); add(ln, el("strong", "num", count(o.today)), " today"); add(c, ln);
+      }
+      if (o.extra) { add(c, el("div", "line", o.extra)); }
+      add(c, el("div", "save" + (o.usd === null ? " none" : ""), o.usd === null ? o.noUsd : money(o.usd) + " saved"));
+      add(c, how(o.how, o.measured));
+      g.appendChild(c);
+    }
+    var lv = function (k) { return levers[k] && isNum(levers[k].usd) ? levers[k].usd : null; };
+    var tc = function (k) { return today && isNum(today[k]) ? today[k] : null; };
+    var localNote = counts ? " The counts are taken on this computer from the last 60 days of activity." : "";
+    var routeRuns = leverRuns("route", "routed"), compRuns = leverRuns("compact", "compactions"), idxRuns = leverRuns("index", "indexed_reads");
+    card({ title: "Cheaper-model routing", icon: "m4 12h10|m10 6l6 6-6 6|m20 4v16", value: count(routeRuns), unit: "tasks",
+      today: tc("routed"), usd: lv("route"), noUsd: "Savings appear once measured", measured: true,
+      how: "Counts each subagent task sent to a model that fits the job instead of the most capable one. Savings are compared with running every subagent on the most capable model." + localNote });
+    card({ title: "Context compaction", icon: "m4 6h16|m7 12h10|m10 18h4", value: count(compRuns), unit: "compactions",
+      today: tc("compactions"), usd: lv("compact"), noUsd: "Savings appear once measured", measured: true,
+      how: "Counts each time a long conversation was compacted at a good moment. Savings are compared with carrying the full conversation forward; a compaction that cost more than it saved counts against the total." + localNote });
+    card({ title: "Indexed reads", icon: "m5 4h10l4 4v12H5z|m9 12h6|m9 16h4", value: count(idxRuns), unit: "reads",
+      today: tc("indexed_reads"), usd: lv("index"), noUsd: "Savings appear once measured", measured: true,
+      how: "Counts each lookup answered from the project index instead of reading the whole file. Savings are compared with reading each whole file." + localNote });
+    card({ title: "Safety guard", icon: "m12 3l8 3v6c0 5-3.5 8-8 9-4.5-1-8-4-8-9V6z|m9 12l2 2 4-4",
+      value: guard ? count(guard.all_time) : "—", unit: guard ? "blocked" : "",
+      today: guard ? guard.today : null, usd: null,
+      noUsd: guard ? (guard.all_time ? "Risky commands stopped before they ran" : "Nothing risky so far") : "Watching every command",
+      extra: guard ? null : "No risky command has been recorded yet.", measured: true,
+      how: "Counted on this computer each time a risky command was stopped before it ran. Prevented damage has no dollar figure, so none is shown." });
+    var hint = document.getElementById("benefit-hint");
+    if (measured && sav.first_day) { hint.textContent = "Since " + fmtDay(sav.first_day, true); }
+  })();
+
+  // ---------------------------------------------------------------- comparison
+  (function compare() {
+    var c = document.getElementById("compare");
+    var cmp = D.comparison || {};
+    var head = el("div", "card-head"); add(head, el("h2", null, "How you compare")); c.appendChild(head);
+    var any = false;
+    if (isNum(cmp.peer_median_pct)) {
+      any = true;
+      var yours = isNum(cmp.your_pct) ? cmp.your_pct * 100 : null;
+      var peer = cmp.peer_median_pct;
+      var top = Math.max(1, peer, yours || 0);
+      add(c, el("div", "small muted", "Share of usage cost saved, vs similar users"));
+      function row(lbl, v, cls) {
+        var r = el("div", "compare-row");
+        var tr = el("div", "track"), f = el("div", "fill" + (cls ? " " + cls : ""));
+        f.style.width = (isNum(v) ? Math.max(2, Math.min(100, v / top * 100)) : 0) + "%";
+        tr.appendChild(f);
+        add(r, el("div", "lbl", lbl), tr, el("div", "val num", isNum(v) ? peerPct(v) : "—"));
+        c.appendChild(r);
+      }
+      row("You", yours, "");
+      row("Similar users", peer, "peer");
+      if (isNum(yours)) {
+        var diff = yours - peer;
+        var p = el("p", "small");
+        if (Math.abs(diff) < 0.5) { add(p, "Right in line with similar users."); }
+        else if (diff > 0) { add(p, "You save ", el("span", "delta up", diff.toFixed(1) + " points"), " more than the median."); }
+        else { add(p, el("span", "delta down", (-diff).toFixed(1) + " points"), " below the median: more routing would close the gap."); }
+        c.appendChild(p);
+      }
+    }
+    if (isNum(cmp.this_week_usd)) {
+      any = true;
+      var w = el("dl", "kv");
+      w.style.marginTop = "14px";
+      add(w, el("dt", null, "Last 7 days"), el("dd", "num", money(cmp.this_week_usd)));
+      add(w, el("dt", null, "The 7 days before"), el("dd", "num", isNum(cmp.last_week_usd) ? money(cmp.last_week_usd) : "—"));
+      c.appendChild(w);
+      if (isNum(cmp.week_change)) {
+        var q = el("p", "small");
+        var up = cmp.week_change >= 0;
+        add(q, "vs last week: ", el("span", "delta " + (up ? "up" : "down"), (up ? "+" : "−") + pct(Math.abs(cmp.week_change))));
+        c.appendChild(q);
+      }
+    }
+    if (!any) {
+      c.appendChild(el("p", "empty-note", "Comparisons appear after a week of measured savings, and the peer comparison once enough other users share their usage."));
+    }
+    var peers = isNum(cmp.peers) ? " from " + count(cmp.peers) + " similar users" : "";
+    c.appendChild(how("The peer figure is the median share saved over the last 30 days" + peers + ", worked out by our service from shared usage counts only. " +
+      "The weekly figures add up your measured daily savings for the last 7 days and the 7 days before.", true));
+  })();
+
+  // ---------------------------------------------------------------- served guidance
+  (function guidance() {
+    var c = document.getElementById("guidance");
+    var gd = D.guidance;
+    var head = el("div", "card-head"); add(head, el("h2", null, "Working guidance"));
+    if (gd && gd.channel) { head.appendChild(el("span", "pill", gd.channel === "beta" ? "Early access" : "Stable")); }
+    c.appendChild(head);
+    if (gd) {
+      var names = { plugin: "Guidance for your sessions", auto: "Guidance for unattended sessions", control: "Guidance for planning sessions" };
+      add(c, el("p", "small muted", (names[gd.role] || "Guidance in use") + ", kept up to date for you."));
+      var kv = el("dl", "kv");
+      if (gd.version) { add(kv, el("dt", null, "Version"), el("dd", "num", gd.version)); }
+      if (isNum(gd.items)) { add(kv, el("dt", null, "Practices in use"), el("dd", "num", count(gd.items))); }
+      if (gd.last_used) { add(kv, el("dt", null, "Last used"), el("dd", null, fmtDay(gd.last_used, true))); }
+      c.appendChild(kv);
+    } else {
+      c.appendChild(el("p", "empty-note", "Tested working practices are delivered to your sessions as they start. The version in use shows here after the first one."));
+    }
+    c.appendChild(how("Shows the guidance version your latest session received and how many practices it holds, read on this computer. The guidance text itself is never stored.", true));
+  })();
+
+  // ---------------------------------------------------------------- achievements
+  (function achievements() {
+    var box = document.getElementById("achievements");
+    var usd = measured ? sav.usd : 0;
+    var routed = isNum(routedTotal) ? routedTotal : 0;
+    var streak = act && isNum(act.streak_days) ? act.streak_days : 0;
+    var blocked = guard && isNum(guard.all_time) ? guard.all_time : 0;
+    var list = [
+      { name: "First routed task", got: routed >= 1, desc: "A task ran on a better-fit model", lock: "Unlocks when a subagent task is routed", have: routed, need: 1, icon: "m4 12h10|m10 6l6 6-6 6" },
+      { name: "First dollar", got: usd >= 1, desc: "$1 saved", lock: "Unlocks at $1 saved", have: usd, need: 1, icon: "m12 3v18|m16 7H10a3 3 0 000 6h4a3 3 0 010 6H7" },
+      { name: "Ten dollars", got: usd >= 10, desc: "$10 saved", lock: "Unlocks at $10 saved", have: usd, need: 10, icon: "m12 3v18|m16 7H10a3 3 0 000 6h4a3 3 0 010 6H7" },
+      { name: "Hundred dollars", got: usd >= 100, desc: "$100 saved", lock: "Unlocks at $100 saved", have: usd, need: 100, icon: "m12 3l2.6 5.6 6 .7-4.5 4.1 1.2 6L12 16.5 6.7 19.4l1.2-6L3.4 9.3l6-.7z" },
+      { name: "Ten routed", got: routed >= 10, desc: "10 tasks routed", lock: "Unlocks at 10 routed tasks", have: routed, need: 10, icon: "m4 7h10|m4 12h13|m4 17h16" },
+      { name: "Hundred routed", got: routed >= 100, desc: "100 tasks routed", lock: "Unlocks at 100 routed tasks", have: routed, need: 100, icon: "m4 7h10|m4 12h13|m4 17h16" },
+      { name: "Thousand routed", got: routed >= 1000, desc: "1,000 tasks routed", lock: "Unlocks at 1,000 routed tasks", have: routed, need: 1000, icon: "m4 7h10|m4 12h13|m4 17h16" },
+      { name: "Week streak", got: streak >= 7, desc: "Active 7 days in a row", lock: "Unlocks after 7 active days in a row", have: streak, need: 7, icon: "m12 3c3 4 5 6 5 10a5 5 0 01-10 0c0-2 1-3.5 2-4.5 0 2 1 3 2 3 0-3 0-5 1-8.5z" },
+      { name: "Close call", got: blocked >= 1, desc: "A risky command was stopped", lock: "Unlocks when the guard stops a risky command", have: blocked, need: 1, icon: "m12 3l8 3v6c0 5-3.5 8-8 9-4.5-1-8-4-8-9V6z" }
+    ];
+    var got = 0;
+    list.forEach(function (a) {
+      var c = el("div", "ach" + (a.got ? "" : " locked"));
+      var m = el("div", "medal"); m.appendChild(icon(a.got ? a.icon : "m7 11V8a5 5 0 0110 0v3|m5 11h14v10H5z")); c.appendChild(m);
+      add(c, el("div", "name", a.name), el("div", "desc", a.got ? a.desc : a.lock));
+      if (!a.got && a.need > 1) {
+        var pr = el("div", "prog"), bar = el("i");
+        bar.style.width = Math.max(0, Math.min(100, a.have / a.need * 100)) + "%";
+        pr.appendChild(bar);
+        pr.setAttribute("role", "progressbar");
+        pr.setAttribute("aria-valuemin", "0"); pr.setAttribute("aria-valuemax", String(a.need)); pr.setAttribute("aria-valuenow", String(Math.min(a.need, Math.round(a.have))));
+        c.appendChild(pr);
+      }
+      if (a.got) { got++; }
+      box.appendChild(c);
+    });
+    document.getElementById("ach-count").textContent = got + " of " + list.length + " unlocked";
+  })();
+
+  // ---------------------------------------------------------------- services
+  (function services() {
+    var c = document.getElementById("services");
+    var sv = D.services;
+    var names = { health: "Health checks", updates: "Updates", incidents: "Problem reports", metrics: "Usage sharing",
+      router: "Model routing", checkpoint: "Compaction advice", limits: "Usage limits" };
+    var hint = document.getElementById("svc-hint");
+    if (!sv) {
+      c.appendChild(el("p", "empty-note", "Service status shows here while agent-services is running."));
+      return;
+    }
+    var on = 0, total = 0;
+    Object.keys(sv).sort(function (a, b) { return (names[a] ? 0 : 1) - (names[b] ? 0 : 1) || a.localeCompare(b); }).forEach(function (k) {
+      var s = sv[k] || {};
+      total++;
+      var state = !s.on ? "off" : (s.healthy === false ? "warn" : "ok");
+      if (s.on) { on++; }
+      var chip = el("span", "chip " + state);
+      var label = names[k] || (k.charAt(0).toUpperCase() + k.slice(1).replace(/_/g, " "));
+      add(chip, el("span", "dot"), label, el("span", "st", state === "off" ? "off" : state === "warn" ? "paused" : "on"));
+      c.appendChild(chip);
+    });
+    hint.textContent = on + " of " + total + " on";
+    document.getElementById("svc-how").appendChild(how("Read from agent-services on this computer when this page was made. " +
+      "“Paused” means a service is switched on but is not reaching our service right now, for example while offline or signed out.", true));
+  })();
+
+  // ---------------------------------------------------------------- footer
+  (function footer() {
+    var f = document.getElementById("footer");
+    var parts = [];
+    if (act && act.first_seen) { parts.push("With you since " + fmtDay(act.first_seen, true)); }
+    if (typeof D.generated_at === "string") {
+      var t = new Date(D.generated_at);
+      if (!isNaN(t.getTime())) { parts.push("Updated " + t.toLocaleString("en-US", { month: "short", day: "numeric", hour: "numeric", minute: "2-digit" })); }
+    }
+    parts.push("This page shows counts and amounts only, never your work.");
+    f.textContent = parts.join(" · ");
+  })();
+})();
+</script>
+</body>
+</html>

@@ -1,6 +1,6 @@
 ---
 description: Sign in to agent-services, show its status, or sign out
-argument-hint: "[status | login <email> | code <email> <code> | logout | savings [preview | on | off | status] | connect <endpoint> <server key> [<next key>] e2e:<key> [e2e:<next key>]]"
+argument-hint: "[status | login <email> | code <email> <code> | logout | savings [preview | on | off | status | mail off | mail on] | estimate [preview] | connect <endpoint> <server key> [<next key>] e2e:<key> [e2e:<next key>]]"
 allowed-tools: Bash("${CLAUDE_PLUGIN_ROOT}/hooks/agent-core" *)
 ---
 
@@ -15,7 +15,21 @@ The user's arguments: `$ARGUMENTS`
 - `login <email>`: run `"${CLAUDE_PLUGIN_ROOT}/hooks/agent-core" login start --email <email>`. A sign-in code
   is mailed to that address; ask the user for it, then continue as for `code`.
 - `code <email> <code>`: run `"${CLAUDE_PLUGIN_ROOT}/hooks/agent-core" login finish --email <email> --code <code>`
-  and report whether the sign-in worked. The plugin turns on once the service accepts the sign-in.
+  and report whether the sign-in worked. The plugin turns on once the service accepts the sign-in. If it worked,
+  offer the estimate (next item) right after the sign-in confirmation.
+- `estimate`: first run `"${CLAUDE_PLUGIN_ROOT}/hooks/agent-core" estimate preview`, show its `body_text` and ask
+  the user, in one sentence, whether to send it to get their savings estimate; nothing is sent before a clear yes.
+  On yes, run `"${CLAUDE_PLUGIN_ROOT}/hooks/agent-core" estimate`. It reads this machine's Claude Code history,
+  sends that one numbers-only summary of it (token and dollar totals per model, dispatch counts per task type, compaction
+  counts, a session-length histogram; no text, paths, names or ids) and answers the expected monthly savings. Tell the
+  user in two or three plain sentences: the expected monthly saving as a range (`monthly_saved_usd` `low` to `high`,
+  about `value`, and `pct` as a share of the bill), the biggest lever (`biggest_lever`: `routing` is sending
+  lighter work to a cheaper model, `compaction` is compacting long sessions at the right moment, `index` is reading
+  an index instead of whole files), and that the status line will show the real savings as they accrue. If it
+  answers an error with a `detail` (`rate_limited`, `too_little_data`, `no_data`, `not_logged_in`), say the detail in
+  one sentence; a failed estimate never undoes the sign-in. `estimate preview`: run
+  `"${CLAUDE_PLUGIN_ROOT}/hooks/agent-core" estimate preview` and show the `body_text`: exactly what `estimate`
+  sends; nothing is sent.
 - `logout`: run `"${CLAUDE_PLUGIN_ROOT}/hooks/agent-core" logout` and confirm.
 - `savings`: run `"${CLAUDE_PLUGIN_ROOT}/hooks/agent-core" savings` and report what the services saved so
   far in one or two sentences. If it answers `service_off`, say that savings are worked out by the service from a daily
@@ -26,6 +40,9 @@ The user's arguments: `$ARGUMENTS`
   or more has been uploaded.
 - `savings off`: run `"${CLAUDE_PLUGIN_ROOT}/hooks/agent-core" savings off` and confirm that nothing more is
   uploaded. `savings status`: run `"${CLAUDE_PLUGIN_ROOT}/hooks/agent-core" savings status` and report it.
+- `savings mail off` / `savings mail on`: run `"${CLAUDE_PLUGIN_ROOT}/hooks/agent-core" savings mail off` (or
+  `savings mail on`) and confirm in one sentence that the weekly savings email is stopped (or will be sent again).
+  It changes only the email, not the usage upload.
 - `connect <endpoint> <server key> [<next key>] e2e:<key> [e2e:<next key>]`: run
   `"${CLAUDE_PLUGIN_ROOT}/hooks/agent-core" connect --endpoint <endpoint> --server-key <server key>
   --e2e-key <key>` (one `--server-key` per plain key and one `--e2e-key` per key given with the `e2e:` prefix, the

@@ -84,6 +84,20 @@ Linux:   /etc/claude-code/managed-settings.json
 
 Each user then signs in once with `/agent-services:agent-services login <email>`.
 
+## What you see
+
+Under the prompt, the plugin keeps one status line, refreshed when a session starts and after each turn:
+
+```
+agent-services · saved $12.40 (8.1%) since 10-30 · today: 5 routed, 1 compacted
+```
+
+The dollar figure and percentage come from the service (from the daily usage summaries, see below) and are refreshed
+at most every 30 minutes. Today's counts are local: subagents routed to a cheaper model, checkpoint compactions and
+indexed file reads. Before savings are turned on the line says `on` and shows the command that turns them on; before
+the first daily upload it says `savings show after the first daily upload`; when you are not signed in it shows the
+sign-in command. The line never shows model names, token counts, account details or file paths.
+
 ## See what you saved
 
 ```

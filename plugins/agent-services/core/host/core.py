@@ -20,7 +20,7 @@ from pathlib import Path
 
 HARNESSES = ("claude-code", "opencode", "codex", "cursor", "gemini", "other")
 KINDS = ("session_start", "dispatch", "dispatched", "step", "step_end", "pre_tool", "post_tool", "turn_end",
-         "prompt", "compaction", "clear", "session_end")
+         "prompt", "compaction", "clear", "session_end", "dashboard_published", "dashboard_denied")
 INJECT_POINTS = ("prompt", "pre_tool", "post_tool")
 GATE_RETRY_SECONDS = 300   # an unreachable server is tried again after this long (and at every session start)
 ANSWER_KEYS = ("action", "reason", "set", "context", "notice", "fallback")
@@ -244,6 +244,8 @@ def validate(event) -> None:
             _int_or_null(e, k)
         for k in ("cost_before", "cost_after"):
             _num_or_null(e, k)
+    elif kind == "dashboard_published":
+        _str_n(_req(e, "url"), "url", hi=500)
 
 
 def answer(action="allow", *, reason=None, set=None, context=None, notice=None, fallback=None) -> dict:  # noqa: A002
@@ -375,7 +377,7 @@ class _Session:
 
 class Core:
     def __init__(self, connector, data_dir, *, conclusions=None, savings=None, metrics=None, clock=None,
-                 sync=False, guard=None):
+                 sync=False, guard=None, status=None, dashboard=None):
         self.connector = connector
         self.guard = guard   # the served-content guard (host.confidential.Guard); the daemon always passes one
         self._guard_sessions: dict[tuple[str, str], dict] = {}   # (session, role) -> the guard's open() answer
@@ -394,10 +396,22 @@ class Core:
         self.metrics = metrics
         self.clock = clock or _SystemClock()
         self.sync = sync
+        if dashboard is None:
+            from host.dashboard_state import DashboardState   # host/dashboard_state.py: render throttle, state file
+            dashboard = DashboardState(data_dir, clock=lambda: self._now(), sync=sync)
+        self.dashboard = dashboard
         self._lock = threading.RLock()
         self._sessions: dict[str, _Session] = {}
         self._noticed: set[str] = set()     # sessions whose one notice was already given
         self._hello_at: float | None = None   # clock time of the last handshake attempt
+        if status is None:
+            from host.status_line import StatusLine
+            status = StatusLine(data_dir, metrics, gate=self._gate_state, clock=self.clock, sync=sync)
+        self.status_line = status   # services/status.txt, rewritten on session_start and turn_end
+        from host.receipts import Receipts
+        self.receipts = Receipts(self._now)   # per-action receipt lines in the answer's notice
+        from host.session_summary import SessionSummary
+        self._summary = SessionSummary()      # per-session counts for the clear / session_end notice line
 
     # ---------------- the shell gate (read through the connector)
     def _gated(self) -> bool:
@@ -479,10 +493,16 @@ class Core:
 
     # ---------------- events
     def handle(self, event) -> dict:
+        out = self._handle(event)
+        if event["kind"] in ("session_start", "turn_end"):
+            self._quiet(self.status_line.update)
+        return out
+
+    def _handle(self, event) -> dict:
         validate(event)
         kind = event["kind"]
         sid = event["session"]
-        if not self._gated():
+        if not self._gated() or kind.startswith("dashboard_"):   # local bookkeeping: answered whatever the gate
             return self._run(kind, event)
         hello = None
         if kind == "session_start":
@@ -512,17 +532,20 @@ class Core:
 
     def _run(self, kind, event) -> dict:
         try:
-            return getattr(self, "_on_" + kind)(event)
+            out = getattr(self, "_on_" + kind)(event)
         except Exception:  # noqa: BLE001 — a service or writer error never escapes
-            if kind == "dispatch":
-                return answer(fallback="pass_through")
-            return answer()
+            out = answer(fallback="pass_through") if kind == "dispatch" else answer()
+            return self._summary.after(self, kind, event, out)
+        out = self._quiet(self.receipts.stamp, event["session"], kind, out) or out
+        return self._summary.after(self, kind, event, out)
 
     def _drop_session(self, sid: str) -> None:
         """session_end while closed: local cleanup only."""
         with self._lock:
             self._sessions.pop(sid, None)
             self._noticed.discard(sid)
+        self.receipts.drop(sid)
+        self._summary.drop(sid)
         self._close_guard(sid)
 
     def _close_guard(self, sid: str) -> None:
@@ -691,6 +714,7 @@ class Core:
             return answer()
         if agent is not None:
             return answer()
+        self._quiet(self.dashboard.on_turn_end)   # returns at once; at most one render per 10 minutes
         ct, cw = e["context_tokens"], e["context_window"]
         pct = 100 * ct / cw if _is_int(ct) and _is_int(cw) and cw > 0 else 0
         with self._lock:
@@ -737,8 +761,9 @@ class Core:
                 and isinstance(main_model, str):
             cb, ca = e["cost_before"], e["cost_after"]
             usd = ca - cb if _is_num(cb) and _is_num(ca) else None
-            self._quiet(self.savings.compaction, e["session"], model=main_model, before=before, after=e["after"],
-                        window=window, threshold=e["threshold"], compact_usd=usd)
+            if self._quiet(self.savings.compaction, e["session"], model=main_model, before=before, after=e["after"],
+                           window=window, threshold=e["threshold"], compact_usd=usd) is not None:
+                self.receipts.note(e["session"], "compaction")
         else:
             self._quiet(self.savings.stop, e["session"])
         with self._lock:
@@ -751,6 +776,14 @@ class Core:
         self._quiet(self.savings.stop, e["session"])
         with self._lock:
             s.reset(self._now())
+        return answer()
+
+    def _on_dashboard_published(self, e):
+        self.dashboard.published(e["url"])
+        return answer()
+
+    def _on_dashboard_denied(self, e):
+        self.dashboard.denied()
         return answer()
 
     def _on_session_end(self, e):

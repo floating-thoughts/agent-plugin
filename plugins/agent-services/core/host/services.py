@@ -1640,7 +1640,9 @@ class Connector:
                      body_text=text, status=None, response_text=None, error=None, preview=True)
         return text
 
-    def call(self, method: str, path: str, body=None, *, kind=None) -> Result:
+    def call(self, method: str, path: str, body=None, *, kind=None, consent: bool = False) -> Result:
+        """consent=True lifts the service switch for the CONSENT_ROUTES only (one send the user asked for, such as
+        the plugin's `estimate`); the switch itself is never changed, so nothing else goes out with it."""
         p = path or ""
         sub0 = (p[len(PREFIX):] if p.startswith(PREFIX + "/") else p).partition("?")[0]
         if kind is None:
@@ -1661,10 +1663,10 @@ class Connector:
         service = route["x-inventory"]["service"]
         if self.offline:
             return fail("offline")
-        if not self.service_on(service) and not _ungated(route):
+        key = f"{route['method']} {route['path']}"
+        if not self.service_on(service) and not _ungated(route) and not (consent and key in CONSENT_ROUTES):
             return fail("service_off")
         signed = sub != "/health"
-        key = f"{route['method']} {route['path']}"
         if signed and self._plan_refused(key):   # out of plan -> nothing sent, no outbox line
             return fail("not_in_plan")
         if self._cooling():
@@ -1726,6 +1728,11 @@ class Connector:
             return Result(True, res.status, {"token": tok, "expires_at": exp_text}, None, None, res.attempts)
 
 
+# routes a caller may send once with consent=True while their service switch is off (Connector.call)
+CONSENT_ROUTES = frozenset({"POST /diagnostic/estimate"})
+ESTIMATE_ROUTE = "/diagnostic/estimate"
+
+
 def _throttled(status, code) -> bool:
     """The server is up but asks for less traffic: back off; this is never a block and never closes the gate."""
     return (status == 429 and code == "rate_limited") or (status == 503 and code == "busy")
@@ -1733,8 +1740,11 @@ def _throttled(status, code) -> bool:
 
 def _ungated(route: dict) -> bool:
     """Metrics routes that upload nothing stay usable with the metrics switch off: DELETE /metrics (the
-    "delete now" button, x-inventory retention) and GET /report (sends no content)."""
-    return route["x-inventory"]["service"] == "metrics" and route["method"] in ("GET", "DELETE")
+    "delete now" button, x-inventory retention), GET /report (sends no content) and POST /metrics/weekly-mail
+    (one setting the customer sends; stopping the weekly email is never blocked)."""
+    if route["x-inventory"]["service"] != "metrics":
+        return False
+    return route["method"] in ("GET", "DELETE") or (route["method"], route["path"]) == ("POST", "/metrics/weekly-mail")
 
 
 class _NetError(Exception):
@@ -1875,6 +1885,42 @@ class _DaemonServer(httpbase.ExclusiveHTTPServer):
     max_handlers = DAEMON_MAX_HANDLERS
 
 
+def local_status_body(conn, daemon_id) -> dict:
+    """The body of the daemon's GET /local/status (also what the dashboard render is given)."""
+    dep = dependency_error() if missing_dependency() else {}
+    reason = conn.gate_state().get("reason")
+    if dep and reason != "offline":
+        conn._set_gate("dependency")
+    elif not dep and reason == "dependency":
+        conn._set_gate("unknown")   # installed since: the next gate check runs a handshake
+    st = {**conn.status(), "notices": conn.notices(),
+          "services": {k: conn.service_on(k) for k in SERVICE_DEFAULTS}, "gate": conn.gate_state(),
+          "daemon": daemon_id}
+    if dep:
+        st.update(dep, notice=DEPENDENCY_NOTICE)
+    return st
+
+
+def dashboard_facts(conn, mtr, daemon_id):
+    """A callable for host.dashboard_state.DashboardState: (status, savings, report), each the body the daemon answers
+    on GET /local/status, /local/metrics/savings and /local/metrics/report (None when that part fails). Called from
+    the render thread at most once per render interval, so the two server calls run at most that often."""
+    from host import metrics as metrics_mod
+
+    def part(fn):
+        try:
+            return fn()
+        except Exception:  # noqa: BLE001 — a missing part leaves its block empty
+            return None
+
+    def facts():
+        status = part(lambda: local_status_body(conn, daemon_id))
+        savings = part(lambda: metrics_mod.local_route(mtr, "GET", "/local/metrics/savings", {})[1])
+        report = part(lambda: metrics_mod.local_route(mtr, "GET", "/local/metrics/report", {})[1])
+        return status, savings, report
+    return facts
+
+
 def serve(data_dir, keystore_kind="os", allow_plain_loopback=False) -> int:
     from http.server import BaseHTTPRequestHandler
 
@@ -1905,7 +1951,9 @@ def serve(data_dir, keystore_kind="os", allow_plain_loopback=False) -> int:
         from host import confidential
         guard = confidential.Guard(conn)
         from host.core import Core
-        core = Core(conn, data_dir, conclusions=concl, savings=sav, metrics=mtr, guard=guard)
+        from host.dashboard_state import DashboardState
+        dash = DashboardState(data_dir, facts=dashboard_facts(conn, mtr, daemon_id))
+        core = Core(conn, data_dir, conclusions=concl, savings=sav, metrics=mtr, guard=guard, dashboard=dash)
         tick_stop = threading.Event()
         threading.Thread(target=metrics_mod.tick_loop, args=(mtr, tick_stop), daemon=True).start()
 
@@ -1970,18 +2018,7 @@ def serve(data_dir, keystore_kind="os", allow_plain_loopback=False) -> int:
                 if method == "POST" and path in ("/core/event", "/core/ask"):
                     return self._core(path, body)
                 if method == "GET" and path == "/local/status":
-                    dep = dependency_error() if missing_dependency() else {}
-                    reason = conn.gate_state().get("reason")
-                    if dep and reason != "offline":
-                        conn._set_gate("dependency")
-                    elif not dep and reason == "dependency":
-                        conn._set_gate("unknown")   # installed since: the next gate check runs a handshake
-                    st = {**conn.status(), "notices": conn.notices(),
-                          "services": {k: conn.service_on(k) for k in SERVICE_DEFAULTS}, "gate": conn.gate_state(),
-                          "daemon": daemon_id}
-                    if dep:
-                        st.update(dep, notice=DEPENDENCY_NOTICE)
-                    return self._send(200, st)
+                    return self._send(200, local_status_body(conn, daemon_id))
                 if method == "POST" and path == "/local/call":
                     kind = body.get("kind")
                     if not isinstance(body.get("method"), str) or not isinstance(body.get("path"), str) \
@@ -2018,6 +2055,8 @@ def serve(data_dir, keystore_kind="os", allow_plain_loopback=False) -> int:
                     return self._send(*savings_events.local_route(sav, body))
                 if path.startswith("/local/metrics/"):
                     return self._send(*metrics_mod.local_route(mtr, method, path, body))
+                if method == "POST" and path == "/local/diagnostic/estimate":
+                    return self._estimate(body)
                 if path.startswith("/local/served"):
                     return self._served(method, path, body)
                 if method == "POST" and path == "/local/stop":
@@ -2056,6 +2095,21 @@ def serve(data_dir, keystore_kind="os", allow_plain_loopback=False) -> int:
                 except (ValueError, TypeError):
                     return self._send(400, {"error": "bad_request"})
                 return self._send(200, conn.served_settings())
+
+            def _estimate(self, body):
+                """The plugin's `estimate`: {"body": DiagEstimateRequest, "preview": bool}. preview -> the exact
+                text one send carries (an outbox preview line, nothing sent); else one send with the user's consent
+                (the metrics switch is left as it is)."""
+                req, preview = body.get("body"), body.get("preview", False)
+                if not isinstance(req, dict) or not isinstance(preview, bool) or set(body) - {"body", "preview"}:
+                    return self._send(400, {"error": "bad_request"})
+                if preview:
+                    text = conn.preview("POST", ESTIMATE_ROUTE, req)
+                    return self._send(200, {"body_text": text} if text is not None else {"error": "invalid_body"})
+                r = conn.call("POST", ESTIMATE_ROUTE, req, consent=True)
+                if r.ok and isinstance(r.body, dict):
+                    return self._send(200, {"ok": True, "estimate": r.body})
+                return self._send(200, {"error": (r.error or "failed") if not r.ok else "bad_response"})
 
             def _result(self, r: Result):
                 if r.ok:
@@ -2425,11 +2479,84 @@ def connect(data_dir, endpoint, server_keys, pins, e2e_keys=None, keystore=None)
     return ans, 0
 
 
+ESTIMATE_LEVERS = ("routing", "compaction", "index")   # the levers in the estimate's total ("scripts" is apart)
+ESTIMATE_DETAIL = {
+    "rate_limited": "The service answers only a few estimates per account each day; try again tomorrow "
+                    "(after midnight UTC).",
+    "too_little_data": "There is not enough Claude Code history yet: the estimate needs at least 7 days and 100 "
+                       "replies.",
+    "no_data": "No Claude Code history was found on this machine.",
+    "not_logged_in": "Sign in first; the estimate is for the signed-in account.",
+}
+
+
+def estimate_answer(est: dict) -> dict:
+    """The `estimate` answer from a DiagEstimate (service_api.json): monthly saved dollars and hours as
+    low/value/high, the share of the bill, each lever and the biggest one. The figures are the server's, unchanged."""
+    levers = {k: est[k] for k in ESTIMATE_LEVERS + ("scripts",) if isinstance(est.get(k), dict)}
+    ranked = [k for k in ESTIMATE_LEVERS if k in levers]
+    biggest = max(ranked, key=lambda k: levers[k]["usd"]["value"]) if ranked else None
+    total = est.get("total") or {}
+    return {"ok": True, "monthly_saved_usd": total.get("usd"), "monthly_saved_hours": total.get("hours"),
+            "pct": est.get("pct"), "biggest_lever": biggest, "levers": levers,
+            "api_usd_month": est.get("api_usd_month"), "window": est.get("window"),
+            "reference": est.get("reference"),
+            "note": "Monthly estimate from this machine's Claude Code history; scripts is a separate estimate, "
+                    "not in the total."}
+
+
+def run_estimate(data_dir, preview=False, projects=None, prices=None) -> tuple[dict, int]:
+    """`estimate [preview]`: the free diagnostic's one numbers-only aggregate (tools.diagnostic.estimate.
+    build_request over tools.diagnostic.facts.scan) for the signed-in account, sent once through the daemon
+    (POST /local/diagnostic/estimate). Signed out -> not_logged_in before anything is read. preview -> the exact body,
+    nothing sent."""
+    def fail(code, rc=1):
+        err = {"error": code}
+        if code in ESTIMATE_DETAIL:
+            err["detail"] = ESTIMATE_DETAIL[code]
+        return err, rc
+
+    try:
+        st, status = _local(data_dir, "GET", "/local/status")
+    except (OSError, ValueError, KeyError, http.client.HTTPException):
+        return fail("connector_unreachable")
+    if st != 200 or not isinstance(status, dict):
+        return fail(status.get("error") if isinstance(status, dict) and status.get("error") else f"http_{st}")
+    if not status.get("logged_in"):
+        return fail("not_logged_in")
+    from tools.diagnostic.cli import _prices, _projects_root
+    from tools.diagnostic.estimate import NoData, build_request
+    from tools.diagnostic.facts import scan
+    root = _projects_root(projects)
+    if not os.path.isdir(root):
+        return fail("no_data")
+    try:
+        req = build_request(scan(root, _prices(prices)))
+    except NoData:
+        return fail("no_data")
+    try:
+        st, body = _local(data_dir, "POST", "/local/diagnostic/estimate", {"body": req, "preview": bool(preview)})
+    except (OSError, ValueError, KeyError, http.client.HTTPException):
+        return fail("connector_unreachable")
+    if st != 200 or not isinstance(body, dict) or body.get("error") is not None:
+        return fail(body.get("error") if isinstance(body, dict) and body.get("error") else f"http_{st}")
+    if preview:
+        return {"body_text": body.get("body_text")}, 0
+    est = body.get("estimate")
+    if not isinstance(est, dict) or not isinstance(est.get("total"), dict):
+        return fail("bad_response")
+    try:
+        return estimate_answer(est), 0
+    except (KeyError, TypeError, ValueError):
+        return fail("bad_response")
+
+
 def main(argv=None) -> int:
     import argparse
     ap = argparse.ArgumentParser(prog="python -m host.services")
     ap.add_argument("cmd")
     ap.add_argument("arg", nargs="?")
+    ap.add_argument("arg2", nargs="?")
     ap.add_argument("--data-dir")
     ap.add_argument("--keystore", choices=("os", "memory"), default="os")
     ap.add_argument("--allow-plain-loopback", action="store_true")
@@ -2442,6 +2569,8 @@ def main(argv=None) -> int:
     ap.add_argument("--server-key", action="append", default=[])
     ap.add_argument("--e2e-key", action="append", default=[])
     ap.add_argument("--pin-sha256", action="append", default=[])
+    ap.add_argument("--projects")
+    ap.add_argument("--prices")
     a = ap.parse_args(argv)
     data_dir = Path(a.data_dir) if a.data_dir else default_data_dir()
     if a.keystore == "memory":
@@ -2470,6 +2599,10 @@ def main(argv=None) -> int:
         return out({"error": str(e)}, 1)
     if a.cmd == "ensure":
         return out(info)
+    if a.cmd == "estimate":
+        if a.arg not in (None, "preview"):
+            return out({"error": "bad_command"}, 1)
+        return out(*run_estimate(data_dir, a.arg == "preview", a.projects, a.prices))
     req = None
     if a.cmd == "login" and a.arg == "start" and a.email:
         req = ("POST", "/local/login/start", {"email": a.email})
@@ -2491,6 +2624,8 @@ def main(argv=None) -> int:
             req = ("GET", "/local/metrics/status", None)
         elif sub in ("preview", "on", "off"):
             req = ("POST", "/local/metrics/" + sub, {})
+        elif sub == "mail" and a.arg2 in ("on", "off"):   # the weekly savings email setting
+            req = ("POST", "/local/metrics/mail", {"on": a.arg2 == "on"})
     elif a.cmd == "served":
         if a.arg == "status":
             req = ("GET", "/local/served", None)

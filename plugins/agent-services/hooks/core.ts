@@ -8,6 +8,7 @@ import type { EngineInterface } from 'claude-code'
 
 export const CORE_TIMEOUT_MS = 3000
 export const ENSURE_TIMEOUT_MS = 30000
+export const STATUS_MAX = 120 // characters of the core's status line that register.ts shows
 export const ANSWER_KEYS = ['action', 'reason', 'set', 'context', 'notice', 'fallback'] as const
 const EVENT_PATH = '/core/event'
 const NONCE_HEADER = 'X-Connector-Nonce'

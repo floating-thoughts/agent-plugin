@@ -485,6 +485,14 @@
   },
   {
    "method": "POST",
+   "path": "/metrics/weekly-mail",
+   "request": {"type": "object", "properties": {"on": {"type": "boolean", "description": "false = stop the weekly savings email; true = send it again"}}, "required": ["on"], "additionalProperties": false},
+   "responses": {"200": {"type": "object", "properties": {"on": {"type": "boolean"}}, "required": ["on"], "additionalProperties": false}},
+   "errors": {"400": ["bad_json"], "403": ["not_in_plan"], "422": ["bad_request"]},
+   "x-inventory": {"service": "metrics", "purpose": "turn the weekly savings email on or off", "default": "off; sent only when the customer turns the weekly savings email off or back on (the email itself is on by default for customers who turned the usage upload on)", "retention": "the setting and the time it changed, kept while the account exists; audit record 13 months", "sent_to": ["our_service"]}
+  },
+  {
+   "method": "POST",
    "path": "/diagnostic/estimate",
    "request": {"$ref": "#/definitions/DiagEstimateRequest"},
    "responses": {"200": {"$ref": "#/definitions/DiagEstimate"}},
