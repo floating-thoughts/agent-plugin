@@ -6,7 +6,7 @@ export type ToolSpec = {
   input_schema: Record<string, unknown>
 }
 
-export const CONTRACT_SHA256 = "0022e2b0e3736fbd958588c33d029255a081e1c9023e8cd45588020929aa2a85"
+export const CONTRACT_SHA256 = "491aeb99f98d9939e697453ebe61dd6466089b10f576a011bcec0f21f4b45f02"
 
 export const API = "svc/1" as const
 export const PREFIX = "/svc/v1" as const
@@ -890,6 +890,27 @@ export const CONTRACT = {
      ],
      "additionalProperties": false
     }
+   },
+   {
+    "name": "setup_sharing",
+    "description": "Turn Codex usage sharing off, or read what it sends; call it only with the user's answer. Sharing (the token counts per model per day of the PostModelRequest hook) turns on only with the unchecked box on the Codex sign-in page. \"sharing off\" withdraws it (the counts are then dropped unread); \"sharing not_now\" leaves it as it is; \"sharing preview\" returns what the hook sends, what the server keeps and today's stored counts. Returns whether sharing is on.",
+    "inputSchema": {
+     "type": "object",
+     "properties": {
+      "command": {
+       "type": "string",
+       "enum": [
+        "sharing off",
+        "sharing not_now",
+        "sharing preview"
+       ]
+      }
+     },
+     "required": [
+      "command"
+     ],
+     "additionalProperties": false
+    }
    }
   ],
   "hook_tools": [
@@ -939,10 +960,42 @@ export const CONTRACT = {
      ],
      "additionalProperties": false
     }
+   },
+   {
+    "name": "hook_usage",
+    "description": "Codex PostModelRequest mcp_tool hook (Codex 0.167 and later), not listed in tools/list: called after each model request with {\"model\": \"${model}\", \"status\": \"${status}\", \"usage\": \"${token_usage}\"} (usage: input_tokens, cached_input_tokens, cache_write_input_tokens, output_tokens, reasoning_output_tokens, total_tokens; null counts as a request with no tokens). Always answers {} at once, before any store write. With Codex usage sharing on (consent codex_usage_upload, the company's savings record not off, not paused) the server adds input, cached input, output and reasoning tokens and one request to the account's daily sums per model (flushed every 60 s, kept 13 months); with it off the call is dropped unread and unlogged. Extra keys are allowed and ignored; no thread id is needed.",
+    "inputSchema": {
+     "type": "object",
+     "properties": {
+      "model": {
+       "type": "string",
+       "maxLength": 200
+      },
+      "status": {
+       "type": "string",
+       "maxLength": 64
+      },
+      "usage": {
+       "anyOf": [
+        {
+         "type": "object"
+        },
+        {
+         "type": "string",
+         "maxLength": 4000
+        },
+        {
+         "type": "null"
+        }
+       ]
+      }
+     },
+     "additionalProperties": true
+    }
    }
   ],
-  "hook_answer": "A hook tool's result is one text content holding Codex hook JSON: {\"hookSpecificOutput\": {\"hookEventName\", \"additionalContext\"}} for hook_session, {\"hookSpecificOutput\": {\"hookEventName\": \"PreToolUse\", \"permissionDecision\": \"deny\", \"permissionDecisionReason\"}} for a routed spawn, and {} (no decision, Codex goes on as without the hook) otherwise, also for bad input, a paused company, an inactive license or any server-side failure (the hooks fail open). Per-thread state (methods sent, spawns denied) is kept in process memory for 2 hours; nothing from a hook input is stored or logged.",
-  "gate": "Tools other than status, setup and setup_methods, and both hook tools, follow the same rules as the svc/1 routes they stand for (router_advice and hook_spawn: POST /router/decide; checkpoint_advice: POST /checkpoint/timing; lesson_lookup and hook_session: POST /served/fetch): a paused company, an inactive or missing license, or a plan without the route gives a tool error (isError true, the error code as text), and an empty hook answer."
+  "hook_answer": "A hook tool's result is one text content holding Codex hook JSON: {\"hookSpecificOutput\": {\"hookEventName\", \"additionalContext\"}} for hook_session, {\"hookSpecificOutput\": {\"hookEventName\": \"PreToolUse\", \"permissionDecision\": \"deny\", \"permissionDecisionReason\"}} for a routed spawn, and {} (no decision, Codex goes on as without the hook) otherwise, always for hook_usage, also for bad input, a paused company, an inactive license or any server-side failure (the hooks fail open). Per-thread state (methods sent, spawns denied) is kept in process memory for 2 hours; nothing from a hook input is stored or logged, except hook_usage's token counts, which with Codex usage sharing on become daily sums per account and model.",
+  "gate": "Tools other than status, setup, setup_methods and setup_sharing, and the hook tools hook_session and hook_spawn, follow the same rules as the svc/1 routes they stand for (router_advice and hook_spawn: POST /router/decide; checkpoint_advice: POST /checkpoint/timing; lesson_lookup and hook_session: POST /served/fetch): a paused company, an inactive or missing license, or a plan without the route gives a tool error (isError true, the error code as text), and an empty hook answer. hook_usage follows the Codex usage-sharing rules instead (see its description); setup_sharing works also while the company is paused."
  },
  "x-oauth": {
   "description": "OAuth 2.1 authorization server for the Codex MCP path (plaintext, unsigned; through the Cloudflare Tunnel). Issuer = limits unsubscribe_base_url; protected resource = <issuer>/mcp. One static public client, no dynamic registration.",
@@ -1186,6 +1239,134 @@ export const CONTRACT = {
      "type": "integer",
      "minimum": 0,
      "maximum": 1000000
+    },
+    "codex": {
+     "type": "object",
+     "description": "Codex use in the reported week, totals for the company only (never per person), from the members who share their Codex usage: requests and token counts per model, usd = an estimated cost at OpenAI's public list prices (null for a model without a public price: tokens only), prices_checked = the date the price table was read; spawn = the Codex subagent advice counts (advised = spawns refused with the advised model, followed = repeat spawns that went through). No saving is claimed for Codex. Sent only to a shell release 0.9.3 or later",
+     "properties": {
+      "requests": {
+       "type": "integer",
+       "minimum": 0,
+       "maximum": 1000000000000000
+      },
+      "people": {
+       "type": "integer",
+       "minimum": 0,
+       "maximum": 1000000
+      },
+      "usd": {
+       "anyOf": [
+        {
+         "type": "number",
+         "minimum": 0,
+         "maximum": 1000000000
+        },
+        {
+         "type": "null"
+        }
+       ]
+      },
+      "prices_checked": {
+       "anyOf": [
+        {
+         "type": "string",
+         "maxLength": 10
+        },
+        {
+         "type": "null"
+        }
+       ]
+      },
+      "models": {
+       "type": "array",
+       "maxItems": 10000,
+       "items": {
+        "type": "object",
+        "properties": {
+         "model": {
+          "type": "string",
+          "maxLength": 64
+         },
+         "requests": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 1000000000000000
+         },
+         "input_tokens": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 1000000000000000
+         },
+         "cached_input_tokens": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 1000000000000000
+         },
+         "output_tokens": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 1000000000000000
+         },
+         "reasoning_output_tokens": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 1000000000000000
+         },
+         "usd": {
+          "anyOf": [
+           {
+            "type": "number",
+            "minimum": 0,
+            "maximum": 1000000000
+           },
+           {
+            "type": "null"
+           }
+          ]
+         }
+        },
+        "required": [
+         "model",
+         "requests",
+         "input_tokens",
+         "cached_input_tokens",
+         "output_tokens",
+         "reasoning_output_tokens",
+         "usd"
+        ],
+        "additionalProperties": false
+       }
+      },
+      "spawn": {
+       "type": "object",
+       "properties": {
+        "advised": {
+         "type": "integer",
+         "minimum": 0,
+         "maximum": 1000000000000000
+        },
+        "followed": {
+         "type": "integer",
+         "minimum": 0,
+         "maximum": 1000000000000000
+        }
+       },
+       "required": [
+        "advised",
+        "followed"
+       ],
+       "additionalProperties": false
+      }
+     },
+     "required": [
+      "requests",
+      "people",
+      "usd",
+      "prices_checked",
+      "models",
+      "spawn"
+     ],
+     "additionalProperties": false
     }
    },
    "required": [

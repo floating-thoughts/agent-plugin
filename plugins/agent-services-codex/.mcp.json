@@ -1,0 +1,9 @@
+{
+  "mcpServers": {
+    "agent-services": {
+      "type": "http",
+      "url": "https://svc.yzcanadianholdings.com/mcp",
+      "oauth": { "clientId": "agent-services-codex" }
+    }
+  }
+}
