@@ -35,6 +35,7 @@
 //   installBand(on)               -> the ui.render hook on { component: 'AbovePrompt' }
 import type { EngineInterface } from 'claude-code'
 import { minUsd, money, type Timeline } from './board_facts'
+import { EXPLAIN, explainKeyOf } from './explain'
 import { ORG_PAUSED_LINE } from './org'
 import { panelLines, type Panel } from './panel'
 import { COMMAND, NAME, SEP, shortDay, todayText } from './status'
@@ -244,9 +245,35 @@ export function bandPanel(state: unknown): Panel | null {
   return isObj(state) && ['facts', 'wait', 'off'].includes(state.state) ? panelShown : null
 }
 
+let hoverOk: boolean | null = null // hoverEngine's answer for this process: the engine build does not change
+
+/** Whether this engine build draws the band's hover parts (a Box's `hover` and `position: "absolute"`): its version
+ *  (`$.session.version()`) is 2.1.317 or later, the oldest build whose engine types we read that document them. An
+ *  engine without that call, or an older one, gets today's tree: a tree the engine refuses would skip the whole
+ *  hook and empty the band. Never throws. */
+async function hoverEngine($: EngineInterface): Promise<boolean> {
+  if (hoverOk !== null) return hoverOk
+  try {
+    const v: Obj = (await $.session.version()) as Obj
+    const m = /^(\d+)\.(\d+)\.(\d+)/.exec(String(v?.base ?? v?.version ?? ''))
+    const n = m ? [Number(m[1]), Number(m[2]), Number(m[3])] : null
+    hoverOk = !!n && (n[0] !== 2 ? n[0] > 2 : n[1] !== 1 ? n[1] > 1 : n[2] >= 317)
+  } catch {
+    hoverOk = false
+  }
+  return hoverOk
+}
+
+// For the engine kit's tests (`claude plugin test`): its `$` has no session.version (measured 2026-11-14 with the
+// kits of 2.1.317, 2.1.319 and 2.1.321, while a real 2.1.321 session answers it), so a test sets the answer.
+export function setHoverForTest(v: boolean | null): void {
+  hoverOk = v
+}
+
 /** The band: one dim line above the prompt from the state bandSetter wrote, on the terminal and the desktop app alike,
  *  then the usage panel in three columns (Token | Quota and context | Time saved) and its disclosure; the event goes
- *  on only while a survey holds the band. */
+ *  on only while a survey holds the band. On the desktop app, with an engine build that draws them (hoverEngine), each
+ *  explained item (explain.ts) reveals its explanation while the pointer rests on it; elsewhere the tree is unchanged. */
 export function installBand(on: any): void {
   on('ui.render', { component: 'AbovePrompt' }, async ($: EngineInterface, e: Obj, next: (e: Obj) => unknown) => {
     if (e.props?.hasSurvey === true) return next(e)
@@ -254,12 +281,16 @@ export function installBand(on: any): void {
     const { Text, Box } = $.ui.resolve(e as any) as any
     const panel = bandPanel(shown)
     const isOnline = isObj(shown) ? String(shown.state) : 'starting' // the state name: connLine picks its word
+    // hv: the scope of an explained item (explain.ts key), only where the hover parts are drawn; {} otherwise, so the
+    // tree is today's
+    let hover = false
+    const hv = (k: string | null): Obj => (hover && k ? { hover: { scope: `x.${k}` } } : {})
     const topRow = (online: unknown) =>
       Box({
         key: 'top', flexDirection: 'row', justifyContent: 'space-between',
         children: [
-          Text({ key: 'pending', bold: pendingShown > 0, dimColor: pendingShown === 0, children: pendingLine(pendingShown) }),
-          Text({ key: 'conn', dimColor: true, children: connLine(online) }),
+          Text({ key: 'pending', bold: pendingShown > 0, dimColor: pendingShown === 0, ...hv('band-pending'), children: pendingLine(pendingShown) }),
+          Text({ key: 'conn', dimColor: true, ...hv('band-online'), children: connLine(online) }),
         ],
       })
     if (!panel) {
@@ -273,14 +304,16 @@ export function installBand(on: any): void {
     const cols = e.props?.bodyColumns
     const narrow = e.surface !== 'desktop' && typeof cols === 'number' && Number.isFinite(cols) && cols > 0 && cols < panelWidth(panel)
     if (typeof Box !== 'function' || narrow) return Text({ dimColor: true, children: [`${pendingLine(pendingShown)}${SEP}${connLine(true)}`, ...(setupOpen ? [line] : []), ...panelLines(panel).slice(0, -1)].join('\n') })
+    // the explanations (explain.ts) on the desktop app only, where a pointer rests and the engine build draws them
+    hover = e.surface === 'desktop' && (await hoverEngine($))
     const column = (c: Panel['columns'][number], i: number) =>
       Box({
         key: String(i), flexDirection: 'column', borderStyle: 'round', borderDimColor: true, paddingX: 1, flexShrink: 0, flexGrow: 1, // the four boxes share the full width
-        children: [Text({ key: 't', bold: true, children: c.title }), cells(c.rows, c.align)],
+        children: [Text({ key: 't', bold: true, ...hv(explainKeyOf(c.title)), children: c.title }), cells(c.rows, c.align, c.title)],
       })
     // one sub-column per cell position, so the figures line up in proportional fonts (the desktop app) as well:
     // labels flush left, figures flush right
-    const cells = (rows: string[][], align?: string[]) => {
+    const cells = (rows: string[][], align?: string[], title?: string) => {
       const n = Math.max(...rows.map((r) => r.length))
       return Box({
         key: 'cells', flexDirection: 'row', columnGap: 2,
@@ -291,10 +324,37 @@ export function installBand(on: any): void {
           children: rows.map((r, j) => Box({
             key: String(j), flexDirection: 'row',
             justifyContent: { left: 'flex-start', center: 'center', right: 'flex-end' }[align?.[k] ?? (k === 0 ? 'left' : 'right')] ?? 'flex-end',
+            ...hv(explainKeyOf(title, r[0])), // every cell of a row joins the row's group
             children: Text({ children: r[k] || ' ' }),
           })),
         })),
       })
+    }
+    // One card per explained item: hidden, shown over the band (absolute: nothing moves, the band keeps its height)
+    // while the pointer is on any member of the item's group. Band lines: 0 the top row, then the setup line when one
+    // is open, then the boxes (border, title, rows, border). A card covers the half away from its item: the bottom
+    // for an item in the upper half, else the top, so three lines of card leave the item in view.
+    const cards: Obj[] = []
+    if (hover) {
+      const s = setupOpen ? 1 : 0
+      const height = 1 + s + 3 + Math.max(0, ...panel.columns.map((c) => c.rows.length))
+      const seen = new Set<string>()
+      const card = (k: string | null, at: number) => {
+        if (!k || seen.has(k) || !EXPLAIN[k]) return
+        seen.add(k)
+        cards.push(Box({
+          key: `x.${k}`, position: 'absolute', left: 0, right: 0, ...(at < height / 2 ? { bottom: 0 } : { top: 0 }),
+          display: 'none', hover: { display: 'flex', scope: `x.${k}` }, backgroundColor: 'text', paddingX: 1,
+          children: Text({ color: 'inverseText', children: EXPLAIN[k] }),
+        }))
+      }
+      card('band-pending', 0)
+      card('band-online', 0)
+      if (setupOpen) card('band-setup', 1)
+      for (const c of panel.columns) {
+        card(explainKeyOf(c.title), 2 + s)
+        c.rows.forEach((r, j) => card(explainKeyOf(c.title, r[0]), 3 + s + j))
+      }
     }
     return Box({
       flexDirection: 'column',
@@ -302,8 +362,9 @@ export function installBand(on: any): void {
         // the top row: the open decisions on the left, the connection on the right; under it the line shows only an
         // open setup choice (the saved figure is in the panel's Quota column)
         topRow(true),
-        ...(setupOpen ? [Text({ key: 'line', dimColor: true, children: line })] : []),
+        ...(setupOpen ? [Text({ key: 'line', dimColor: true, ...hv('band-setup'), children: line })] : []),
         Box({ key: 'cols', flexDirection: 'row', columnGap: 2, flexWrap: 'nowrap', children: panel.columns.map(column) }),
+        ...cards,
       ],
     })
   }).catch(($: EngineInterface, e: Obj, next: (e: Obj) => unknown) => next(e))

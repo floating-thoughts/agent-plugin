@@ -186,6 +186,12 @@ footer { margin-top: 36px; color: var(--faint); font-size: 12.5px; text-align: c
 .week-lines li { margin: 6px 0; font-size: 14.5px; }
 .week-lines li:first-child { font-size: 18px; font-weight: 650; margin-top: 0; }
 .week-lines li.admin { margin-top: 14px; color: var(--muted); font-size: 13px; }
+/* explanations: one rule for every item with data-explain (its text is in EXPLAIN in the script) */
+.ex { text-decoration: underline dotted var(--faint); text-underline-offset: 3px; cursor: help; border-radius: 3px; -webkit-tap-highlight-color: transparent; }
+.ex:focus { outline: none; }
+.ex:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+.explain { position: fixed; z-index: 50; left: 0; top: 0; width: max-content; max-width: min(300px, calc(100vw - 24px)); padding: 9px 12px; border-radius: 10px; border: 1px solid var(--border); background: var(--surface); color: var(--text); box-shadow: var(--shadow); font-size: 13px; line-height: 1.45; font-weight: 400; text-align: left; letter-spacing: 0; text-transform: none; pointer-events: none; }
+.explain[hidden] { display: none; }
 </style>
 </head>
 <body>
@@ -206,7 +212,7 @@ footer { margin-top: 36px; color: var(--faint); font-size: 12.5px; text-align: c
   <div class="section-title"><h2>This week</h2><span class="muted small" id="week-hint"></span></div>
   <section class="card" id="weekly"></section>
 
-  <div class="section-title"><h2>Saved per day (est.)</h2><span class="muted small" id="chart-range"></span></div>
+  <div class="section-title"><h2 id="chart-title">Saved per day (est.)</h2><span class="muted small" id="chart-range"></span></div>
   <section class="card">
     <div class="chart-box" id="chart"></div>
     <div class="chart-readout" id="chart-readout"></div>
@@ -229,6 +235,7 @@ footer { margin-top: 36px; color: var(--faint); font-size: 12.5px; text-align: c
 
   <footer id="footer"></footer>
 </div>
+<div class="explain" id="explain" role="tooltip" hidden></div>
 
 <script type="application/json" id="data">null</script>
 <script>
@@ -296,11 +303,150 @@ footer { margin-top: 36px; color: var(--faint); font-size: 12.5px; text-align: c
     return s;
   }
 
+  // ---------------------------------------------------------------- explanations: one map, one mechanism
+  // An item a person may wonder about carries data-explain="<key>" (explainable below) and its text is in EXPLAIN,
+  // once. Each text says what is counted, what it is compared with, over which period, and that savings are estimates.
+  var EXPLAIN = {
+    "today-day": "The local day these lines cover: from midnight to now, on this computer's clock.",
+    "today-summary": "Counted on this computer since midnight: model replies from subagents that ran on a cheaper model, and memory cleanups (compactions). Replies, not tasks.",
+    "tl-cheaper": "The router decided that a subagent should run on a cheaper model. Lines in the same clock hour are grouped, and the number is how many decisions there were.",
+    "tl-model": "The router decided that a subagent should run on a model no cheaper than a top-tier one. No saving is counted for those runs.",
+    "tl-cleanup": "Our checkpoint advice said this was a good moment for a memory cleanup: compacting a long conversation to free up its context.",
+    "tl-tips": "Working guidance was fetched from our service for one of your sessions.",
+    "tl-upload": "The day's usage counts (totals and counts, no text from your work) were sent to our service for your savings figures.",
+    "tl-board": "A new version of your savings page was published to your private Artifact.",
+    "week-range": "The seven days the lines below cover: today and the six days before it.",
+    "wk-saved": "Your measured savings for the last seven days, today included: each day's routing, compaction and indexed-read savings added up. An estimate, not a bill.",
+    "wk-cleanups": "The same seven-day total as the line above. It is negative when the compactions cost more than the other savings added up.",
+    "wk-change": "The seven-day total above minus the total for the seven days before. Shown only when both periods have measured days.",
+    "wk-best": "The day with the largest measured saving in the last seven days. Shown when at least two days had a measured saving.",
+    "wk-lever": "Of the kinds of saving (for example routing or compaction), the one that added the most over the last seven days.",
+    "wk-peer": "Your measured savings as a share of what the same work would have cost. The other figure is the median share of all other users who share usage, over their last 30 days.",
+    "usage-tokens": "Tokens your sessions used and what that use would cost at API prices, for the week, the month and all time. Covers all your devices when our service has their figures.",
+    "usage-quota": "Week and 5-hour: share of your Claude usage limit used, and when it resets (as Claude Code reports it). Context: how full the current conversation is. Saved (est.): total measured savings.",
+    "usage-spent": "Your own time at the keyboard so far, estimated from the bytes you typed at a fixed typing speed (200 bytes a minute by default). Total so far, not only this week.",
+    "usage-agent": "Clock time with at least one agent working, so far. Gaps longer than the idle limit (10 minutes by default) count as idle; agents running at once count once. Total so far.",
+    "usage-concurrent": "Time saved by running agents side by side: their combined run time minus the clock time they covered. Total so far.",
+    "benefit-since": "The first day with measured savings. The savings figures in this section count from that day.",
+    "route-count": "Model replies from subagents that ran on the model the router chose for them. Replies, not tasks. The larger of this computer's count and our service's count is shown.",
+    "route-save": "Estimated saving on those replies: the same replies on a top-tier model (or the main conversation's model when that is cheaper), minus what they cost, at API prices.",
+    "comp-count": "Compactions of a long conversation at a checkpoint, counted when each one starts. The larger of this computer's count and our service's count is shown.",
+    "comp-save": "Estimated saving from compactions: the full conversation's cost carried forward, less the summary and the shorter conversation. One that cost more counts against the total.",
+    "idx-count": "Reads of part of a file found through the project index, instead of reading the whole file. The larger of this computer's count and our service's count is shown.",
+    "idx-save": "Estimated saving from those partial reads: each one is taken to skip half of its file, priced at the model's input rate.",
+    "guard-count": "Risky commands the command guard stopped, as recorded on this computer.",
+    "guard-save": "A stopped command has no dollar figure, so no saving is shown for it.",
+    "chart-title": "Estimated dollars saved on each day: routing, compaction and indexed-read savings added up. A bar below zero means that day's compactions cost more than its other savings.",
+    "chart-range": "The first and last day of the bars: between 7 and 30 days, ending today.",
+    "ach-routed-1": "Earned by your first subagent reply that ran on the model the router chose. Counts the routing figure above, which counts replies.",
+    "ach-dollar-1": "Earned once total measured savings reach $1.",
+    "ach-dollar-10": "Earned once total measured savings reach $10.",
+    "ach-dollar-100": "Earned once total measured savings reach $100.",
+    "ach-routed-10": "Earned when the routing figure above reaches 10 (replies, not tasks).",
+    "ach-routed-100": "Earned when the routing figure above reaches 100 (replies, not tasks).",
+    "ach-routed-1000": "Earned when the routing figure above reaches 1,000 (replies, not tasks).",
+    "ach-streak": "Earned after 7 active days in a row. A day counts when this computer recorded a routed reply, compaction or indexed read, or your measured savings include that day.",
+    "ach-guard": "Earned when the command guard stops a risky command and the stop is recorded here.",
+    "ach-count": "Achievements unlocked so far, out of those listed below.",
+    "svc-health": "A check that our service answers, sent without signing in. When this switch is off, the check is not made.",
+    "svc-updates": "Checks for a newer plugin version (it never updates itself) and fetches working guidance and toolbox packs from our service. When off, none of these requests are sent.",
+    "svc-incidents": "Off by default. When on, error reports may be sent to our service so that common problems can be grouped and fixed.",
+    "svc-metrics": "Sends usage counts (totals and counts, no text from your work) to our service for your savings figures. Your savings record choice must also be on.",
+    "svc-router": "Asks our service which model each subagent should run on. When off, no request is sent and no model is changed.",
+    "svc-checkpoint": "Asks our service whether a long conversation is due for a memory cleanup at a checkpoint. When off, that advice is not asked for.",
+    "svc-limits": "Asks our service how long a command may run without new output, its total time limit, and whether to start it in the background. When off, that advice is not asked for.",
+    "svc-count": "How many services are switched on, out of all listed below."
+  };
+  var tip = document.getElementById("explain");
+  var tipFor = null; // the item the tip is about
+  var pinned = false; // shown by a tap or click: stays until a tap elsewhere or Escape
+  var lastPointerAt = 0; // a focus that comes from a pointer does not open the tip
+  function explainable(node, key) {
+    if (!node || !key || !Object.prototype.hasOwnProperty.call(EXPLAIN, key)) { return node; }
+    node.setAttribute("data-explain", key);
+    node.setAttribute("tabindex", "0");
+    node.setAttribute("aria-describedby", "explain");
+    node.classList.add("ex");
+    return node;
+  }
+  function placeTip() {
+    if (!tipFor) { return; }
+    var r = tipFor.getBoundingClientRect(), w = tip.offsetWidth, h = tip.offsetHeight;
+    var vw = document.documentElement.clientWidth, vh = document.documentElement.clientHeight;
+    var left = Math.min(Math.max(12, r.left + r.width / 2 - w / 2), Math.max(12, vw - w - 12));
+    var top = r.top - h - 8;
+    if (top < 8) { top = r.bottom + 8; }
+    top = Math.min(Math.max(8, top), Math.max(8, vh - h - 8));
+    tip.style.left = left + "px";
+    tip.style.top = top + "px";
+  }
+  function showTip(node, tap) {
+    tipFor = node;
+    pinned = tap;
+    tip.textContent = EXPLAIN[node.getAttribute("data-explain")];
+    tip.hidden = false;
+    placeTip();
+  }
+  function hideTip() {
+    tipFor = null;
+    pinned = false;
+    tip.hidden = true;
+    tip.textContent = "";
+  }
+  function nearest(node) { return node && node.closest ? node.closest("[data-explain]") : null; }
+  document.addEventListener("pointerdown", function (e) {
+    lastPointerAt = Date.now();
+    var n = nearest(e.target);
+    if (!n) { hideTip(); return; }
+    if (n === tipFor && pinned) { hideTip(); return; }
+    showTip(n, true);
+  });
+  document.addEventListener("pointerover", function (e) {
+    var n = e.pointerType === "mouse" && !pinned ? nearest(e.target) : null;
+    if (n && n !== tipFor) { showTip(n, false); }
+  });
+  document.addEventListener("pointerout", function (e) {
+    if (e.pointerType !== "mouse" || pinned || !tipFor) { return; }
+    if (!e.relatedTarget || !tipFor.contains(e.relatedTarget)) { hideTip(); }
+  });
+  document.addEventListener("focusin", function (e) {
+    var n = Date.now() - lastPointerAt < 700 ? null : nearest(e.target);
+    if (n) { showTip(n, false); }
+  });
+  document.addEventListener("focusout", function (e) {
+    if (!pinned && tipFor && e.target === tipFor) { hideTip(); }
+  });
+  document.addEventListener("keydown", function (e) {
+    if (e.key === "Escape" || e.key === "Esc") { hideTip(); }
+  });
+  window.addEventListener("scroll", placeTip, { passive: true });
+  window.addEventListener("resize", placeTip);
+  // the weekly lines and the usage lines (board_facts.ts weeklyLines, panel.ts boardLines) by their fixed wording
+  function weekKey(t) {
+    if (/^In the last \d+ days agent-services saved you / .test(t) || /^Nothing was saved in the last /.test(t)) { return "wk-saved"; }
+    if (/^In the last \d+ days memory cleanups cost /.test(t)) { return "wk-cleanups"; }
+    if (/^That is /.test(t)) { return "wk-change"; }
+    if (/^Your best day was /.test(t)) { return "wk-best"; }
+    if (/^Most of it came from /.test(t)) { return "wk-lever"; }
+    if (/^You save /.test(t)) { return "wk-peer"; }
+    return null;
+  }
+  function usageKey(t) {
+    if (/^Token /.test(t)) { return "usage-tokens"; }
+    if (/^Quota/.test(t)) { return "usage-quota"; }
+    if (/^Spent: /.test(t)) { return "usage-spent"; }
+    if (/^Agent time: /.test(t)) { return "usage-agent"; }
+    if (/^Concurrent: /.test(t)) { return "usage-concurrent"; }
+    return null;
+  }
+
   // ---------------------------------------------------------------- the whole page, from one set of figures
   function draw(D) {
     if (!D || typeof D !== "object") { D = {}; }
     var old = document.querySelector(".wrap");
     old.parentNode.replaceChild(pristine.cloneNode(true), old);
+    hideTip();
+    explainable(document.getElementById("chart-title"), "chart-title");
 
     var sav = D.savings || null;
     var counts = D.counts || null;
@@ -404,6 +550,7 @@ footer { margin-top: 36px; color: var(--faint); font-size: 12.5px; text-align: c
       var n = Math.min(30, Math.max(7, Math.round((Date.parse(end) - Date.parse(rows[0].day)) / 86400000) + 1));
       for (var i = n - 1; i >= 0; i--) { days.push(addDays(end, -i)); }
       document.getElementById("chart-range").textContent = fmtDay(days[0]) + " – " + fmtDay(days[days.length - 1]);
+      explainable(document.getElementById("chart-range"), "chart-range");
       var vals = days.map(function (d) { return map[d] && isNum(map[d].usd) ? map[d].usd : 0; });
       var max = Math.max.apply(null, vals.concat([0]));
       var min = Math.min.apply(null, vals.concat([0]));
@@ -476,7 +623,7 @@ footer { margin-top: 36px; color: var(--faint); font-size: 12.5px; text-align: c
       var c = document.getElementById("timeline");
       var tl = D.timeline || null;
       var items = tl && Array.isArray(tl.items) ? tl.items : [];
-      if (tl && typeof tl.summary === "string") { c.appendChild(el("p", "small", tl.summary)); }
+      if (tl && typeof tl.summary === "string") { c.appendChild(explainable(el("p", "small", tl.summary), "today-summary")); }
       if (items.length) {
         var ul = el("ul", "tl");
         if (tl && tl.summary) { ul.style.marginTop = "12px"; }
@@ -485,14 +632,16 @@ footer { margin-top: 36px; color: var(--faint); font-size: 12.5px; text-align: c
           var li = el("li");
           var t = new Date(it.at);
           var when = isNaN(t.getTime()) ? "" : t.toLocaleTimeString("en-US", { hour: "numeric", minute: "2-digit" });
-          add(li, el("span", "when", when), el("span", "what", it.text));
+          add(li, el("span", "when", when), explainable(el("span", "what", it.text), "tl-" + it.kind));
           ul.appendChild(li);
         });
         c.appendChild(ul);
       } else if (!tl || !tl.summary) {
         c.appendChild(el("p", "empty-note", "Nothing yet today. What agent-services does for you shows up here as you work."));
       }
-      document.getElementById("today-hint").textContent = D.today ? fmtDay(D.today, true) : "";
+      var th = document.getElementById("today-hint");
+      th.textContent = D.today ? fmtDay(D.today, true) : "";
+      explainable(th, th.textContent ? "today-day" : null);
     })();
 
     // ---------------------------------------------------------------- this week (board_facts.ts weeklyOf)
@@ -503,7 +652,7 @@ footer { margin-top: 36px; color: var(--faint); font-size: 12.5px; text-align: c
       var ul = el("ul", "week-lines");
       lines.forEach(function (t) {
         if (typeof t !== "string") { return; }
-        ul.appendChild(el("li", t.indexOf("company admin") >= 0 ? "admin" : null, t));
+        ul.appendChild(explainable(el("li", t.indexOf("company admin") >= 0 ? "admin" : null, t), weekKey(t)));
       });
       if (!ul.firstChild) { ul.appendChild(el("li", null, "Your weekly summary appears after your first full day of measured savings.")); }
       c.appendChild(ul);
@@ -513,12 +662,13 @@ footer { margin-top: 36px; color: var(--faint); font-size: 12.5px; text-align: c
         var ul2 = el("ul", "week-lines usage-lines");
         usage.forEach(function (t, i) {
           if (typeof t !== "string") { return; }
-          ul2.appendChild(el("li", i === usage.length - 1 ? "admin" : null, t));
+          ul2.appendChild(explainable(el("li", i === usage.length - 1 ? "admin" : null, t), usageKey(t)));
         });
         c.appendChild(ul2);
       }
       if (w && typeof D.today === "string" && /^\d{4}-\d{2}-\d{2}$/.test(D.today)) {
         document.getElementById("week-hint").textContent = fmtDay(addDays(D.today, -((w.days || 7) - 1))) + " – " + fmtDay(D.today);
+        explainable(document.getElementById("week-hint"), "week-range");
       }
     })();
 
@@ -529,39 +679,40 @@ footer { margin-top: 36px; color: var(--faint); font-size: 12.5px; text-align: c
       function card(o) {
         var c = el("article", "card benefit");
         var ic = el("div", "icon"); ic.appendChild(icon(o.icon)); c.appendChild(ic);
-        add(c, el("h2", null, o.title));
-        var big = el("div", "big num", o.value);
+        add(c, explainable(el("h2", null, o.title), o.count));
+        var big = explainable(el("div", "big num", o.value), o.count);
         if (o.unit && o.value !== "—") { add(big, el("span", "unit", o.unit)); }
         add(c, big);
         if (o.today !== null && o.today !== undefined) {
-          var ln = el("div", "line"); add(ln, el("strong", "num", count(o.today)), " today"); add(c, ln);
+          var ln = explainable(el("div", "line"), o.count); add(ln, el("strong", "num", count(o.today)), " today"); add(c, ln);
         }
-        if (o.extra) { add(c, el("div", "line", o.extra)); }
-        add(c, el("div", "save" + (o.usd === null ? " none" : ""), o.usd === null ? o.noUsd : money(o.usd) + " saved"));
+        if (o.extra) { add(c, explainable(el("div", "line", o.extra), o.count)); }
+        add(c, explainable(el("div", "save" + (o.usd === null ? " none" : ""), o.usd === null ? o.noUsd : money(o.usd) + " saved"), o.save));
         add(c, how(o.how, o.measured));
         g.appendChild(c);
       }
       var lv = function (k) { return levers[k] && isNum(levers[k].usd) ? levers[k].usd : null; };
       var tc = function (k) { return today && isNum(today[k]) ? today[k] : null; };
-      var localNote = counts ? " The counts are taken on this computer from the last 60 days of activity." : "";
+      var localNote = counts ? " The counts are taken on this computer from the last 90 days of activity." : "";
       var routeRuns = leverRuns("route", "routed"), compRuns = leverRuns("compact", "compactions"), idxRuns = leverRuns("index", "indexed_reads");
-      card({ title: "Cheaper-model routing", icon: "m4 12h10|m10 6l6 6-6 6|m20 4v16", value: count(routeRuns), unit: "tasks",
+      card({ title: "Cheaper-model routing", icon: "m4 12h10|m10 6l6 6-6 6|m20 4v16", value: count(routeRuns), unit: "tasks", count: "route-count", save: "route-save",
         today: tc("routed"), usd: lv("route"), noUsd: "Savings appear once measured", measured: true,
         how: "Counts each subagent task sent to a model that fits the job instead of a top-tier one. Savings are compared with running every subagent on a top-tier model." + localNote });
-      card({ title: "Context compaction", icon: "m4 6h16|m7 12h10|m10 18h4", value: count(compRuns), unit: "compactions",
+      card({ title: "Context compaction", icon: "m4 6h16|m7 12h10|m10 18h4", value: count(compRuns), unit: "compactions", count: "comp-count", save: "comp-save",
         today: tc("compactions"), usd: lv("compact"), noUsd: "Savings appear once measured", measured: true,
         how: "Counts each time a long conversation was compacted at a good moment. Savings are compared with carrying the full conversation forward; a compaction that cost more than it saved counts against the total." + localNote });
-      card({ title: "Indexed reads", icon: "m5 4h10l4 4v12H5z|m9 12h6|m9 16h4", value: count(idxRuns), unit: "reads",
+      card({ title: "Indexed reads", icon: "m5 4h10l4 4v12H5z|m9 12h6|m9 16h4", value: count(idxRuns), unit: "reads", count: "idx-count", save: "idx-save",
         today: tc("indexed_reads"), usd: lv("index"), noUsd: "Savings appear once measured", measured: true,
         how: "Counts each lookup answered from the project index instead of reading the whole file. Savings are compared with reading each whole file." + localNote });
-      card({ title: "Safety guard", icon: "m12 3l8 3v6c0 5-3.5 8-8 9-4.5-1-8-4-8-9V6z|m9 12l2 2 4-4",
-        value: guard ? count(guard.all_time) : "—", unit: guard ? "blocked" : "",
+      // shown only once guard stops are recorded (this build records none): no card that can never change
+      if (guard) card({ title: "Safety guard", icon: "m12 3l8 3v6c0 5-3.5 8-8 9-4.5-1-8-4-8-9V6z|m9 12l2 2 4-4",
+        value: guard ? count(guard.all_time) : "—", unit: guard ? "blocked" : "", count: "guard-count", save: "guard-save",
         today: guard ? guard.today : null, usd: null,
         noUsd: guard ? (guard.all_time ? "Risky commands stopped before they ran" : "Nothing risky so far") : "Watching every command",
         extra: guard ? null : "No risky command has been recorded yet.", measured: true,
         how: "Counted on this computer each time a risky command was stopped before it ran. Prevented damage has no dollar figure, so none is shown." });
       var hint = document.getElementById("benefit-hint");
-      if (measured && sav.first_day) { hint.textContent = "Since " + fmtDay(sav.first_day, true); }
+      if (measured && sav.first_day) { hint.textContent = "Since " + fmtDay(sav.first_day, true); explainable(hint, "benefit-since"); }
     })();
 
     // ---------------------------------------------------------------- comparison
@@ -646,19 +797,20 @@ footer { margin-top: 36px; color: var(--faint); font-size: 12.5px; text-align: c
       var streak = act && isNum(act.streak_days) ? act.streak_days : 0;
       var blocked = guard && isNum(guard.all_time) ? guard.all_time : 0;
       var list = [
-        { name: "First routed task", got: routed >= 1, desc: "A task ran on a better-fit model", lock: "Unlocks when a subagent task is routed", have: routed, need: 1, icon: "m4 12h10|m10 6l6 6-6 6" },
-        { name: "First dollar", got: usd >= 1, desc: "$1 saved", lock: "Unlocks at $1 saved", have: usd, need: 1, icon: "m12 3v18|m16 7H10a3 3 0 000 6h4a3 3 0 010 6H7" },
-        { name: "Ten dollars", got: usd >= 10, desc: "$10 saved", lock: "Unlocks at $10 saved", have: usd, need: 10, icon: "m12 3v18|m16 7H10a3 3 0 000 6h4a3 3 0 010 6H7" },
-        { name: "Hundred dollars", got: usd >= 100, desc: "$100 saved", lock: "Unlocks at $100 saved", have: usd, need: 100, icon: "m12 3l2.6 5.6 6 .7-4.5 4.1 1.2 6L12 16.5 6.7 19.4l1.2-6L3.4 9.3l6-.7z" },
-        { name: "Ten routed", got: routed >= 10, desc: "10 tasks routed", lock: "Unlocks at 10 routed tasks", have: routed, need: 10, icon: "m4 7h10|m4 12h13|m4 17h16" },
-        { name: "Hundred routed", got: routed >= 100, desc: "100 tasks routed", lock: "Unlocks at 100 routed tasks", have: routed, need: 100, icon: "m4 7h10|m4 12h13|m4 17h16" },
-        { name: "Thousand routed", got: routed >= 1000, desc: "1,000 tasks routed", lock: "Unlocks at 1,000 routed tasks", have: routed, need: 1000, icon: "m4 7h10|m4 12h13|m4 17h16" },
-        { name: "Week streak", got: streak >= 7, desc: "Active 7 days in a row", lock: "Unlocks after 7 active days in a row", have: streak, need: 7, icon: "m12 3c3 4 5 6 5 10a5 5 0 01-10 0c0-2 1-3.5 2-4.5 0 2 1 3 2 3 0-3 0-5 1-8.5z" },
-        { name: "Close call", got: blocked >= 1, desc: "A risky command was stopped", lock: "Unlocks when the guard stops a risky command", have: blocked, need: 1, icon: "m12 3l8 3v6c0 5-3.5 8-8 9-4.5-1-8-4-8-9V6z" }
+        { ex: "ach-routed-1", name: "First routed task", got: routed >= 1, desc: "A task ran on a better-fit model", lock: "Unlocks when a subagent task is routed", have: routed, need: 1, icon: "m4 12h10|m10 6l6 6-6 6" },
+        { ex: "ach-dollar-1", name: "First dollar", got: usd >= 1, desc: "$1 saved", lock: "Unlocks at $1 saved", have: usd, need: 1, icon: "m12 3v18|m16 7H10a3 3 0 000 6h4a3 3 0 010 6H7" },
+        { ex: "ach-dollar-10", name: "Ten dollars", got: usd >= 10, desc: "$10 saved", lock: "Unlocks at $10 saved", have: usd, need: 10, icon: "m12 3v18|m16 7H10a3 3 0 000 6h4a3 3 0 010 6H7" },
+        { ex: "ach-dollar-100", name: "Hundred dollars", got: usd >= 100, desc: "$100 saved", lock: "Unlocks at $100 saved", have: usd, need: 100, icon: "m12 3l2.6 5.6 6 .7-4.5 4.1 1.2 6L12 16.5 6.7 19.4l1.2-6L3.4 9.3l6-.7z" },
+        { ex: "ach-routed-10", name: "Ten routed", got: routed >= 10, desc: "10 tasks routed", lock: "Unlocks at 10 routed tasks", have: routed, need: 10, icon: "m4 7h10|m4 12h13|m4 17h16" },
+        { ex: "ach-routed-100", name: "Hundred routed", got: routed >= 100, desc: "100 tasks routed", lock: "Unlocks at 100 routed tasks", have: routed, need: 100, icon: "m4 7h10|m4 12h13|m4 17h16" },
+        { ex: "ach-routed-1000", name: "Thousand routed", got: routed >= 1000, desc: "1,000 tasks routed", lock: "Unlocks at 1,000 routed tasks", have: routed, need: 1000, icon: "m4 7h10|m4 12h13|m4 17h16" },
+        { ex: "ach-streak", name: "Week streak", got: streak >= 7, desc: "Active 7 days in a row", lock: "Unlocks after 7 active days in a row", have: streak, need: 7, icon: "m12 3c3 4 5 6 5 10a5 5 0 01-10 0c0-2 1-3.5 2-4.5 0 2 1 3 2 3 0-3 0-5 1-8.5z" },
+        { ex: "ach-guard", name: "Close call", got: blocked >= 1, desc: "A risky command was stopped", lock: "Unlocks when the guard stops a risky command", have: blocked, need: 1, icon: "m12 3l8 3v6c0 5-3.5 8-8 9-4.5-1-8-4-8-9V6z" }
       ];
+      if (!guard) list = list.filter(function (a) { return a.ex !== "ach-guard"; });
       var got = 0;
       list.forEach(function (a) {
-        var c = el("div", "ach" + (a.got ? "" : " locked"));
+        var c = explainable(el("div", "ach" + (a.got ? "" : " locked")), a.ex);
         var m = el("div", "medal"); m.appendChild(icon(a.got ? a.icon : "m7 11V8a5 5 0 0110 0v3|m5 11h14v10H5z")); c.appendChild(m);
         add(c, el("div", "name", a.name), el("div", "desc", a.got ? a.desc : a.lock));
         if (!a.got && a.need > 1) {
@@ -672,7 +824,7 @@ footer { margin-top: 36px; color: var(--faint); font-size: 12.5px; text-align: c
         if (a.got) { got++; }
         box.appendChild(c);
       });
-      document.getElementById("ach-count").textContent = got + " of " + list.length + " unlocked";
+      var ac = document.getElementById("ach-count"); ac.textContent = got + " of " + list.length + " unlocked"; explainable(ac, "ach-count");
     })();
 
     // ---------------------------------------------------------------- services
@@ -687,17 +839,19 @@ footer { margin-top: 36px; color: var(--faint); font-size: 12.5px; text-align: c
         return;
       }
       var on = 0, total = 0;
-      Object.keys(sv).sort(function (a, b) { return (names[a] ? 0 : 1) - (names[b] ? 0 : 1) || a.localeCompare(b); }).forEach(function (k) {
+      // "incidents" is not listed: no plugin code sends problem reports yet, so its switch would change nothing
+      Object.keys(sv).filter(function (k) { return k !== "incidents"; }).sort(function (a, b) { return (names[a] ? 0 : 1) - (names[b] ? 0 : 1) || a.localeCompare(b); }).forEach(function (k) {
         var s = sv[k] || {};
         total++;
         var state = !s.on ? "off" : (s.healthy === false ? "warn" : "ok");
         if (s.on) { on++; }
-        var chip = el("span", "chip " + state);
+        var chip = explainable(el("span", "chip " + state), "svc-" + k);
         var label = names[k] || (k.charAt(0).toUpperCase() + k.slice(1).replace(/_/g, " "));
         add(chip, el("span", "dot"), label, el("span", "st", state === "off" ? "off" : state === "warn" ? "paused" : "on"));
         c.appendChild(chip);
       });
       hint.textContent = on + " of " + total + " on";
+      explainable(hint, "svc-count");
       document.getElementById("svc-how").appendChild(how("Read from agent-services on this computer when this page was made. " +
         "“Paused” means a service is switched on but is not reaching our service right now, for example while offline or signed out.", true));
     })();

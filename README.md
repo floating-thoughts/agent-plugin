@@ -55,8 +55,9 @@ Then sign in inside Claude Code:
 /agent-services login <email>
 ```
 
-A one-time code is mailed to you. Paste it as your next message: the plugin takes it before it reaches Claude and
-finishes the sign-in, and the code works for 10 minutes in any session. Never type it on the command line (typed
+A one-time code is mailed to you. Type it in the dialog that opens. Paste it as your next message if the dialog is
+closed or you chose "Enter the code": the plugin takes it before it reaches Claude and finishes the sign-in, and the
+code works for 10 minutes in any session. Never type it on the command line (typed
 command lines are kept in the prompt history). Then `/agent-services setup` asks the setup questions below.
 
 ### 2. A team working in one project
