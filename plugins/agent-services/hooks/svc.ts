@@ -21,6 +21,7 @@ import {
   CREDENTIAL_KEYS,
   getText,
   KEYS,
+  readText,
   safeDelete,
   safeGet,
   safeSet,
@@ -257,7 +258,7 @@ export class Svc {
   private refused = new Map<string, string>()
   private notes: { ts: number; code: string; text: string }[] = []
   private lastNotice = new Map<string, number>()
-  private authCache: { at: number; value: AuthState } | null = null
+  private authCache: { at: number; value: AuthState; unsure?: boolean } | null = null
   private pauseCode = 'org_paused'
   private ready: Promise<void> | null = null
   private claude: string | null = null
@@ -436,10 +437,14 @@ export class Svc {
     if (!fresh && this.authCache && now - this.authCache.at < AUTH_STATE_TTL_MS) return this.authCache.value
     await this.init()
     let value: AuthState = 'ok'
-    const tok = await getText(this.kv, KEYS.token)
-    const acc = await getText(this.kv, KEYS.accountId)
+    const t = await readText(this.kv, KEYS.token)
+    const a = await readText(this.kv, KEYS.accountId)
+    const tok = t.text
+    const acc = a.text
     const exp = num(await safeGet(this.kv, KEYS.expiresAt))
-    if (!tok || !acc || (exp !== null && now / 1000 >= exp)) value = 'login'
+    const expired = exp !== null && now / 1000 >= exp
+    const unsure = (t.failed || a.failed) && !expired
+    if (!tok || !acc || expired) value = 'login'
     else {
       const pause = await this.pauseBlock()
       const code = pause ? pause.code : await this.blocked()
@@ -451,8 +456,12 @@ export class Svc {
         if (pause.until !== null && now >= pause.until && !this.helloP) void this.handshake('background')
       }
     }
-    this.authCache = { at: now, value }
+    this.authCache = { at: now, value, unsure: value === 'login' && unsure }
     return value
+  }
+
+  authUnsure(): boolean {
+    return this.authCache?.unsure === true
   }
 
   async authLine(fresh = false): Promise<string | null> {

@@ -7,7 +7,7 @@ import { getJob, listJobs, setJobStatus, type Job } from './jobs'
 import { relNum, relText } from './reliability'
 import { stallProgress } from './stall'
 import { signedIn } from './subagents'
-import { projectDir } from './task_state_io'
+import { jobsDir } from './task_state_io'
 import { toolInput } from './tools'
 
 type Obj = Record<string, any>
@@ -299,7 +299,7 @@ export function acceptanceOf(prompt: unknown): string[] {
 let chain: Promise<unknown> = Promise.resolve()
 
 async function storePath($: EngineInterface, write = false): Promise<string | null> {
-  const dir = await projectDir($)
+  const dir = await jobsDir($)
   if (dir === null) return null
   const root = dir.replace(/[\\/]+$/, '')
   if (write) await ensureAgentIgnore($, root)

@@ -51,7 +51,12 @@ const arr = (v: unknown): any[] => (Array.isArray(v) ? v : [])
 const isObj = (v: unknown): v is Obj => !!v && typeof v === 'object' && !Array.isArray(v)
 const later = (a: string | null | undefined, b: string | null | undefined): boolean => String(a ?? '') > String(b ?? '')
 const oneLine = (s: unknown): string => String(s ?? '').replace(/\s+/g, ' ').trim()
-const clip = (s: string, max: number): string => (s.length > max ? `${s.slice(0, max - 3)}...` : s)
+const clip = (s: string, max: number): string => {
+  if (s.length <= max) return s
+  let n = Math.max(0, max - 3)
+  if (n > 0 && /[\uD800-\uDBFF]/.test(s.charAt(n - 1))) n -= 1
+  return `${s.slice(0, n)}...`
+}
 const isOpen = (t: Task): boolean => t.status !== 'delivered' && t.status !== 'dropped'
 
 export function isWriteOp(op: unknown): boolean {
@@ -284,17 +289,25 @@ export function resumeNote(s: TaskState, opts: { mdPath: string; since?: string 
   const head = 'agent-services task state (a plugin note from this project\'s .agent/task-state.json, not the user\'s words):'
   const foot = `Full state: ${opts.mdPath}`
   const budget = 1500 - foot.length - 1
+  const more = (n: number) => `\n- and ${n} more`
+  const room = more(9999).length
   let out = head
   for (const [title, lines] of sections) {
     if (!lines.length) continue
-    if (out.length + title.length + 1 > budget) break
+    if (out.length + title.length + 1 + room > budget) break
     out += `\n${title}`
+    let shown = 0
     for (const l of lines) {
-      if (out.length + l.length + 1 > budget) break
+      if (out.length + l.length + 1 + room > budget) break
       out += `\n${l}`
+      shown++
+    }
+    if (shown < lines.length) {
+      out += more(lines.length - shown)
+      break
     }
   }
-  return `${out}\n${foot}`.slice(0, 1500)
+  return `${out}\n${foot}`
 }
 
 

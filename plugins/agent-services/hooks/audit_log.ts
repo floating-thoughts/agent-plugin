@@ -2,7 +2,7 @@ import type { EngineInterface } from 'claude-code'
 import { ensureAgentIgnore } from './agent_files'
 import { concat, hex, utf8 } from './e2e'
 import { sha256 } from './noble.js'
-import { projectDir } from './task_state_io'
+import { jobsDir } from './task_state_io'
 
 type Obj = Record<string, any>
 
@@ -17,10 +17,10 @@ export const AUDIT_GENESIS = '0'.repeat(64)
 export const AUDIT_RULES: readonly string[] = [
   'acceptance_lock', 'brief_contract', 'budget_bytes', 'budget_edits', 'budget_files', 'command_guard',
   'dispatch_cycle', 'dispatch_depth', 'other', 'ownership', 'plan_hold', 'project_lock',
-  'release_hold', 'service_check', 'steps_claim', 'steps_gate', 'test_lock', 'usage_line', 'webmail',
+  'release_hold', 'service_check', 'steps_claim', 'steps_gate', 'test_lock', 'test_unlock', 'usage_line', 'webmail',
 ]
 
-export type AuditKind = 'refuse' | 'hold'
+export type AuditKind = 'refuse' | 'hold' | 'grant'
 export type AuditEntry = { at: number; session: string; agent: string | null; rule: string; kind: AuditKind; tool: string; input: unknown }
 export type AuditHead = { n: number; m: string; n0: number; p0: string; gone?: number }
 export type AuditLine = { v: 1; n: number; t: string; s: string; a: string; r: string; k: string; tool: string; in: string; p: string; m: string }
@@ -60,7 +60,7 @@ export function auditInputHash(key: Uint8Array, input: unknown): string {
 
 export function auditLine(key: Uint8Array, n: number, prev: string, e: AuditEntry): string {
   const rule = AUDIT_RULES.includes(e.rule) ? e.rule : 'other'
-  const kind = e.kind === 'hold' ? 'hold' : 'refuse'
+  const kind = e.kind === 'hold' || e.kind === 'grant' ? e.kind : 'refuse'
   const t = new Date(Number.isFinite(e.at) ? e.at : 0).toISOString()
   const body = `{"v":1,"n":${Math.max(1, Math.floor(n))},"t":${JSON.stringify(t)},"s":${JSON.stringify(safeId(e.session))},` +
     `"a":${JSON.stringify(safeId(e.agent ?? ''))},"r":${JSON.stringify(rule)},"k":${JSON.stringify(kind)},` +
@@ -253,7 +253,7 @@ function macAt(text: string, n: number): string | undefined {
 }
 
 async function appendOnce($: EngineInterface, e: AuditEntry): Promise<boolean> {
-  const dir = await projectDir($)
+  const dir = await jobsDir($)
   if (!dir) return false
   const path = `${slashed(dir)}/${AUDIT_FILE}`
   const k = await auditKey($, true)
@@ -325,7 +325,7 @@ export async function auditRecord($: EngineInterface, e: AuditEntry, waitMs = AU
 
 export async function auditVerify($: EngineInterface): Promise<{ path: string | null; text: string | null; verdict: AuditVerdict }> {
   try {
-    const dir = await projectDir($)
+    const dir = await jobsDir($)
     if (!dir) return { path: null, text: null, verdict: { state: 'empty', lines: 0, bad: null, why: null } }
     const path = `${slashed(dir)}/${AUDIT_FILE}`
     const raw = await readLog($, path)

@@ -29,6 +29,27 @@ function textList(v: unknown, max: number): string[] | null {
   return out
 }
 
+function descriptionMax(): number {
+  return 80
+}
+
+export function shortGoal(goal: string, max: number): string {
+  const g = goal.replace(/\s+/g, ' ').replace(/[\s.;:,!?-]+$/, '').trim()
+  if (g.length <= max) return g
+  const clause = g.split(/[,;:(]| - | -- /)[0]!.trim()
+  if (clause.length <= max && clause.split(' ').length >= 3) return clause
+  const dangling = ['a', 'an', 'the', 'of', 'to', 'for', 'in', 'on', 'at', 'by', 'from', 'with', 'and', 'or', 'but',
+    'that', 'which', 'who', 'whose', 'where', 'when', 'if', 'as', 'into', 'onto', 'than', 'via', 'is', 'are', 'be']
+  const words: string[] = []
+  for (const w of g.split(' ')) {
+    if ([...words, w].join(' ').length > max) break
+    words.push(w)
+  }
+  if (!words.length) return g.slice(0, Math.max(1, max))
+  while (words.length > 1 && dangling.includes(words[words.length - 1]!.toLowerCase().replace(/[^a-z]/g, ''))) words.pop()
+  return words.join(' ').replace(/[\s.;:,!?(-]+$/, '')
+}
+
 export function packBrief(input: Obj): PackResult {
   const reasons: string[] = []
   const word = typeof input.word === 'string' ? input.word.trim().toLowerCase() : ''
@@ -77,8 +98,7 @@ export function packBrief(input: Obj): PackResult {
     if (s === undefined) unserved = true
     return s ?? ''
   }
-  const short = goal.split(' ').slice(0, 6).join(' ').slice(0, 60)
-  const description = `${word} ${short}`
+  const description = `${word} ${shortGoal(goal, descriptionMax() - word.length - 1)}`
   const lines: string[] = [t('goal', { goal })]
   if (writer) lines.push(t('owns', { owns: globs.join(', ') }))
   if (check) lines.push(t('check', { check }))

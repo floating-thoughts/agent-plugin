@@ -82,6 +82,75 @@ export function runSaving(entries: Iterable<Entry>, main: string | null, prices:
   return { used: family(used), baseline: family(mainCheaper ? main! : opus ?? 'opus'), usd }
 }
 
+
+type Row = Record<string, unknown>
+function numOf(v: unknown): number | null {
+  return typeof v === 'number' && Number.isFinite(v) ? v : null
+}
+
+function hours(s: unknown): string {
+  return `${(Math.round(((numOf(s) ?? 0) / 3600) * 10) / 10).toFixed(1)} h`
+}
+
+function sessionGap(r: Row): boolean {
+  return numOf(r.sessions) === 0 && ((numOf(r.agent_seconds) ?? 0) > 0)
+}
+
+function dayLine(r: Row): string {
+  const parts: string[] = []
+  for (const [k, word] of [['route_usd', 'route'], ['compact_usd', 'compact'], ['trim_usd', 'trim'], ['index_usd', 'index']] as const) {
+    const v = numOf(r[k])
+    if (v === null || Math.abs(v) < 0.005) continue
+    parts.push(`${word} ${money(v)}${v < 0 ? ' loss' : ''}`)
+  }
+  let line = `${String(r.day)}: saved ${money(numOf(r.usd) ?? 0)}${parts.length ? ` (${parts.join(', ')})` : ''}`
+  if (numOf(r.api_usd) !== null) line += ` of ${money(r.api_usd)} usage`
+  if (sessionGap(r)) line += '; sessions not recorded'
+  else if (numOf(r.sessions) !== null) line += `; ${r.sessions} sessions`
+  if (numOf(r.subagent_runs) !== null) line += `, ${r.subagent_runs} subagents`
+  if (numOf(r.agent_seconds) !== null) line += `, agent ${hours(r.agent_seconds)}`
+  return line
+}
+
+export function savingsSummary(body: unknown): Row {
+  const b: Row = body && typeof body === 'object' && !Array.isArray(body) ? (body as Row) : {}
+  const days: Row[] = Array.isArray(b.by_day) ? (b.by_day as unknown[]).filter((r): r is Row => !!r && typeof r === 'object') : []
+  const out: Row = {
+    total: { usd: b.usd ?? null, api_usd: b.api_usd ?? null, pct: b.pct ?? null, first_day: b.first_day ?? null, last_day: b.last_day ?? null, days: b.days ?? null },
+  }
+  const levers: Row = {}
+  for (const k of ['route', 'compact', 'trim', 'index']) if (b[k] && typeof b[k] === 'object') levers[k] = b[k]
+  out.levers = levers
+  const t = b.time && typeof b.time === 'object' ? (b.time as Row) : null
+  if (t) out.time = { agent: hours(t.agent_seconds), concurrency_saved: hours(t.concurrent_seconds), typing: hours(t.typing_seconds), turns: t.turns ?? null }
+  out.last_7_days = days.slice(-7).map(dayLine)
+  out.best_days = [...days]
+    .filter((r) => (numOf(r.usd) ?? 0) > 0)
+    .sort((x, y) => (numOf(y.usd) ?? 0) - (numOf(x.usd) ?? 0))
+    .slice(0, 3)
+    .map((r) => `${String(r.day)}: ${money(r.usd)}`)
+  const lossDays = (k: string): string[] => days.filter((r) => (numOf(r[k]) ?? 0) <= -0.005).map((r) => `${String(r.day)} ${money(r[k])}`)
+  const losses: Row = {}
+  const route = lossDays('route_usd')
+  if (route.length) {
+    losses.route = { days: route.slice(-5), more: Math.max(0, route.length - 5),
+      why: "the plugin's own overhead on the day's routed runs cost more than routing saved (routing alone never goes below zero)" }
+  }
+  const compactLoss = lossDays('compact_usd')
+  if (compactLoss.length) {
+    losses.compact = { days: compactLoss.slice(-5), more: Math.max(0, compactLoss.length - 5),
+      why: "a compaction's cost is counted on its first request after it, its saving on later requests (often the next day; never if the session ends soon)" }
+  }
+  if (Object.keys(losses).length) out.losses = losses
+  const gaps = days.filter(sessionGap).map((r) => String(r.day))
+  if (gaps.length) {
+    out.notes = [`Sessions not recorded on ${gaps.slice(-6).join(', ')}${gaps.length > 6 ? ` and ${gaps.length - 6} more days` : ''} ` +
+      'despite agent time: older plugin releases left main transcripts over 4 MiB out of the record\'s session count.']
+  }
+  out.full_view = 'Full history: savings with detail "full" (large), or the private savings page (link: /agent-services).'
+  return out
+}
+
 export function savingText(run: RunSaving | null): string | null {
   if (!run || !(run.usd >= 0.005) || run.used === run.baseline) return null
   return `agent-services: ${run.used} instead of ${run.baseline}: ~${money(run.usd)} saved (est.)`

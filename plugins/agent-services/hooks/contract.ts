@@ -5,7 +5,7 @@ export type ToolSpec = {
   input_schema: Record<string, unknown>
 }
 
-export const CONTRACT_SHA256 = "f74365950b5563f8f1d1f43662c23d2f2ddf909811d4d48443ecbdfac4f9091a"
+export const CONTRACT_SHA256 = "23aca72ada3ca89c727dc8e99dc0354638573793f4ff43ab93b8dc29e621b5ea"
 
 export const API = "svc/1" as const
 export const PREFIX = "/svc/v1" as const
@@ -25,10 +25,19 @@ export const TOOL_NAMES = ["savings", "toolbox", "status"] as const
 export const TOOLS: readonly ToolSpec[] = [
   {
     "name": "savings",
-    "description": "Show what the agent services saved so far: the estimated dollars saved by routing subagents to cheaper models (compared with running them on Opus), by checkpoint compactions and by indexed file reads, worked out by the service from the daily usage summaries of the local savings log. Returns local_only when the service cannot be reached.",
+    "description": "Show what the agent services saved so far: the estimated dollars saved by routing subagents to cheaper models (compared with running them on Opus), by checkpoint compactions, by indexed file reads and by trimmed attachments, worked out by the service from the daily usage summaries of the local savings log. By default a short summary (a few hundred tokens): the total and each lever, the last 7 days one line each, the best days, any day whose figure is a loss (labelled, not netted silently) and notes on days with incomplete counts. detail \"full\" returns the whole day-by-day history (large: ask for it only when needed); the private savings page shows the full view too. Returns local_only when the service cannot be reached.",
     "input_schema": {
       "type": "object",
-      "properties": {},
+      "properties": {
+        "detail": {
+          "type": "string",
+          "enum": [
+            "summary",
+            "full"
+          ],
+          "description": "summary (default): the short summary; full: the whole day-by-day history"
+        }
+      },
       "required": [],
       "additionalProperties": false
     }
@@ -73,10 +82,19 @@ export const CONTRACT = {
  "x-tools": [
   {
    "name": "savings",
-   "description": "Show what the agent services saved so far: the estimated dollars saved by routing subagents to cheaper models (compared with running them on Opus), by checkpoint compactions and by indexed file reads, worked out by the service from the daily usage summaries of the local savings log. Returns local_only when the service cannot be reached.",
+   "description": "Show what the agent services saved so far: the estimated dollars saved by routing subagents to cheaper models (compared with running them on Opus), by checkpoint compactions, by indexed file reads and by trimmed attachments, worked out by the service from the daily usage summaries of the local savings log. By default a short summary (a few hundred tokens): the total and each lever, the last 7 days one line each, the best days, any day whose figure is a loss (labelled, not netted silently) and notes on days with incomplete counts. detail \"full\" returns the whole day-by-day history (large: ask for it only when needed); the private savings page shows the full view too. Returns local_only when the service cannot be reached.",
    "input_schema": {
     "type": "object",
-    "properties": {},
+    "properties": {
+     "detail": {
+      "type": "string",
+      "enum": [
+       "summary",
+       "full"
+      ],
+      "description": "summary (default): the short summary; full: the whole day-by-day history"
+     }
+    },
     "required": [],
     "additionalProperties": false
    }

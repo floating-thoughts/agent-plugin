@@ -1,7 +1,7 @@
 import type { EngineInterface } from 'claude-code'
 import { minUsd, type Timeline } from './board_facts'
 import { money } from './pyfmt'
-import { EXPLAIN, EXPLAIN_KEY, explainKeyOf, explainOn } from './explain'
+import { EXPLAIN, EXPLAIN_KEY, EXPLAIN_POLL_MS, explainKeyOf, explainOn } from './explain'
 import { ORG_PAUSED_LINE } from './org'
 import { panelLines, type Panel } from './panel'
 import { COMMAND, NAME, SEP, shortDay, todayText } from './status'
@@ -120,6 +120,7 @@ export function bandText(state: unknown, columns?: unknown, timeZone?: string): 
 
 export function bandSetter($: EngineInterface): (state: BandState | BandFacts | null) => void {
   redraw = () => $.ui.invalidate('ui.render')
+  explainWatch($)
   return (state) => {
     const next: BandState | null = isObj(state)
       ? typeof state.state === 'string'
@@ -187,19 +188,51 @@ export function topParts(state: unknown): { key: string; text: string; bold?: tr
 export const EXPLAIN_TIP = 'use /agent-services explain on/off to toggle'
 
 let explainShown: boolean | null = null
+let explainReadAt = 0
+let explainWanted = false
+let explainWatching = false
+
+async function readExplain($: EngineInterface): Promise<boolean | null> {
+  try {
+    return explainOn(await $.store.get(EXPLAIN_KEY))
+  } catch {
+    return null
+  }
+}
 
 async function explainNow($: EngineInterface): Promise<boolean> {
-  if (explainShown !== null) return explainShown
-  try {
-    explainShown = explainOn(await $.store.get(EXPLAIN_KEY))
-  } catch {
-    explainShown = true
+  explainWanted = true
+  if (explainShown === null || Date.now() - explainReadAt >= EXPLAIN_POLL_MS) {
+    const v = await readExplain($)
+    if (v !== null) {
+      explainShown = v
+      explainReadAt = Date.now()
+    }
   }
-  return explainShown
+  return explainShown ?? true
+}
+
+function explainWatch($: EngineInterface): void {
+  if (explainWatching) return
+  try {
+    $.clock.every(EXPLAIN_POLL_MS, () => {
+      if (!explainWanted || Date.now() - explainReadAt < EXPLAIN_POLL_MS - 50) return
+      void readExplain($).then((v) => {
+        if (v === null) return
+        const before = explainShown ?? true
+        explainShown = v
+        explainReadAt = Date.now()
+        if (v !== before) redraw?.()
+      }).catch(() => undefined)
+    })
+    explainWatching = true
+  } catch {
+  }
 }
 
 export function setBandExplain(on: boolean | null): void {
   explainShown = on
+  explainReadAt = on === null ? 0 : Date.now()
   try {
     redraw?.()
   } catch {

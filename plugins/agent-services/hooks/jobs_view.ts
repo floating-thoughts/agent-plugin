@@ -1,6 +1,6 @@
 import type { EngineInterface } from 'claude-code'
 import { readyTogether, STEPS_FILE } from './flow'
-import { ago, jobOpen, jobsLive, jobsMarkRead, jobsNotification, jobStepOf, jobText, listJobs, noticesOf, statusWord, JOBS_FILE, type Job } from './jobs'
+import { ago, fitLines, jobOpen, jobsLive, jobsMarkRead, jobsNotification, jobStepOf, jobText, listJobs, noticesOf, statusWord, JOBS_FILE, type Job } from './jobs'
 import { ownershipNote } from './ownership'
 import { readPlan } from './plan_file'
 import { NOTE_PREFIX } from './review'
@@ -36,15 +36,19 @@ let pendingClaims = new Map<string, Pending>()
 let heldClaims = new Map<string, Held>()
 let claimOf = new WeakMap<object, string>()
 
+export const JOBS_TABLE_OPEN_MAX = 20
+export const JOBS_TABLE_DONE_MAX = 30
+
 const attention = (j: Job): number => (j.status === 'waiting' ? 0 : j.status === 'stalled' ? 1 : 2)
 const endOf = (j: Job): number => (typeof j.ended_at === 'number' ? j.ended_at : j.updated_at ?? j.last_activity_at ?? 0)
 
 export function jobsTable(jobs: readonly Job[], now: number, opts: { all?: boolean } = {}): { text: string; shown: string[] } {
   if (!jobs.length) return { text: `No background jobs are recorded for this project yet (${JOBS_FILE}).`, shown: [] }
-  const open = jobs.filter(jobOpen).sort((a, b) => attention(a) - attention(b) || b.last_activity_at - a.last_activity_at)
+  const openAll = jobs.filter(jobOpen).sort((a, b) => attention(a) - attention(b) || b.last_activity_at - a.last_activity_at)
+  const open = openAll.slice(0, JOBS_TABLE_OPEN_MAX)
   const done = jobs.filter((j) => !jobOpen(j)).sort((a, b) => endOf(b) - endOf(a))
   const shownMax = relNum('jobs_view.JOBS_SHOWN_DONE')
-  const listed = opts.all ? done : done.slice(0, shownMax ?? 0)
+  const listed = done.slice(0, opts.all ? JOBS_TABLE_DONE_MAX : Math.min(shownMax ?? 0, JOBS_TABLE_DONE_MAX))
   const hidden = done.length - listed.length
   const rows = [...open, ...listed].map((j) => [
     `${statusWord(j.status)}${j.unread === true ? ' *' : ''}`,
@@ -60,12 +64,17 @@ export function jobsTable(jobs: readonly Job[], now: number, opts: { all?: boole
   const line = (r: string[]) => r.map((c, k) => (k === r.length - 1 ? c : c + ' '.repeat(widths[k]! - [...c].length))).join('  ').trimEnd()
   const unread = listed.filter((j) => j.unread === true)
   const out = [
-    `Background jobs in ${JOBS_FILE}: ${open.length} open, ${done.length} finished` +
-      (hidden > 0 ? ` (${hidden} older finished not shown; the setup tool's "jobs all" lists them).` : '.'),
+    `Background jobs in ${JOBS_FILE}: ${openAll.length} open, ${done.length} finished` +
+      (hidden > 0 && !opts.all ? ` (${hidden} older finished not shown; the setup tool's "jobs all" lists them).` : '.'),
     '',
     line(head),
     ...rows.map(line),
   ]
+  const more = [
+    openAll.length > open.length ? `${openAll.length - open.length} more open` : '',
+    hidden > 0 && opts.all ? `${hidden} more finished` : '',
+  ].filter(Boolean)
+  if (more.length) out.push(`- and ${more.join(', ')} (oldest; not listed: read ${JOBS_FILE})`)
   if (unread.length) out.push('', '* a finished result shown here for the first time.')
   return { text: out.join('\n'), shown: unread.map((j) => j.id) }
 }
@@ -84,8 +93,7 @@ export function jobsChangeNote(prev: Readonly<Record<string, string>> | null, jo
     const was = before(j.id)
     return `- ${cut(j.title || '(no title)', 80)} (${j.kind} ${j.id}): ${was ? `${statusWord(was)} -> ` : ''}${statusWord(j.status)}${j.note ? `: ${cut(j.note, 120)}` : ''}`
   })
-  if (changed.length > lines.length) lines.push(`- and ${changed.length - lines.length} more`)
-  return { note: [`${NOTE_PREFIX}: ${head}`, ...lines].join('\n').slice(0, 1500), snapshot }
+  return { note: fitLines(`${NOTE_PREFIX}: ${head}`, lines, 1500, changed.length - lines.length), snapshot }
 }
 
 function depsOf(text: string | null): Map<string, string[]> {

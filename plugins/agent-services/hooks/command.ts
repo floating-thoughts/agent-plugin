@@ -17,7 +17,7 @@ import { localDay } from './counters'
 import { companyCommand, memberView, NOT_ADMIN_TEXT } from './boss'
 import { membersCommand } from './members'
 import { hasTrust, type TrustFile, unbalancedTrust, withoutTrust, withTrust } from './trust'
-import { approveMethods, importLine, lastChangeDiff, LEVEL_KEY, type Level, levelOf, methodsAutoOn, methodsDiff,
+import { approvedStored, approveMethods, importLine, lastChangeDiff, LEVEL_KEY, type Level, levelOf, methodsAutoOn, methodsDiff,
   methodsNoted, methodsNotes, pendingUnseen, previewMethods, readLevel, revertMethods, seenDiff, setMethodsAuto,
   settlePending, syncMethodsNow } from './methods'
 import { AUTONOMY_LINE } from './autonomy'
@@ -26,7 +26,7 @@ import { autoTakenNoteText, framing, hasUpdateNote, lineDiff, NOTE_LABEL, pendin
 import { bandSetup, setBandExplain } from './band'
 import { EXPLAIN_KEY, explainOn } from './explain'
 import { ORG_PAUSED_LINE, ORG_SAVINGS_TEXT, ORG_SET_TEXT, orgAdmin, orgChoice, orgNotice, sharingQuestion } from './org'
-import { hooksSummary, hooksText } from './hooks_list'
+import { hooksStatusLine, hooksSummary, hooksText } from './hooks_list'
 import { dataDirAllowed, removeAll, removedMarker, resetRemoved, type RemoveDeps } from './remove'
 import { levelOf as routingLevelOf, MODELS_KEY, parseModels, parseUse, pickOutside, ROUTER_EFFORTS, ROUTER_MODELS, ROUTING_KEY, ROUTING_LEVELS,
   routingLevel, routingModels, routingRecord, sessionPick, setSessionPick, type RoutingLevel, type SessionPick } from './routing_level'
@@ -681,7 +681,8 @@ export class Command {
     const ul = updatesLine(await this.safe(async () => autoSwitchOn(await this.d.store.get(AUTO_UPDATE_KEY)), false))
     if (ul) lines.push(ul)
     if (auth === 'ok') {
-      lines.push(await this.recordLine(), await this.methodsLine(), await this.routingLine(), AUTONOMY_LINE)
+      lines.push(await this.recordLine(), await this.methodsLine(), await this.routingLine(), AUTONOMY_LINE,
+        hooksStatusLine(`${COMMAND} info hooks`))
       lines.push(...(await this.safe(() => this.d.panel?.() ?? Promise.resolve([] as string[]), [] as string[])))
       const n = (await this.safe(() => this.openQuestions(), [] as Question[])).length
       if (n) lines.push(`${n} setup choice${n === 1 ? '' : 's'} open: ask Claude to finish the agent-services setup.`)
@@ -1097,6 +1098,12 @@ export class Command {
     }
     if (sub === 'diff') {
       const d = await methodsDiff(lineDiff, !byTool, byTool)
+      if (d !== null && !(await this.safe(() => approvedStored(), true))) {
+        return 'No approved version is stored; showing the full text. (agent-services keeps no methods text while ' +
+          'signed out, so there is no earlier approved text to compare with.)\n\n' +
+          `----- begin -----\n${d.trim()}\n----- end -----\n\nThe user approves it with ${COMMAND} methods approve; ` +
+          'the setup tool\'s "methods keep" leaves it unapproved.'
+      }
       const seen = d === null && (await this.safe(() => this.level(), 'suggest' as Level)) !== 'on'
         ? await seenDiff(this.d.store, lineDiff) : null
       if (seen) {
@@ -1369,12 +1376,17 @@ export class Command {
     }
     const tb = isObj(r.body) ? r.body : {}
     let termsLine = ''
-    if (typeof tb.terms_version === 'string' && typeof tb.terms_url === 'string' && tb.terms_version && tb.terms_url) {
+    const termsShape = (u: string): boolean => u.length <= 500 && /^https:\/\/[^\s"<>]+$/.test(u)
+    if (typeof tb.terms_version === 'string' && typeof tb.terms_url === 'string' && tb.terms_version && tb.terms_url && !termsShape(tb.terms_url)) {
+      await this.d.svc.noteTerms(null)
+      termsLine = '\nThe service sent a terms link that does not look right, so the terms were not shown or accepted and ' +
+        `the service may refuse the sign-in; run ${COMMAND} login again later.`
+    } else if (typeof tb.terms_version === 'string' && typeof tb.terms_url === 'string' && tb.terms_version && tb.terms_url) {
       const yes = 'I accept'
       const a = this.canAsk()
         ? await this.dialog('agent-services is for business use only. Please confirm that you use it for your work, ' +
           `that you're 18 or older, and that you accept the customer terms (version ${tb.terms_version.slice(0, 32)}): ` +
-          `${tb.terms_url.slice(0, 200)}`, [yes, 'I do not accept'], 'Terms')
+          `${tb.terms_url}`, [yes, 'I do not accept'], 'Terms')
         : null
       await this.d.svc.noteTerms(a === yes ? tb.terms_version : null)
       termsLine = a === yes ? '' : '\nThe terms were not accepted, so the service may refuse the sign-in; run ' +
@@ -1611,7 +1623,13 @@ export class Command {
   private async explain(rest: string[]): Promise<string> {
     const w = (rest[0] ?? '').toLowerCase()
     if (rest.length === 0) {
-      const on = explainOn(await this.d.store.get(EXPLAIN_KEY).catch(() => undefined))
+      let stored: unknown
+      try {
+        stored = await this.d.store.get(EXPLAIN_KEY)
+      } catch {
+        return errorText('store_unavailable')
+      }
+      const on = explainOn(stored)
       return `The band's explanations are ${on ? 'on' : 'off'} on this computer. ${COMMAND} explain ${on ? 'off' : 'on'} ` +
         `turns them ${on ? 'off' : 'on'}.`
     }

@@ -86,6 +86,15 @@ export async function getText(kv: KV, key: string): Promise<string | null> {
   return typeof v === 'string' && v ? v : null
 }
 
+export async function readText(kv: KV, key: string): Promise<{ text: string | null; failed: boolean }> {
+  try {
+    const v = await kv.get(key)
+    return { text: typeof v === 'string' && v ? v : null, failed: false }
+  } catch {
+    return { text: null, failed: true }
+  }
+}
+
 export async function safeSet(kv: KV, key: string, value: unknown): Promise<boolean> {
   try {
     await kv.set(key, value)

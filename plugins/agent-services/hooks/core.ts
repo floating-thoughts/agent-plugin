@@ -2,6 +2,7 @@
 import { TOOLS as CONTRACT_TOOLS, CONTRACT } from './contract'
 import { Counters, sweep } from './counters'
 import type { CountersOptions } from './counters'
+import { savingsSummary } from './local_savings'
 import { Receipts } from './receipts'
 import { sha256Hex } from './e2e'
 import { pyRound } from './pyfmt'
@@ -231,6 +232,8 @@ export function checkArgs(tool: string, args: unknown): void {
     const rx = /^[a-z][a-z0-9-]{1,39}$/
     if (typeof args.key !== 'string' || !rx.test(args.key)) bad('key')
     if (has(args, 'topic') && (typeof args.topic !== 'string' || !rx.test(args.topic))) bad('topic')
+  } else if (tool === 'savings') {
+    if (has(args, 'detail') && !((schema.properties.detail as { enum: unknown[] }).enum).includes(args.detail)) bad('detail')
   } else if (tool === 'checkpoint_advice') {
     const p = args.context_pct
     if (!isNum(p) || p < 0 || p > 100) bad('context_pct')
@@ -1002,7 +1005,7 @@ export class Core {
     }
     if (tool === 'savings') {
       const res = this.metrics ? await this.metrics.savings() : OFF
-      if (res.ok) return { saved: res.body, fallback: null, reason: null }
+      if (res.ok) return args.detail === 'full' ? { saved: res.body, fallback: null, reason: null } : { saved: savingsSummary(res.body), detail: 'summary', fallback: null, reason: null }
       const reason = res.error || 'failed'
       return reason === 'service_off'
         ? { saved: null, fallback: 'local_only', reason, next: SAVINGS_OFF_NEXT }

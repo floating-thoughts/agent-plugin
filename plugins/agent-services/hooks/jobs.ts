@@ -2,7 +2,7 @@ import type { EngineInterface } from 'claude-code'
 import { ensureAgentIgnore } from './agent_files'
 import { CHECK_MAX } from './brief_check'
 import { redact } from './redact'
-import { projectDir } from './task_state_io'
+import { jobsDir } from './task_state_io'
 import { vaultMask } from './vault'
 
 export type JobKind = 'subagent' | 'workflow' | 'shell' | 'session'
@@ -38,6 +38,7 @@ export const JOBS_MAX = 200
 export const JOB_TITLE_MAX = 120
 export const JOB_NOTE_MAX = 200
 export const JOBS_FILE_MAX = 512 * 1024
+export const JOBS_STALLED_MAX = 50
 export const JOBS_VERSION = 1
 export const JOB_TOUCH_EVERY_MS = 30_000
 
@@ -53,6 +54,25 @@ const STATUSES: readonly string[] = ['running', 'waiting', 'stalled', 'failed', 
 export const jobIdOk = (v: unknown): v is string => typeof v === 'string' && /^[A-Za-z0-9_.:-]{1,80}$/.test(v)
 export const jobOpen = (j: Job): boolean => j.status === 'running' || j.status === 'waiting' || j.status === 'stalled'
 export const jobHasResult = (j: Job): boolean => j.status === 'done_unverified' || j.status === 'done_verified' || j.status === 'failed'
+
+export function fitLines(head: string, lines: readonly string[], max: number, extra = 0): string {
+  const more = (n: number): string => `- and ${n} more`
+  const total = lines.length + Math.max(0, extra)
+  let out = head.slice(0, max)
+  let kept = 0
+  for (const l of lines) {
+    const reserve = total - kept - 1 > 0 ? more(total).length + 1 : 0
+    if (out.length + 1 + l.length + reserve > max) break
+    out += `\n${l}`
+    kept++
+  }
+  const tail = total > kept ? `\n${more(total - kept)}` : ''
+  if (out.length + tail.length <= max) return out + tail
+  if (!tail || kept > 0) return out
+  const room = Math.max(0, max - tail.length)
+  const cut = /[\uD800-\uDBFF]/.test(head.charAt(room - 1)) ? room - 1 : room
+  return head.slice(0, cut) + tail
+}
 
 let bandShown: string | null = null
 let touchedAt = new Map<string, number>()
@@ -92,7 +112,7 @@ export function jobStepOf(text: unknown): string | null {
 
 
 async function pathOf($: EngineInterface): Promise<string | null> {
-  const dir = await projectDir($)
+  const dir = await jobsDir($)
   return dir === null ? null : `${dir}/${JOBS_FILE}`
 }
 
@@ -140,7 +160,7 @@ async function readRaw($: EngineInterface, path: string): Promise<Raw> {
     } catch {}
     return there ? { kind: 'error' } : { kind: 'absent' }
   }
-  if (text.length > JOBS_FILE_MAX) return { kind: 'bad', text: '' }
+  if (text.length > JOBS_FILE_MAX) return { kind: 'bad', text }
   if (!text.trim()) return { kind: 'absent' }
   const p = parseJobs(text)
   if ('ledger' in p) return { kind: 'ok', ledger: p.ledger, text }
@@ -148,7 +168,9 @@ async function readRaw($: EngineInterface, path: string): Promise<Raw> {
 }
 
 export function capJobs(jobs: readonly Job[]): Job[] {
-  const open = jobs.filter(jobOpen)
+  const quiet = (a: Job, b: Job): number => (b.last_activity_at || 0) - (a.last_activity_at || 0)
+  const stalled = jobs.filter((j) => j.status === 'stalled').sort(quiet).slice(0, JOBS_STALLED_MAX)
+  const open = [...jobs.filter((j) => jobOpen(j) && j.status !== 'stalled'), ...stalled].sort(quiet).slice(0, JOBS_MAX)
   const closed = jobs.filter((j) => !jobOpen(j)).sort((a, b) => (a.ended_at ?? a.updated_at ?? a.started_at) - (b.ended_at ?? b.updated_at ?? b.started_at))
   return [...closed.slice(Math.max(0, closed.length - Math.max(0, JOBS_MAX - open.length))), ...open].sort((a, b) => a.started_at - b.started_at)
 }
@@ -198,10 +220,14 @@ export function stampJobs(before: readonly Job[], after: readonly Job[], now: nu
   })
 }
 
-async function setAside($: EngineInterface, path: string, text: string, now: number): Promise<void> {
+async function setAside($: EngineInterface, path: string, text: string, now: number): Promise<boolean> {
+  if (!text) return false
   try {
-    if (text) await $.fs.write(path.replace(/\.json$/, `.bad-${new Date(now).toISOString().replace(/[-:]/g, '').replace(/\.\d+Z$/, 'Z')}.json`), text)
-  } catch {}
+    await $.fs.write(path.replace(/\.json$/, `.bad-${new Date(now).toISOString().replace(/[-:]/g, '')}.json`), text)
+    return true
+  } catch {
+    return false
+  }
 }
 
 export function jobsBandLine(jobs: readonly Job[] | null): string | null {
@@ -264,7 +290,7 @@ export async function getJob($: EngineInterface, id: string): Promise<Job | null
 
 export async function updateJobs($: EngineInterface, mutate: (jobs: Job[], now: number) => Job[] | null): Promise<Job[] | null> {
   try {
-    const dir = await projectDir($)
+    const dir = await jobsDir($)
     if (dir === null) return null
     const path = `${dir}/${JOBS_FILE}`
     const now = Number(await $.clock.now())
@@ -279,11 +305,13 @@ export async function updateJobs($: EngineInterface, mutate: (jobs: Job[], now: 
     }
     await ensureAgentIgnore($, dir)
     let next = stampJobs(base, out, now)
-    if (first.kind === 'bad') await setAside($, path, first.text, now)
+    if (first.kind === 'bad' && !(await setAside($, path, first.text, now))) return null
     let written: Job[] | null = null
     for (let attempt = 0; attempt < 2; attempt++) {
       const cur = await readRaw($, path)
       if (cur.kind === 'newer') return null
+      if (cur.kind === 'error') return written
+      if (cur.kind === 'bad' && (first.kind !== 'bad' || cur.text !== first.text) && !(await setAside($, path, cur.text, now))) return written
       if (cur.kind === 'ok' && cur.ledger.rev !== seen) {
         next = mergeJobs(next, cur.ledger.jobs)
         seen = cur.ledger.rev

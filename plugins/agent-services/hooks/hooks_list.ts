@@ -401,18 +401,28 @@ export const HOOKS_ALSO =
   'update check; with the served rule tables, a check every few seconds that asks the main conversation about ' +
   'background tasks running past the served time and carries on after a usage limit), and questions in Claude Code\'s own dialog (sign-in, the setup questions Claude starts).'
 
+export const HOOKS_COUNT_NOTE =
+  'These are function hooks in Claude Code\'s hooks module (hooks.json names register.ts under "modules"). ' +
+  '/reload-plugins counts only command hooks, so it shows 0 hooks for agent-services: that is expected, not a fault. ' +
+  'This list is answered by the loaded hooks module, so its hooks are registered in this session.'
+
+export function hooksStatusLine(infoCommand: string): string {
+  return `Hooks: ${HOOKS.length} active as function hooks in Claude Code's hooks module. /reload-plugins shows 0 hooks ` +
+    `for agent-services because it counts only command hooks; that is expected. ${infoCommand} lists them.`
+}
+
 export function hooksText(): string {
   const rows = HOOKS.map((h) =>
     `- ${h.event}${h.matcher ? ` (${h.matcher})` : ''}: ${h.what} It ${h.does.map((d) => HOOK_EFFECTS[d] ?? d).join(', ')}. ` +
     `Shown: ${h.shown}`)
-  return `The hooks this plugin registers in Claude Code (${HOOKS.length}):\n${rows.join('\n')}\n${HOOKS_ALSO}`
+  return `The hooks this plugin registers in Claude Code (${HOOKS.length}):\n${rows.join('\n')}\n${HOOKS_ALSO}\n${HOOKS_COUNT_NOTE}`
 }
 
 export function hooksSummary(fullCommand: string): string {
   const rows = HOOKS.map((h) => `- ${h.event}${h.matcher ? ` (${h.matcher})` : ''}: ${h.does.join(', ')}`)
   const legend = Object.entries(HOOK_EFFECTS).map(([k, v]) => `${k} ${v}`).join('; ')
   return `The hooks this plugin registers in Claude Code (${HOOKS.length}), each with what it may do:\n${rows.join('\n')}\n` +
-    `Key: ${legend}.\n${fullCommand} shows what each hook does and what you see when it acts.`
+    `Key: ${legend}.\n${HOOKS_COUNT_NOTE}\n${fullCommand} shows what each hook does and what you see when it acts.`
 }
 
 export function spawnLine(a: { action?: unknown; set?: { model?: unknown; effort?: unknown } | null; notice?: unknown } | null): string | null {

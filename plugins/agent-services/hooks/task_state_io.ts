@@ -1,5 +1,6 @@
 import type { EngineInterface } from 'claude-code'
 import { ensureAgentIgnore } from './agent_files'
+import { dataDir } from './engine_env'
 import { appendLines, applyOp, capState, decisionLine, emptyState, isFileOp, isWriteOp, lessonParagraph, mergeStates, parseTaskState, planEdit, recoverPlaceholders, renderMarkdown, resumeNote, type FileEdit, type OpCtx, type TaskState } from './task_state'
 import { NOTE_PREFIX } from './review'
 
@@ -8,6 +9,7 @@ type Raw = { kind: 'absent' } | { kind: 'error' } | { kind: 'big' } | { kind: 't
 
 const slashed = (p: string): string => p.replace(/\\/g, '/').replace(/\/+$/, '')
 const iso = (ms: number): string => new Date(ms).toISOString()
+const NO_PROJECT = 'No project folder was found (this is the home folder, a temp folder or a drive root); nothing was written. Open the session in a project folder, or add agent-state.md to one.'
 
 export async function projectDir($: EngineInterface, start?: string): Promise<string | null> {
   try {
@@ -20,6 +22,41 @@ export async function projectDir($: EngineInterface, start?: string): Promise<st
       dir = up
     }
     return root || null
+  } catch {
+    return null
+  }
+}
+
+export async function projectWriteDir($: EngineInterface, start?: string): Promise<string | null> {
+  try {
+    const dir = await projectDir($, start)
+    if (!dir) return null
+    const key = (p: string): string => slashed(p).toLowerCase()
+    const env = async (read: () => unknown): Promise<string> => {
+      try {
+        return String((await read()) ?? '').trim()
+      } catch {
+        return ''
+      }
+    }
+    const homes = [await env(() => $.env.get('HOME')), await env(() => $.env.get('USERPROFILE'))]
+    const temps = [await env(() => $.env.get('TEMP')), await env(() => $.env.get('TMP')), await env(() => $.env.get('TMPDIR'))]
+    const k = key(dir)
+    if (!k || /^(?:[a-z]:)?$/.test(k)) return null
+    if ([...homes, ...temps].some((h) => h && key(h) === k)) return null
+    if (/^(?:[a-z]:)?(?:\/private)?(?:\/var)?\/tmp$/.test(k) || /\/appdata\/local\/temp$/.test(k) || /^[a-z]:\/windows\/temp$/.test(k)) return null
+    return dir
+  } catch {
+    return null
+  }
+}
+
+export async function jobsDir($: EngineInterface): Promise<string | null> {
+  const dir = await projectWriteDir($)
+  if (dir) return dir
+  try {
+    const data = slashed(await dataDir($))
+    return data && data !== '/.agent-services' ? `${data}/no-project` : null
   } catch {
     return null
   }
@@ -64,7 +101,7 @@ export async function updateTaskState(
   try {
     const nowMs = opts.now ?? Date.now()
     const now = iso(nowMs)
-    const dir = await projectDir($, opts.start)
+    const dir = await projectWriteDir($, opts.start)
     if (!dir) return { state: null, wrote: false, note: null }
     const paths = taskStatePaths(dir)
     const first = await readRaw($, paths.json)
@@ -151,6 +188,11 @@ export async function taskStateOp(
       const got = await loadTaskState($, { start: opts.start })
       if (got.state && got.dir) ctx.markers = await markersLeft($, got.dir, got.state, i.op === 'deliver' ? null : String(i.id ?? ''))
     }
+    if (i.op === 'keep_going') {
+      const got = await loadTaskState($, { start: opts.start })
+      if (!got.state && !got.error) return 'Noted: no task state is recorded here, so nothing is waiting on a keep-going answer; nothing was written.'
+    }
+    if (!(await projectWriteDir($, opts.start))) return NO_PROJECT
     let answer = ''
     const r = await updateTaskState($, (s) => {
       const res = applyOp(s, i, ctx)
@@ -254,8 +296,8 @@ export async function projectFileOp(
   $: EngineInterface, input: Record<string, any>, opts: { mask: Mask; now?: number; start?: string },
 ): Promise<{ answer: string; ran: boolean; dir: string | null }> {
   try {
-    const dir = await projectDir($, opts.start)
-    if (!dir) return { answer: 'The project folder could not be found; nothing was written.', ran: false, dir: null }
+    const dir = await projectWriteDir($, opts.start)
+    if (!dir) return { answer: NO_PROJECT, ran: false, dir: null }
     const date = iso(opts.now ?? Date.now()).slice(0, 10)
     const op = String(input.op ?? '')
     if (op.startsWith('plan_')) {
