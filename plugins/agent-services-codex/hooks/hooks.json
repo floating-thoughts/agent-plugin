@@ -1,0 +1,19 @@
+{
+  "hooks": {
+    "SessionStart": [
+      { "hooks": [ { "type": "mcp_tool", "server": "agent-services", "tool": "hook_session", "input": { "event": "SessionStart" }, "timeout": 5 } ] }
+    ],
+    "UserPromptSubmit": [
+      { "hooks": [ { "type": "mcp_tool", "server": "agent-services", "tool": "hook_session", "input": { "event": "UserPromptSubmit" }, "timeout": 5 } ] }
+    ],
+    "PreToolUse": [
+      { "matcher": "collaborationspawn_agent",
+        "hooks": [ { "type": "mcp_tool", "server": "agent-services", "tool": "hook_spawn", "input": { "v": "v2", "task": "${tool_input.task_name}" }, "timeout": 5 } ] },
+      { "matcher": "spawn_agent",
+        "hooks": [ { "type": "mcp_tool", "server": "agent-services", "tool": "hook_spawn", "input": { "v": "v1", "turn": "${turn_id}" }, "timeout": 5 } ] }
+    ],
+    "PostModelRequest": [
+      { "hooks": [ { "type": "mcp_tool", "server": "agent-services", "tool": "hook_usage", "input": { "model": "${model}", "status": "${status}", "usage": "${token_usage}" }, "timeout": 2 } ] }
+    ]
+  }
+}

@@ -1182,15 +1182,24 @@ export class Svc {
   }
 
   /** POST /auth/login/start {email}, sealed through /svc/v1/auth/login/x; the email waits as pending for 10 minutes
-   * so any session may finish the sign-in. */
+   * so any session may finish the sign-in. Under signs of abuse the service answers check_required with a browser
+   * check link and its token; the token is kept (key login_check, 10 minutes) and sent with the next start for the
+   * same email, so a retry after the person passed the check goes through. */
   async loginStart(email: string, hook: Hook = 'tool'): Promise<Result> {
     const g = await this.loginGate()
     if (g) return g
     if (typeof email !== 'string' || email.length < 3 || email.length > 254 || !email.includes('@')) return R(false, { error: 'invalid_body' })
-    const res = await this.exchange('POST', PREFIX + '/auth/login/start', JSON.stringify({ email }), 'auth', this.deadline('auth', hook), {
+    const held = await safeGet(this.kv, 'login_check')
+    const check = isObj(held) && held.email === email && typeof held.check === 'string' && typeof held.until === 'number' &&
+      this.d.now() < held.until ? held.check : null
+    const res = await this.exchange('POST', PREFIX + '/auth/login/start', JSON.stringify(check ? { email, check } : { email }), 'auth', this.deadline('auth', hook), {
       signed: false,
       retry: true,
     })
+    const got = isObj(res.body) ? res.body.check : null
+    if (res.error === 'check_required' && typeof got === 'string' && /^[A-Za-z0-9_-]{1,100}$/.test(got)) {
+      await safeSet(this.kv, 'login_check', { email, check: got, until: this.d.now() + LOGIN_PENDING_MS })
+    } else if (check) await safeDelete(this.kv, 'login_check')
     if (res.ok) await safeSet(this.kv, KEYS.loginPending, { email, until: this.d.now() + LOGIN_PENDING_MS })
     return strip(res)
   }

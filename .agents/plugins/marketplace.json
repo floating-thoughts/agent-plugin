@@ -1,0 +1,21 @@
+{
+  "name": "agent-plugin",
+  "interface": {
+    "displayName": "agent-plugin"
+  },
+  "plugins": [
+    {
+      "name": "agent-services",
+      "source": {
+        "source": "local",
+        "path": "./plugins/agent-services-codex"
+      },
+      "description": "Working methods and subagent routing advice for Codex from the agent-services server, through a remote MCP connection with no local process; services need a signed-in account",
+      "policy": {
+        "installation": "AVAILABLE",
+        "authentication": "ON_INSTALL"
+      },
+      "category": "Productivity"
+    }
+  ]
+}
