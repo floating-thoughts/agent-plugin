@@ -240,6 +240,141 @@ export type Facts = {
   unpriced: string[]
   read: { files: number; bytes: number; main_bytes: number; subagent_bytes: number }
   unread: UnreadFile[]
+  time_by_day: Record<string, TimeDay> // local day -> typed bytes, turns, agent clock time and summed agent time
+  full_days?: Record<string, Record<string, number>> // the owner tool's complete per-day figures (wiring.ts facts)
+}
+// agent_seconds: clock time with at least one agent active (the union of every transcript's active intervals);
+// agent_sum_seconds: every transcript's active time added up (sessions and subagents each counted)
+export type TimeDay = { typed_bytes: number; agent_seconds: number; agent_sum_seconds: number; turns: number }
+export type Interval = [number, number] // ms
+
+// ------------------------------------------------------------------ time: typed bytes and agent time
+
+// Two events of one transcript at most this far apart belong to one active interval; a longer gap is idle.
+export const IDLE_GAP_MS = 10 * 60 * 1000
+
+/** A user row's text: the string content, or its text blocks joined; null for a tool result. */
+function contentText(row: Obj): string | null {
+  const c = isObj(row.message) ? row.message.content : null
+  if (typeof c === 'string') return c
+  if (!Array.isArray(c)) return ''
+  if (c.some((b) => isObj(b) && b.type === 'tool_result')) return null
+  return c.filter((b) => isObj(b) && b.type === 'text' && typeof b.text === 'string').map((b) => b.text).join('\n')
+}
+
+/** Text the system wrote into a user row (command output, an interrupt, a compaction summary, a notification). */
+const systemText = (s: string): boolean =>
+  /^(<local-command-|<bash-stdout>|<bash-stderr>|<task-notification>|\[Request interrupted|This session is being continued)/.test(s)
+
+/**
+ * The UTF-8 bytes a person typed in a prompt's text: a slash command counts as its name and arguments; system
+ * reminders and pasted blocks are left out. Null when nothing of it was typed.
+ */
+export function typedBytes(text: string | null): number | null {
+  if (text === null) return null
+  let s = text.trim()
+  if (!s || systemText(s)) return null
+  const cmd = /<command-name>([\s\S]*?)<\/command-name>/.exec(s)
+  if (cmd) {
+    const args = /<command-args>([\s\S]*?)<\/command-args>/.exec(s)
+    s = `${cmd[1].trim()} ${args ? args[1].trim() : ''}`
+  } else {
+    s = s.replace(/<system-reminder>[\s\S]*?<\/system-reminder>/g, '').replace(/<pasted_content\b[^>]*>[\s\S]*?<\/pasted_content>/g, '')
+  }
+  s = s.trim()
+  return s ? utf8(s).length : null
+}
+
+const plainUser = (row: Obj): boolean =>
+  row.type === 'user' && row.isSidechain !== true && row.isMeta !== true && row.isCompactSummary !== true &&
+  row.isVisibleInTranscriptOnly !== true
+
+/**
+ * A row that starts a turn: the bytes the person typed (0 when nobody typed it: a notification, a plugin's or a
+ * peer's prompt), or null for any other row. `marked`: the file is in the current format, where the engine marks a
+ * turn's first row (turnPosition) and says who wrote it (origin kind human, prompt source typed); in older files a
+ * plain user row with typed text, or a task notification, starts a turn.
+ */
+export function turnStart(row: Obj, marked: boolean): number | null {
+  if (!plainUser(row)) return null
+  if (marked) {
+    if (!isObj(row.turnPosition)) return null
+    const human = (isObj(row.origin) && row.origin.kind === 'human') || row.promptSource === 'typed'
+    return human ? typedBytes(contentText(row)) ?? 0 : 0
+  }
+  const text = contentText(row)
+  if (text !== null && text.trim().startsWith('<task-notification>')) return 0
+  return typedBytes(text)
+}
+
+/** A row that counts as activity: every timestamped row of a transcript but a sidechain copy, a queue record and the
+ * summary written when the person comes back (written after an idle spell, it would join it to the last turn). */
+function turnEvent(row: Obj): boolean {
+  return row.isSidechain !== true && row.type !== 'queue-operation' && !(row.type === 'system' && row.subtype === 'away_summary')
+}
+
+/** One transcript's event times (ms) as active intervals: consecutive events at most IDLE_GAP_MS apart. */
+export function intervalsOf(times: number[]): Interval[] {
+  const at = [...times].sort((a, b) => a - b)
+  const out: Interval[] = []
+  for (const v of at) {
+    const last = out[out.length - 1]
+    if (last && v - last[1] <= IDLE_GAP_MS) last[1] = v
+    else out.push([v, v])
+  }
+  return out.filter(([s, e]) => e > s)
+}
+
+/** Intervals cut at local midnights, grouped by local day (ms). */
+function byLocalDay(intervals: Interval[]): Record<string, Interval[]> {
+  const out: Record<string, Interval[]> = {}
+  for (const [s0, e] of intervals) {
+    let s = s0
+    while (s < e) {
+      const d = new Date(s)
+      const midnight = new Date(d.getFullYear(), d.getMonth(), d.getDate() + 1).getTime()
+      const end = Math.min(e, midnight)
+      ;(out[localDay(s * 1000)] ??= []).push([s, end])
+      s = end
+    }
+  }
+  return out
+}
+
+/** The union length (ms) of intervals: overlapping time counts once. */
+export function unionMs(intervals: Interval[]): number {
+  const sorted = [...intervals].sort((a, b) => a[0] - b[0])
+  let total = 0
+  let start = -Infinity
+  let end = -Infinity
+  for (const [s, e] of sorted) {
+    if (s > end) {
+      if (end > start) total += end - start
+      start = s
+      end = e
+    } else if (e > end) end = e
+  }
+  if (end > start) total += end - start
+  return total
+}
+
+/**
+ * The time figures per local day from the typed bytes and turns per day and every transcript's active intervals:
+ * agent_seconds the union (clock time with at least one agent active), agent_sum_seconds the plain sum.
+ */
+export function timeDays(typed: Record<string, { bytes: number; turns: number }>, intervals: Interval[]): Record<string, TimeDay> {
+  const days = byLocalDay(intervals)
+  const out: Record<string, TimeDay> = {}
+  for (const day of [...new Set([...Object.keys(typed), ...Object.keys(days)])].sort()) {
+    const list = days[day] ?? []
+    out[day] = {
+      typed_bytes: typed[day]?.bytes ?? 0,
+      agent_seconds: Math.round(unionMs(list) / 1000),
+      agent_sum_seconds: Math.round(list.reduce((n, [s, e]) => n + (e - s), 0) / 1000),
+      turns: typed[day]?.turns ?? 0,
+    }
+  }
+  return out
 }
 
 const newDay = (): DayFacts => ({
@@ -279,6 +414,9 @@ export class Scanner {
   private readonly raw: RawDispatch[] = []
   private readonly seenBlocks = new Set<string>()
   private readonly read = { files: 0, bytes: 0, main_bytes: 0, subagent_bytes: 0 }
+  private readonly turnsSeen = new Set<string>()
+  private readonly time: Record<string, { bytes: number; turns: number }> = {}
+  private readonly intervals: Interval[] = [] // every transcript's active intervals (ms)
 
   constructor(prices: Prices) {
     this.prices = prices
@@ -306,12 +444,33 @@ export class Scanner {
     const moments: number[] = []
     const comps: [number | null, unknown][] = []
     const disp: [number | null, number, Obj][] = []
+    if (isSub) this.subIntervals(file.text)
+    const marked = !isSub && file.text.includes('"turnPosition"')
+    let turn: { skip: boolean } | null = null
+    const active: number[] = [] // this main transcript's event times (ms)
     lines(file.text).forEach((line, order) => {
       if (isSub && !line.includes('compact_boundary') && !line.includes('tool_use')) return
       const row = parseLine(line)
       if (!isObj(row)) return
       const moment = typeof row.timestamp === 'string' && row.timestamp ? parseIso(row.timestamp, 'local') : null
-      if (moment !== null && !isSub) moments.push(moment)
+      if (moment !== null && !isSub) {
+        moments.push(moment)
+        const typed = turnStart(row, marked)
+        if (typed !== null) {
+          const tp = isObj(row.turnPosition) ? row.turnPosition.turnIndex : undefined
+          const key = marked && tp !== undefined ? `${row.sessionId}:${tp}` : typeof row.uuid === 'string' ? row.uuid : `${file.rel}:${order}`
+          if (this.turnsSeen.has(key)) {
+            if (!turn || turn.skip) turn = { skip: true } // a copied turn (a resumed session): counted once
+          } else {
+            this.turnsSeen.add(key)
+            turn = { skip: false }
+            const d = (this.time[localDay(moment)] ??= { bytes: 0, turns: 0 })
+            d.bytes += typed
+            d.turns += 1
+            active.push(moment / 1000)
+          }
+        } else if (!turn?.skip && turnEvent(row)) active.push(moment / 1000)
+      }
       if (row.type === 'system' && row.subtype === 'compact_boundary') {
         const meta = row.compactMetadata
         comps.push([moment, isObj(meta) ? meta.trigger : null])
@@ -325,6 +484,7 @@ export class Scanner {
         }
       }
     })
+    if (active.length) this.intervals.push(...intervalsOf(active))
     if (!isSub) {
       let first: number | null = null
       let last: number | null = null
@@ -357,6 +517,26 @@ export class Scanner {
       if (moment === null) continue
       this.raw.push({ moment, rel: file.rel, order, project, session, block })
     }
+  }
+
+  /** A subagent transcript's active intervals: all its timestamps (IDLE_GAP_MS rule). */
+  private subIntervals(text: string): void {
+    const at: number[] = []
+    for (const m of text.matchAll(/"timestamp":\s*"([^"]+)"/g)) {
+      const v = parseIso(m[1], 'local')
+      if (v !== null) at.push(v / 1000)
+    }
+    this.intervals.push(...intervalsOf(at))
+  }
+
+  /** Figures of transcripts read elsewhere (the over-4-MiB scan): typed bytes and turns per day, and intervals (ms). */
+  addTime(days: Record<string, { typed_bytes?: number; turns?: number }>, intervals: Interval[]): void {
+    for (const [day, d] of Object.entries(days)) {
+      const held = (this.time[day] ??= { bytes: 0, turns: 0 })
+      held.bytes += d.typed_bytes ?? 0
+      held.turns += d.turns ?? 0
+    }
+    for (const iv of intervals) if (Array.isArray(iv) && iv[1] > iv[0]) this.intervals.push([iv[0], iv[1]])
   }
 
   /** The facts of every file added (call it once). */
@@ -450,6 +630,7 @@ export class Scanner {
       unpriced: [...unpriced].sort(),
       read: { ...this.read },
       unread: [...this.unread],
+      time_by_day: timeDays(this.time, this.intervals),
     }
   }
 }

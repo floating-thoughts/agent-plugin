@@ -222,6 +222,7 @@ export type DailyInput = {
   prices: Prices
   kinds?: Record<string, string> | null // main session id -> its kind (auto, orchestrator, direct)
   clientVersion?: string
+  time?: { typed_bytes: number; agent_seconds: number; agent_sum_seconds: number; turns: number } | null // scan time_by_day
 }
 
 /** The UTF-8 size of a body as this module sends it. */
@@ -289,6 +290,10 @@ export function dailyBody(day: string, input: DailyInput): Obj {
     by_task: byTask,
     sessions,
     savings: input.savings ?? counters(events, day, prices),
+  }
+  const tm = input.time
+  if (tm && (tm.typed_bytes > 0 || tm.agent_seconds > 0 || tm.turns > 0)) {
+    body.time = { typed_bytes: tm.typed_bytes, agent_seconds: tm.agent_seconds, agent_sum_seconds: tm.agent_sum_seconds, turns: tm.turns }
   }
   while (bodySize(body) > BODY_BYTES) {
     if (!body.by_task.length) throw new BodyTooLarge(`metrics body for ${day} is over ${BODY_BYTES} bytes`)

@@ -32,7 +32,7 @@ export const HINT_OFF_SHORT = `see savings: ${COMMAND} sharing on`
 export const HINT_WAIT = 'savings from tomorrow' // after "on": signed in, no figure yet (band.ts BAND_TEXT.wait)
 export const HINT_WAIT_SHORT = 'savings from tomorrow'
 // The status line while signed out or after an auth fail.
-export const SIGN_IN_LINE = `signed out: ${COMMAND} login <email>`
+export const SIGN_IN_LINE = `signed out: ${COMMAND} login <email>; guard and masking off`
 export const LOCKED_LINE = `paused: this account is locked; contact support, then ${COMMAND} login <email>`
 export const ORG_PAUSED_STATUS = `paused by your company; ask your admin` // the company paused it
 // The status line while the service gate is closed for a reason other than sign-in (band.ts BAND_TEXT in full).

@@ -263,6 +263,7 @@ export type BoardInput = {
   savings?: unknown // the GET /metrics/savings body collect() took
   report?: unknown // the GET /report body collect() took
   status?: unknown // the account facts collect() took (inOrg reads them)
+  panel?: string[] | null // panel.ts boardLines: tokens, quota, time saved for you, concurrent saving, the method
 }
 
 const safe = <T>(f: () => T): T | null => {
@@ -280,6 +281,9 @@ export function boardData(collected: Obj, input: BoardInput): Obj {
   return {
     ...collected,
     timeline: safe(() => timelineOf(input.outboxLines, input.todayCounts, today)),
-    weekly: safe(() => weeklyOf(input.savings, input.report, today, { metricsOn, inOrg: inOrg(input.status) })),
+    weekly: safe(() => {
+      const w = weeklyOf(input.savings, input.report, today, { metricsOn, inOrg: inOrg(input.status) })
+      return Array.isArray(input.panel) && input.panel.length ? { ...w, usage_lines: input.panel } : w
+    }),
   }
 }

@@ -49,7 +49,8 @@ export const HOOKS: readonly HookRow[] = [
       'the service refuses it. The request also carries the main session\'s ' +
       'model id and whether your latest message asked for a review (yes or no; your text is not sent). Unless the ' +
       'methods level is off, the service\'s speed-up suggestion is added once to the end of the subagent\'s prompt, ' +
-      'labelled as an agent-services suggestion.',
+      'labelled as an agent-services suggestion. ' +
+      'With the served rule tables (signed in): a subagent whose task names a step with [step:ID] is denied while that step\'s dependencies in .agent/steps.json are not done ([override: reason] lets it start); the weekly usage line that stops new subagents applies only to accounts whose served rules include it; on accounts whose served rules turn it on (not product accounts), the main conversation\'s subagents are started in the background. These checks send nothing.',
     shown: 'A deny shows its reason, which starts with "agent-services routing". A changed model is said each ' +
       'time in a dim line naming the model. The added suggestion is in the subagent\'s prompt.',
   },
@@ -60,19 +61,20 @@ export const HOOKS: readonly HookRow[] = [
     shown: 'The dim line at the subagent\'s start names it.',
   },
   {
-    event: 'tool.call', matcher: '', file: 'register.ts', does: ['deny', 'count'],
+    event: 'tool.call', matcher: '', file: 'register.ts', does: ['deny', 'file', 'count'],
     what: 'The planning gate, only at methods level on (methods on): while you are signed in, it denies Edit, Write, ' +
       'MultiEdit and NotebookEdit of the main agent when the project has no agent-state.md, or it is still in ' +
       'planning, or it has no goal and plan; an Edit or MultiEdit of at most 10 changed lines passes, and writes to ' +
       'agent-state.md and to files under .agent/ always go through. Bash is never held, so a file written through Bash is not seen. At ' +
       'level suggest it only notes such a change for one reminder; at off it does nothing. It also counts tool ' +
-      'calls, commits and finished todos locally, and the size of files read in parts. It never changes a tool\'s ' +
-      'input. The test lock: it denies a subagent\'s Edit, Write, MultiEdit or NotebookEdit of a file that ' +
+      'calls, commits and finished todos locally, and the size of files read in parts. It never changes a tool\'s input, except on an account whose served rules turn it on (not product accounts): there it puts back, on this machine and for that call only, a secret of yours in place of a {{secret:NAME}} placeholder that this plugin\'s secret masking made.' +
+      ' The test lock: it denies a subagent\'s Edit, Write, MultiEdit or NotebookEdit of a file that ' +
       'matches a glob in the project\'s .agent/test-lock.json (the main conversation may edit them; Bash is ' +
       'not checked). It times the main conversation\'s foreground Bash, PowerShell and subagent calls and ' +
       'counts its subagent dispatches, locally. After the main conversation\'s AskUserQuestion call, while you are ' +
       'signed in, it keeps your answer when it is one of the two autonomy labels of the working methods ' +
-      '(/agent-services autonomy), locally.',
+      '(/agent-services autonomy), locally. ' +
+      'With the served rule tables (signed in): browser tools and WebFetch are denied on webmail sites and on a tab seen showing one (navigating that tab away or closing it stays allowed); secrets in a tool\'s output are masked again; a subagent report longer than the served cap is saved whole in a file in the agent-services data folder and the conversation gets its opening and the file\'s path; the test-author lock denies another subagent\'s change to a test file an agent wrote in this session; only on an account whose served rules include them (not product accounts), a locked requirements file the rules name takes only an amendment appended at its end by the main conversation (never a shell command), and a commit whose Co-Authored-By names another model than the agent runs on is denied. None of this sends anything.',
     shown: 'The deny reason, which starts with "agent-services planning gate" or "agent-services test lock".',
   },
   {
@@ -123,7 +125,7 @@ export const HOOKS: readonly HookRow[] = [
     shown: 'The permission reason "agent-services dashboard (user allowed)".',
   },
   {
-    event: 'prompt.submit', matcher: '', file: 'register.ts', does: ['drop', 'context', 'ui'],
+    event: 'prompt.submit', matcher: '', file: 'register.ts', does: ['drop', 'context', 'rewrite', 'file', 'ui'],
     what: 'Drops a message that is only a sign-in code while a sign-in waits for one, and finishes the sign-in with ' +
       'it, so the code never reaches the model. Adds context blocks for the model, after your text and without ' +
       'changing it: the service\'s compaction advice, the working methods of the current phase (in full once per ' +
@@ -135,7 +137,8 @@ export const HOOKS: readonly HookRow[] = [
       'suggest and, unless the methods level is off, a reminder to run long work in the background and the steps ' +
       'of .agent/steps.json ready to start, and once per session the hint the routing service sent for a subagent ' +
       'without a task type word, each labelled as an agent-services note. It notes locally whether ' +
-      'your message asks for a review (the routing request carries only yes or no).',
+      'your message asks for a review (the routing request carries only yes or no). ' +
+      'With the served rule tables (signed in): secrets in your prompt (API keys, tokens, private keys, passwords after key= or --password) are replaced by {{secret:NAME}} placeholders before the model sees them; the real values stay in memory for this session only, never written or sent (/agent-services secrets lists the names). A long background subagent report is shortened the same way as in tool.call, and the shell watch adds its notes (queued run_command output, usage-limit alerts) for the main conversation.',
     shown: 'A dropped code: a toast and the sign-in answer in its place. A new served methods version: a line and ' +
       'a toast, once. The context blocks are not shown.',
   },
@@ -169,6 +172,58 @@ export const HOOKS: readonly HookRow[] = [
       'as a message from this plugin. Nothing is compacted after an interrupted turn, and nothing is sent once you ' +
       'wrote a message yourself.',
     shown: 'The tool call, a dim line after the compaction, and the plugin\'s message with the next step.',
+  },
+  {
+    event: 'classic.Stop', matcher: '', file: 'register.ts', does: ['deny'],
+    what: 'With the served rule tables (signed in): when a main turn ends on a promise of more of its own work and ' +
+      'nothing is running in the background to wake it, it is sent back once to do that work. Runs locally; sends nothing.',
+    shown: 'The reason the turn was sent back, as the model\'s next instruction.',
+  },
+  {
+    event: 'session.append', matcher: '', file: 'register.ts', does: ['rewrite'],
+    what: 'With the served rule tables (signed in): after a compaction, the re-attached rows of skills invoked ' +
+      'earlier, files read earlier and the deferred tool list are rewritten to one line each (instruction, memory, ' +
+      'plan and task files stay whole; /agent-services trim off turns it off), and a secret in any kept row is ' +
+      'masked. It counts, per day and model, the estimated tokens removed; nothing else is kept or sent.',
+    shown: 'Nothing; the transcript keeps the one-line rows.',
+  },
+  {
+    event: 'tool.call', matcher: 'tool: Bash, PowerShell', file: 'cmdguard.ts', does: ['deny'],
+    what: 'With the served rule tables (signed in): a search or recursive listing of a whole drive or the home ' +
+      'folder and a `cat >` with no input are denied, and a git command that takes every changed file is denied ' +
+      'while other agents are running; each denial says how to write the command instead. Runs locally; sends nothing.',
+    shown: 'The denial reason.',
+  },
+  {
+    event: 'tool.call', matcher: 'tool: mcp__agent-services__run_command', file: 'engines.ts', does: ['answer'],
+    what: 'Answers the run_command tool (main conversation only): /reload-plugins or /context is queued for the ' +
+      'idle session, any other command is refused. Answered on this machine; nothing is sent.',
+    shown: 'The tool call and its answer; the command output comes with the next message.',
+  },
+  {
+    event: 'tool.call', matcher: 'tool: Bash, PowerShell, Monitor', file: 'watch.ts', does: ['rewrite', 'context'],
+    what: 'With the served rule tables (signed in), on accounts whose served rules turn it on (not product accounts): ' +
+      'a foreground Bash or PowerShell command still running after the served time is moved to the background (the ' +
+      'call\'s timeout is lowered; the engine moves it), and the model is told the task id and output file. Sends nothing.',
+    shown: 'A note to the model with the task id.',
+  },
+  {
+    event: 'classic.Stop', matcher: 'stop_hook_active: [true, false]', file: 'watch.ts', does: ['deny', 'context'],
+    what: 'With the served rule tables (signed in): when a turn stops with a moved command still running, the model ' +
+      'is asked once whether it is stuck; background tasks still running past the served time are named to the main ' +
+      'conversation so ones no longer needed get stopped. Sends nothing.',
+    shown: 'A note to the model.',
+  },
+  {
+    event: 'classic.SubagentStop', matcher: 'stop_hook_active: [true, false]', file: 'watch.ts', does: ['deny', 'context'],
+    what: 'The same check as classic.Stop, for a subagent that stops with a moved command still running. Sends nothing.',
+    shown: 'A note to the subagent.',
+  },
+  {
+    event: 'classic.StopFailure', matcher: 'error: rate_limit', file: 'watch.ts', does: ['context'],
+    what: 'With the served rule tables (signed in): a turn that ended at the usage limit is told to carry on later, ' +
+      'on the served schedule. Sends nothing.',
+    shown: 'A message to the model when it may carry on.',
   },
 ]
 

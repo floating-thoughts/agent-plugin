@@ -449,6 +449,12 @@ export class Core {
   }
 
   // ---------------- registry
+  /** The model the agent's (null: the main conversation's) last step ran on in this session, or null. */
+  modelOf(session: string, agent: string | null): string | null {
+    const s = this.sessionsMap.get(session)
+    return (agent === null ? s?.mainModel : s?.models.get(agent)) ?? null
+  }
+
   sessions(): { session: string; harness: string; cwd: string | null; transcript: string | null }[] {
     return [...this.sessionsMap.entries()].map(([k, s]) => ({ session: k, harness: s.harness, cwd: s.cwd, transcript: s.transcript }))
   }

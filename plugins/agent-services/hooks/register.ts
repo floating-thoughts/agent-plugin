@@ -28,8 +28,9 @@ import { engineStore, safeDelete, safeGet, type KV } from './store'
 import { Svc, type HttpAnswer } from './svc'
 import { engineSleep, installTools, registerTools, SESSION_FALLBACK, svcAuthLine, toolInput } from './tools'
 import { probeProcess, updateCheck, type Gate } from './update'
-import { bandSetter, createWiring, installBand, svcTransport, type Wiring } from './wiring'
+import { bandSetter, createWiring, installBand, notePlan, svcTransport, type Wiring } from './wiring'
 import { canAskNow } from './choice'
+import { appendRow, installEngines, mailGate, promptIn, rulesStart, spawnGated, stopCheck, toolRun } from './engines'; import { spawnGate } from './subagents'; import { watchPrompt } from './watch' // rule-table engines
 
 type Ev = Record<string, any>
 type Usage = { input: number; output: number; cache_read: number; cache_write: number }
@@ -55,14 +56,7 @@ export const PROBE_WAIT_MS = 1500 // the $.process probe (it runs nothing)
 export const STAMP_PATH = 'core/host/shell_stamp.json' // under the plugin root: the export's version stamp
 
 const usage = (u: Ev | null | undefined): Usage | null =>
-  u
-    ? {
-        input: u.input_tokens ?? 0,
-        output: u.output_tokens ?? 0,
-        cache_read: u.cache_read_input_tokens ?? 0,
-        cache_write: u.cache_creation_input_tokens ?? 0,
-      }
-    : null
+  u ? { input: u.input_tokens ?? 0, output: u.output_tokens ?? 0, cache_read: u.cache_read_input_tokens ?? 0, cache_write: u.cache_creation_input_tokens ?? 0 } : null
 
 // An engine lookup that may fail: null then.
 const maybe = async <T>(f: () => Promise<T> | T): Promise<T | null> => {
@@ -225,7 +219,7 @@ async function send($: EngineInterface, kind: string, agent: string | null, fiel
 // Session-start background: metrics upload, outbox sweep, migration, update check.
 function background($: EngineInterface, r: Rt, interactive: boolean): void {
   void r.wiring.metricsTick().catch(() => undefined)
-  void r.outbox.sweep().catch(() => undefined)
+  void r.outbox.sweep().catch(() => undefined); void rulesStart($, r.svc).catch(() => undefined) // engines.ts: rule tables
   void pushStart(r).then(() => methodsStart($, r, interactive)) // phase.ts: plan items; methods.ts: CLAUDE.md file
   void migrate({
     dataDir: r.dir,
@@ -261,7 +255,7 @@ export const register: Register = (on) => {
       svc: r.svc,
       outbox: r.outbox,
       prices: PRICES,
-      dailyBody: (day) => r.wiring.previewBody(day), // the preview's body, bounded to fit a hook
+      dailyBody: (day) => r.wiring.previewBody(day), refreshTime: () => r.wiring.refreshTime(), panel: () => r.wiring.panelLines(), // wiring.ts
       clientVersion: r.wiring.clientVersion,
       marketplace: MARKETPLACE,
       selfUpdates: () => updates.selfUpdates,
@@ -269,7 +263,7 @@ export const register: Register = (on) => {
   }, () => {
     void runtime?.then((r) => r && refreshStatus(r.setStatus, r.wiring, r.store)).catch(() => undefined)
   })
-  installBand(on); installFlow(on) // flow.ts: the checkpoint tool; band.ts: the band above the prompt draws the facts setBand writes
+  installBand(on); installFlow(on); installEngines(on) // engines.ts: command guard and shell watch hooks; flow.ts: the checkpoint tool; band.ts: the band above the prompt draws the facts setBand writes
 
   on('session.start', async ($, e: Ev, next) => {
     declare($)
@@ -289,6 +283,7 @@ export const register: Register = (on) => {
 
   on('agent.spawn', async ($, e: Ev, next) => {
     if (await routingOff($)) return next(e); const agent = e.parentAgentId ?? null // routing off: nothing at all (command.ts)
+    const gate = await spawnGate($, e, ready($)); if (gate) return { deny: gate } // subagents.ts: steps gate, usage line
     const call = e.tool_use_id ?? null
     const a = await send($, 'dispatch', agent, {
       subagent_type: e.subagentType,
@@ -303,7 +298,7 @@ export const register: Register = (on) => {
     if (a?.action === 'deny') {
       return { deny: denyReason(a.reason) }
     }
-    const spawned: Ev = await next(await briefed($, a, a?.action === 'rewrite' && a.set ? { ...e, model: a.set.model } : e))
+    const spawned: Ev = await next(await spawnGated(await briefed($, a, a?.action === 'rewrite' && a.set ? { ...e, model: a.set.model } : e)))
     if (spawned && typeof spawned.agentId === 'string') {
       show($, (await send($, 'dispatched', agent, { call, child: spawned.agentId }))?.notice)
     }
@@ -323,7 +318,7 @@ export const register: Register = (on) => {
   })
 
   on('tool.call', async ($, e: Ev, next) => {
-    const held = (await holdWrite(ready($), e.tool, toolInput(e), () => $.session.cwd(), e.agentId)) ?? (await flowLock($, e, ready($))) // phase.ts: main agent; flow.ts: test lock
+    const held = (await mailGate(e)) ?? (await holdWrite(ready($), e.tool, toolInput(e), () => $.session.cwd(), e.agentId)) ?? (await flowLock($, e, ready($))) // phase.ts: main agent; flow.ts: test lock
     if (held) return { deny: held }
     const fields = { tool: e.tool, input: toolInput(e), call: e.tool_use_id ?? null }
     const agent = e.agentId ?? null
@@ -332,7 +327,7 @@ export const register: Register = (on) => {
     if (a?.action === 'deny') {
       return { deny: denyReason(a.reason, 'tool check') }
     }
-    const done: Ev = await next(e) // a tool's input is never changed
+    const done: Ev = await toolRun($, e, next, ready($)) // engines.ts: a tool's input is never changed (but where served rules unmask secrets)
     await flowAfter($, e, ready($)); await noteAutonomy($, e, done, ready($)) // flow.ts: timing; autonomy.ts: the user's choice
     show($, (await send($, 'post_tool', agent, { ...fields, ok: done?.deny === undefined && done?.isError !== true }))?.notice)
     return done
@@ -340,7 +335,7 @@ export const register: Register = (on) => {
 
   on('turn.complete', async ($, e: Ev, next) => {
     const done = await next(e); await flowTurnEnd($, e, ready($)) // flow.ts: checkpoint compaction, next turn's notes
-    const u: Ev | null = await maybe(() => $.session.usage())
+    const u: Ev | null = await maybe(() => $.session.usage()); notePlan(u) // panel.ts: the plan and context the panel shows
     const a = await send($, 'turn_end', e.agentId ?? null, {
       reason: e.reason ?? null,
       model: e.usage?.model ?? null,
@@ -371,15 +366,19 @@ export const register: Register = (on) => {
 
   on('prompt.submit', async ($, e: Ev, next) => {
     const signedIn = await pastedCode($, e); if (signedIn !== null) return { drop: signedIn } // a pasted sign-in code
+    e = await promptIn($, e, ready($)) // engines.ts: a long report shortened, secrets masked
     const a = await send($, 'prompt', e.agentId ?? null, { origin: e.origin?.kind ?? null })
     show($, a?.notice)
     // The server's advice and the first prompt's setup note: their own labelled context blocks (text untouched)
     const blocks = a?.action === 'inject' && a.context && a.context.length ? [a.context.join('\n')] : []
-    blocks.push(...(await pushLessons(ready($), e.agentId, () => $.session.cwd())), ...(await flowPrompt($, e, ready($)))) // phase.ts: served items by phase; flow.ts: notes
+    blocks.push(...(await pushLessons(ready($), e.agentId, () => $.session.cwd())), ...(await flowPrompt($, e, ready($))), ...(await watchPrompt($, e))) // phase.ts: served items by phase; flow.ts: notes
     const note = !e.agentId && (await ready($)) ? await onboardingNote($) : null
     if (note) blocks.push(note)
     return blocks.length ? next({ ...e, context: [...(e.context ?? []), ...blocks] }) : next(e)
   }).catch(($, e, next) => next(e))
+
+  on('classic.Stop', async ($, e: Ev, next) => stopCheck(e, next)).catch(($, e, next) => next(e)) // engines.ts: promise send-back
+  on('session.append', async ($, e: Ev, next) => next(await appendRow($, e))).catch(($, e, next) => next(e)) // engines.ts: trim, masking
 
   on('session.compact', async ($, e: Ev, next) => {
     const b: Ev | null = await maybe(() => $.session.usage())

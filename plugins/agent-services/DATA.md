@@ -54,11 +54,15 @@ the device's public key, the device id, the Claude account hash, and the harness
 The **daily usage summary** holds: the day and the plugin version; per model, input, output and cache token counts
 and the cost; per task type (the plugin sends a word from a fixed list, or `other`; the service itself accepts any
 short word), model and hashed project, a count; session counts
-by kind and harness; and the savings figures (token counts, compaction sizes, file-read sizes, random ids for
-compactions). It holds no prompt text, file contents, file paths or session ids. `/agent-services sharing preview`
+by kind and harness; the savings figures (token counts, compaction sizes, file-read sizes, random ids for
+compactions); and the day's time figures, numbers only: how many bytes you typed in your own prompts, the seconds
+when at least one agent was working on this computer, the same seconds added up over every session and subagent,
+and the number of turns. It holds no prompt text, file contents, file paths or session ids. `/agent-services sharing preview`
 shows exactly what one upload sends.
 
-**Only when you run a command:** the weekly-email switch (`sharing mail on|off`, `sharing on_backfill|on_from_now|off|not_now`); the
+**Only when you run a command:** `sharing refresh_time` sends each past day's time figures again (the same daily
+summary, marked as a time-only refresh: the service changes only the time figures of a day it already holds, and
+stores nothing for a day it does not); the weekly-email switch (`sharing mail on|off`, `sharing on_backfill|on_from_now|off|not_now`); the
 company-email switch (company admins); `company` for a member of a company account who is not its admin (nothing but the signed request: the service answers only your own row of the admin's board, the week and the company settings that apply to you, and stores nothing new); and the one-time savings estimate (`estimate send`, only exactly what
 `estimate preview` showed you: token and cost totals per model, dispatch counts per task type from a fixed list,
 compaction counts and a session-length histogram).
@@ -75,6 +79,49 @@ published once more to turn it into this kind of page). The page declares the ar
 owner, can write to it). After that, an update does not publish the page: the plugin writes the figures the page
 shows, and nothing else, to one document of that database (`board/figures`) with Claude Code's ArtifactData tool, and
 the page reads them from there when you open it. Where that tool is missing, the page is published again as before.
+
+**Rule tables, once per signed-in session:** the plugin asks for the rule tables it runs on this computer (command
+guard, secret masking, row trimming after a compaction, subagent gates and long reports, shell watch). The request
+sends only the update channel (stable or beta); no command, prompt, tool input or output, file path or report text is
+ever sent for these engines. The tables are kept in memory for that session only (never written to a file, the store or
+a log), and stay until the session ends even if the service becomes unreachable. Without them (signed out, offline,
+locked) every one of these engines is off; the band, the status line and one line at session start say so.
+
+What the engines do on this computer, with the tables:
+
+- Command guard (Bash and PowerShell): a search or recursive listing of a whole drive or the home folder and a
+  `cat >` with no input are refused; a git command that takes every changed file is refused while other agents are
+  running. Browser tools and WebFetch are refused on webmail sites and on a tab seen showing one. When a main turn
+  ends on a promise of more of its own work with nothing running to wake it, it is sent back once. On accounts whose
+  served rules turn it on (not product accounts), the main conversation's subagents start in the background.
+- Secret masking: secrets in your prompt, in tool output and in kept conversation rows (API keys, tokens, private keys,
+  passwords after `key=` or `--password`) are replaced by `{{secret:NAME}}` placeholders before the model sees them.
+  The real values stay in memory for this session only. A tool's input is not changed: the value is not put back into
+  tool calls, except on an account whose served rules turn that on, and there only into shell commands and file
+  writes (Bash, PowerShell, Write, Edit, MultiEdit, NotebookEdit), never into web, browser, MCP or subagent calls. `/agent-services secrets` lists the placeholder
+  names (never values); `secrets forget` empties the list. The outbound redaction of what this plugin itself sends is
+  separate and works signed out too.
+- Row trimming: after a compaction, the re-attached rows of skills invoked earlier, files read earlier and the
+  deferred tool list are rewritten to one line each (instruction, memory, plan and task files stay whole). The daily
+  summary (only when you turned it on) carries, per model, the estimated tokens removed and how many compactions were
+  trimmed (`savings.trim`), numbers only.
+- Subagents: which agent wrote each test file in this session is remembered in memory, and another subagent may not
+  change that file. A subagent whose task names a step with `[step:ID]` waits until that step's dependencies in
+  `.agent/steps.json` are done (`[override: reason]` lets it start). A subagent report longer than the served cap is
+  saved whole in a file under the plugin's data folder (`agent-reports/<session>/`), and the conversation gets its
+  opening and the file's path. A weekly usage line that stops new subagents applies only to accounts whose served
+  rules include one.
+  On accounts whose served rules include them (not product accounts): a requirements file the rules name, whose opening lines say it
+  is locked, takes only an amendment appended at its end by the main conversation (a shell command never changes it),
+  and a commit whose Co-Authored-By line names another model than the one the agent runs on is refused; the model
+  is the one this computer saw the agent's last request run on. Nothing is sent.
+- Shell watch: on accounts whose served rules turn it on (not product accounts), a foreground Bash or PowerShell
+  command still running after the served time is moved to the background, and the model is told its task id;
+  long-running background tasks are named to the main conversation; a
+  turn that ended at the usage limit is told to carry on later; the `run_command` tool queues `/reload-plugins` or
+  `/context` for the idle session and refuses every other command; past 80% of a usage limit the model is told once.
+
+`/agent-services check` shows which engines are on in this session.
 
 ## 2. What the service keeps, and for how long
 
@@ -135,10 +182,15 @@ fetched, never another member's. For the admin, the same command still shows the
 | `~/.agent-services/MIGRATED` | what the one-time move from an older version did |
 | `~/.agent-services/REMOVED` | left by `/agent-services remove`; while it holds text, the plugin does nothing in any session; a sign-in empties it |
 | `~/.claude/CLAUDE.md` | one marked section importing `~/.agent-services/methods.md`, only after you chose `methods on` |
+| Claude Code's plugin store (see above), key `usage_days` | this computer's figures per day for the usage panel: tokens and their cost at API prices, typed bytes, agent seconds and turns; never sent as such |
 | `.agent/test-lock.json`, `.agent/pending.md`, `.agent/steps.json` in a project | read only, never written or sent by the plugin; you or the model write them (see "Local helpers" below) |
 
 `~/.agent-services` is `AGENT_SVC_DATA_DIR` when that is set. The plugin reads, and does not send: your Claude
-account id (only its hash leaves), your Claude Code transcripts (to count tokens for the summary and the estimate),
+account id (only its hash leaves), your Claude Code transcripts (to count tokens for the summary and the estimate,
+and the time figures; Claude Code lets a plugin read files of up to 4 MiB, so larger transcripts are left out unless
+`~/.agent-services/services/time-days.json` holds per-day figures written by a separate tool, which then take the
+place of the plugin's own for the days it covers), your plan's usage and context figures as Claude Code reports them
+(shown in the panel, never sent),
 files read in parts (to count their size), a project's `agent-state.md` and the three `.agent/` files above, the
 text of your messages (only to see whether one asks for a review), and the marketplace list.
 
@@ -208,6 +260,8 @@ Every answer has a fixed shape:
 | the daily upload, the weekly email and the savings page | `/agent-services sharing off` ("Don't upload"; never asked again; `sharing not_now` asks again in 7 days; each part alone: `sharing page off`, `sharing mail off`) |
 | the working methods and the planning gate | `/agent-services methods off` (works signed out too; `methods suggest` keeps them as suggestions without the CLAUDE.md line) |
 | subagent routing (the routing request, its deny or model change, and the suggestion added to subagent prompts) | `/agent-services routing off` (back: `routing suggest`, the default, or `routing strict`, which lets the service refuse a subagent without a task type word; works signed out too) |
+| row trimming after a compaction | `/agent-services trim off` (back: `trim on`) |
+| the command guard, secret masking, row trimming, subagent gates and shell watch at once | `/agent-services offline on` or `logout` (they need the served tables) |
 | everything on this computer | `/agent-services remove`, then `claude plugin uninstall agent-services@agent-plugin` |
 
 Checkpoint timing has no switch of its own: it stops when you sign out or uninstall, and offline mode stops it;

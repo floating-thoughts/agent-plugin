@@ -3,7 +3,8 @@
 // pending-decisions count on the status line, the background reminder and the concurrency note.
 // Project files, read from the session's working directory, never written by the plugin:
 // - .agent/test-lock.json  {"locked": ["tests/**", ...]}: globs of test files a subagent may not change with Edit,
-//   Write, MultiEdit or NotebookEdit (the main conversation may). Bash and other tools are not checked.
+//   Write, MultiEdit or NotebookEdit (the main conversation may). Bash and other tools are not checked. Beside it,
+//   the served test-author lock (subagents.ts) keeps another subagent off a test file an agent wrote this session.
 // - .agent/pending.md  one "- [ ] ..." line per decision waiting for the user ("- [x]" once answered): the status
 //   line shows how many are open.
 // - .agent/steps.json  {"steps": [{"id", "deps": [ids], "status": "todo" | "running" | "done"}]}: at the end of a main
@@ -22,6 +23,7 @@ import { takeNotice } from './methods'
 import { methodsLevel } from './methods_level'
 import { SEP } from './status'
 import { engineStore } from './store'
+import { authorCheck, ownerCheck, signedIn } from './subagents'
 import { toolInput } from './tools'
 
 type Obj = Record<string, any>
@@ -213,19 +215,34 @@ export async function briefed($: EngineInterface, a: { fallback?: unknown } | nu
   }
 }
 
-async function lockCheck($: EngineInterface, e: Obj): Promise<string | null> {
-  if (!e.agentId || !EDIT_TOOLS.includes(e.tool)) return null
-  const input = toolInput(e)
-  const file = typeof input.file_path === 'string' ? input.file_path : typeof input.notebook_path === 'string' ? input.notebook_path : null
-  if (!file) return null
-  const globs = lockGlobs(await readProject($, LOCK_FILE))
-  if (!globs.length) return null
+// The model the calling agent's last step ran on (the runtime's core keeps it), or null.
+async function stepModel(rt: Ready, agent: unknown): Promise<string | null> {
+  try {
+    const r = (await rt) as { core?: { modelOf?: (s: string, a: string | null) => string | null }; session?: string } | null
+    const m = r?.session ? r.core?.modelOf?.(r.session, typeof agent === 'string' && agent ? agent : null) : null
+    return typeof m === 'string' && m ? m : null
+  } catch {
+    return null
+  }
+}
+
+// The explicit lock file first (subagent edits only), then the served demand lock and commit check, then the served
+// test-author lock (subagents.ts), which also notes who wrote each test file this session.
+async function lockCheck($: EngineInterface, e: Obj, rt?: Ready): Promise<string | null> {
+  if (![...EDIT_TOOLS, 'Bash', 'PowerShell', 'Read', 'Grep'].includes(e.tool)) return null
   let cwd: string | null = null
   try {
-    cwd = await $.session.cwd()
+    const c = await $.session.cwd()
+    cwd = typeof c === 'string' && c ? c : null
   } catch {}
-  const glob = lockedBy(file, cwd, globs)
-  return glob ? lockReason(file, glob) : null
+  const input = toolInput(e)
+  const file = typeof input.file_path === 'string' ? input.file_path : typeof input.notebook_path === 'string' ? input.notebook_path : null
+  if (e.agentId && file && EDIT_TOOLS.includes(e.tool)) {
+    const globs = lockGlobs(await readProject($, LOCK_FILE))
+    const glob = globs.length ? lockedBy(file, cwd, globs) : null
+    if (glob) return lockReason(file, glob)
+  }
+  return (await ownerCheck($, e, cwd, await stepModel(rt, e.agentId))) ?? authorCheck(e, cwd)
 }
 
 async function turnEnd($: EngineInterface, e: Obj): Promise<void> {
@@ -252,16 +269,6 @@ async function turnEnd($: EngineInterface, e: Obj): Promise<void> {
 
 type Ready = Promise<{ svc: { authState(): Promise<string> } } | null> | undefined
 let checkpointSetUp = false
-
-async function signedIn(rt: Ready): Promise<boolean> {
-  if (rt === undefined) return true
-  try {
-    const r = await rt
-    return !!r && (await r.svc.authState()) === 'ok'
-  } catch {
-    return false
-  }
-}
 
 /** session.start, after next(e): the other plugins' tools are registered by now. */
 export async function flowStart($: EngineInterface, rt?: Ready): Promise<void> {
@@ -313,7 +320,7 @@ const started = new WeakMap<object, number>() // a tool.call event -> when flowL
 export async function flowLock($: EngineInterface, e: Obj, rt?: Ready): Promise<string | null> {
   try {
     if (!(await signedIn(rt))) return null
-    const locked = await lockCheck($, e)
+    const locked = await lockCheck($, e, rt)
     if (locked) return locked
     if (!e.agentId && (e.tool === 'Agent' || e.tool === 'Task')) dispatchedThisTurn++
     started.set(e, Date.now())

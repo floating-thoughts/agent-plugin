@@ -66,10 +66,13 @@ import { approveMethods, importLine, LEVEL_KEY, type Level, levelOf, methodsDiff
 import { AUTONOMY_LINE, AUTONOMY_SET, readAutonomy, setAutonomy } from './autonomy'
 import { framing, lineDiff, NOTE_LABEL, pendingNoteText, updateNoteText } from './review'
 import { bandSetup } from './band'
+import { durationText } from './panel'
 import { ORG_PAUSED_LINE, ORG_SAVINGS_TEXT, ORG_SET_TEXT, orgChoice, orgNotice, readOrg, sharingQuestion } from './org'
 import { hooksText } from './hooks_list'
 import { removeAll, removedMarker, resetRemoved, type RemoveDeps } from './remove'
 import { levelOf as routingLevelOf, ROUTING_KEY, ROUTING_LEVELS, routingLevel, routingRecord, type RoutingLevel } from './routing_level'
+import { engineCommand } from './engines'
+import { clearRules } from './rules'
 
 export { denyReason, spawnLine } from './hooks_list'
 export { isRemoved } from './remove'
@@ -87,14 +90,15 @@ export const COMMAND_SPEC = {
     '[status | login [<email>] | logout | setup | sharing [on_backfill | on_from_now | off | not_now | preview | ' +
     'page on|off | mail on|off] | ' +
     'savings | methods [off | suggest | on | preview | diff | accept | keep] | routing [off | suggest | strict] | ' +
-    'autonomy [auto | ask | clear] | update | offline on|off | estimate [preview | send] | info [data | hooks | log [<day>]] | remove | company [mail on|off]]',
+    'autonomy [auto | ask | clear] | update | offline on|off | estimate [preview | send] | info [data | hooks | log [<day>]] | remove | company [mail on|off] | ' +
+    'secrets [forget] | trim [on | off] | check]',
 } as const
 
-// Every word the command answers: the fourteen of USAGE, then the hidden `code` (sign-in fallback) and `served`.
+// Every word the command answers: the seventeen of USAGE, then the hidden `code` (sign-in fallback) and `served`.
 export const KNOWN_COMMANDS = ['status', 'login', 'logout', 'setup', 'sharing', 'savings', 'methods', 'routing',
-  'autonomy', 'update', 'offline', 'estimate', 'info', 'remove', 'company', 'code', 'served']
+  'autonomy', 'update', 'offline', 'estimate', 'info', 'remove', 'company', 'secrets', 'trim', 'check', 'code', 'served']
 /** The subcommands that work while signed out (`methods` alone and `methods off` too, see dispatch). */
-export const AUTH_FAIL_COMMANDS = ['status', 'login', 'code', 'logout', 'update', 'info', 'remove']
+export const AUTH_FAIL_COMMANDS = ['status', 'login', 'code', 'logout', 'update', 'info', 'remove', 'secrets', 'check']
 export const ASK_HEADER = 'Sign-in'
 export const EMAIL_QUESTION = 'Which email address is your agent-services account under?'
 export const EMAIL_CANCEL = ['Cancel sign-in', 'Not now'] // the engine's dialog needs 2-4 options
@@ -295,7 +299,8 @@ export const ERROR_TEXT: Record<string, string> = {
 export const USAGE =
   `Usage: ${COMMAND} [status | login [<email>] | logout | setup | sharing [on_backfill | on_from_now | off | not_now | ` +
   'preview | page on|off | mail on|off] | savings | methods [off | suggest | on | preview | diff | accept | keep] | routing [off | suggest | ' +
-  'strict] | autonomy [auto | ask | clear] | update | offline on|off | estimate [preview | send] | info [data | hooks | log [<day>]] | remove | company [mail on|off]]'
+  'strict] | autonomy [auto | ask | clear] | update | offline on|off | estimate [preview | send] | info [data | hooks | log [<day>]] | remove | company [mail on|off] | ' +
+  'secrets [forget] | trim [on | off] | check]'
 
 // The 0.5.0 spellings, kept for one version: [old words, new words] (a trailing '*' passes the rest on).
 export const RENAMED: readonly (readonly [string, string])[] = [
@@ -348,6 +353,7 @@ export type ReadFs = {
 
 export type CommandDeps = {
   svc: Svc
+  engines?: (sub: string, rest: string[]) => Promise<string> // engines.ts engineCommand
   store: KV
   now: () => number // ms since the epoch
   ask?: Ask | null
@@ -357,6 +363,8 @@ export type CommandDeps = {
   facts?: () => Promise<Facts | ScanProgress | null> // the estimate's scan of this machine's history (EstimateScan);
   // null when there is none
   dailyBody?: (day: string) => Promise<Record<string, unknown>> // one day's POST /metrics/daily body (may throw)
+  refreshTime?: () => Promise<string> // `sharing refresh_time`: past days' time figures again (wiring.ts refreshTime)
+  panel?: () => Promise<string[]> // the usage panel's lines (panel.ts panelLines through wiring.ts)
   clientVersion?: string // the plugin's release version (the export's shell stamp), for the estimate body
   outbox?: Outbox | null
   outboxFs?: ReadFs | null
@@ -685,6 +693,10 @@ export class Command {
         return rest.length ? USAGE : this.remove()
       case 'company': // the company admin's board and weekly summary email; a member's own view
         return companyCommand({ svc, store: this.d.store, url: () => this.d.bossUrl?.() ?? Promise.resolve(null) }, rest)
+      case 'secrets': // engines.ts: the secret masking, row trimming and the on/off check of every engine
+      case 'trim':
+      case 'check':
+        return this.d.engines ? this.d.engines(sub, rest) : USAGE
       default:
         return this.served(rest)
     }
@@ -743,6 +755,7 @@ export class Command {
         AUTONOMY_LINE[(await readAutonomy(this.d.store)) ?? 'none']!)
       const member = await readOrg(this.d.store)
       if (member && member.admin !== true) lines.push(COMPANY_VIEW_LINE) // a member's own view of the admin's board
+      lines.push(...(await this.safe(() => this.d.panel?.() ?? Promise.resolve([] as string[]), [] as string[])))
       const n = (await this.safe(() => this.openQuestions(), [] as Question[])).length
       if (n) lines.push(`${n} question${n === 1 ? '' : 's'} waiting: run ${COMMAND} setup.`)
     }
@@ -1101,6 +1114,9 @@ export class Command {
       return this.setRecord(w[0] === 'on_backfill' ? 'backfill' : 'from_now')
     }
     if (w.length === 1 && w[0] === 'preview') return this.sharingPreview()
+    if (w.length === 1 && w[0] === 'refresh_time') {
+      return this.d.refreshTime ? this.d.refreshTime() : 'The time figures cannot be sent from here.'
+    }
     if (w.length === 1 && w[0] === 'on') return this.sharingChoice() // 0.6.3: asks, never turns it on by itself
     if (w.length === 2 && w[0] === 'page' && (w[1] === 'on' || w[1] === 'off')) return this.setPage(w[1] === 'on')
     if (w.length === 2 && w[0] === 'mail' && (w[1] === 'on' || w[1] === 'off')) return this.setMail(w[1] === 'on')
@@ -1308,6 +1324,7 @@ export class Command {
   private async complete(email: string, code: string, head: string, ask = true): Promise<string> {
     const r = await this.d.svc.loginFinish(email, code)
     if (!r.ok) return head + `Sign-in failed: ${errorText(r.error)}`
+    clearRules() // a new sign-in (maybe another account): the tables are fetched again for it
     await this.safe(() => this.clearRemoved(), undefined) // signed in again after /agent-services remove: work again
     const st = await this.d.svc.status()
     const lines = [head + `Signed in (account ${st.account_id ?? '?'}, plan ${st.plan ?? 'unknown'}). agent-services is on.`]
@@ -1329,6 +1346,7 @@ export class Command {
     const svc = this.d.svc
     const before = await svc.authState(true)
     const r = await svc.logout()
+    if (r.error !== 'offline') clearRules() // the engines stop at once (also when the store kept the sign-in)
     if (r.ok) return 'Signed out: the server ended this sign-in and it was deleted from this machine.'
     if (r.error === 'store_unavailable') {
       return (
@@ -1524,8 +1542,17 @@ export function savingsText(b: unknown): string {
     `agent-services saved about ${usd(b.usd)} (${pct(b.pct)} of ${usd(b.api_usd)} at API prices) over ${b.days} ` +
     `day${b.days === 1 ? '' : 's'}` +
     (b.first_day && b.last_day ? ` (${b.first_day} to ${b.last_day})` : '') +
-    `: routing ${lever('route')}, compaction ${lever('compact')}, index reads ${lever('index')}.`
+    `: routing ${lever('route')}, compaction ${lever('compact')}, index reads ${lever('index')}.` +
+    timeText(b.time)
   )
+}
+
+/** The service's time figures (GET /metrics/savings `time`) as one sentence plus its disclosure; empty without them. */
+function timeText(t: unknown): string {
+  if (!isObj(t) || num(t.agent_seconds) === null || t.agent_seconds <= 0) return ''
+  const you = t.agent_seconds as number
+  return ` Spent by you: ${durationText(num(t.typing_seconds) ?? 0)}; saved for you: ${durationText(you)}; concurrency save: ${durationText(num(t.concurrent_seconds) ?? 0)}.` +
+    (typeof t.method === 'string' && t.method ? ` ${t.method}` : '')
 }
 
 export function estimateError(code: string | null): string {
@@ -1571,6 +1598,8 @@ export type EngineOptions = {
   outbox?: Outbox | null
   prices?: Prices | null // the shipped price table; without it the estimate has no data
   dailyBody?: (day: string) => Promise<Record<string, unknown>>
+  refreshTime?: () => Promise<string> // wiring.ts refreshTime
+  panel?: () => Promise<string[]> // wiring.ts panelLines
   clientVersion?: string
   marketplace?: string
   now?: () => number
@@ -1587,6 +1616,7 @@ export function engineDeps($: EngineInterface, o: EngineOptions): CommandDeps {
   }
   return {
     svc: o.svc,
+    engines: (sub, rest) => engineCommand($, sub, rest),
     store: {
       get: (k) => $.store.get(k),
       set: (k, v) => $.store.set(k, v as any),
@@ -1614,6 +1644,8 @@ export function engineDeps($: EngineInterface, o: EngineOptions): CommandDeps {
       return estimateScan.step(`${d.configDir}/projects`) // a part of a long history per run (fits the hook)
     },
     dailyBody: o.dailyBody,
+    refreshTime: o.refreshTime,
+    panel: o.panel,
     clientVersion: o.clientVersion,
     outbox: o.outbox ?? null,
     outboxFs: fs,

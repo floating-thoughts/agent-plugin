@@ -36,9 +36,12 @@ import { collect, pageChanged, publishedUrlOk, render as renderPage, renderDue }
 import { savingsDue, statusText, updateCommand, updateHintDue } from './status'
 import { counterDays, countsOf, dayCountsFromStore, dayEmpty, normalizeDay } from './day_counts'
 import { boardData, readOutboxDay, timelineOf, weeklyOf } from './board_facts'
-import { bandFacts, paused, type BandFacts, type BandKind, type BandState } from './band'
+import { bandFacts, paused, setBandPanel, type BandFacts, type BandKind, type BandState } from './band'
 import { readOrg } from './org'
 import { accountOf, accountSwitched, uploadFloor, uploadOn } from './choice'
+import { boardLines, heldPlan, panelLines, panelOf, refreshUsage, USAGE_DAYS_KEY, type Panel } from './panel'
+import { Scanner } from './transcripts'
+export { notePlan } from './panel' // register.ts imports it through this module
 import { BossBoard } from './boss'
 import { MAIN_BOARD, type Board } from './dashboard'
 
@@ -52,6 +55,8 @@ export const SAVINGS_CACHE_KEY = 'savings_cache' // { tried_at, body }: the last
 export const REPORT_CACHE_KEY = 'report_cache' // { tried_at, body }: the last good GET /report body
 export const METRICS_STATE_KEY = 'metrics_state' // { previewed_day, enabled_day, last_uploaded_day }
 export const METRICS_LEASE_KEY = 'metrics_lease' // { holder, until }: best-effort, one uploading session
+export const TIME_REFRESH_KEY = 'time_refresh' // { running, at, sent?, error? }: the last sharing refresh_time run
+export const TIME_DAYS_FILE = 'time-days.json' // under <data dir>/services: the owner tool's per-day figures
 export const ESTIMATE_KEY = 'estimate_answer' // { made_at, estimate }: the last estimate answer, for the dashboard
 export const UPDATE_HINT_KEY = 'update_hint_at' // ms of the last time the status line showed the update command
 export const METRICS_LEASE_MS = 120_000
@@ -132,7 +137,7 @@ export async function loadTranscripts(
   fs: WiringFs,
   root: string | null | undefined,
   maxDepth = 6,
-  bound: { since?: number; maxBytes?: number } = {},
+  bound: { since?: number; maxBytes?: number; onFile?: (f: TranscriptFile) => void } = {},
 ): Promise<TranscriptFile[]> {
   const out: TranscriptFile[] = []
   if (!root || typeof fs.list !== 'function') return out
@@ -152,6 +157,10 @@ export async function loadTranscripts(
         const mtime = num(e.mtime)
         if (bound.since !== undefined && mtime !== null && mtime < bound.since) continue
         const size = num(e.size)
+        if (bound.onFile) {
+          later.push({ rel: r, path, size })
+          continue
+        }
         let text: string | null = null
         if (size === null || size <= READ_LIMIT) {
           try {
@@ -169,7 +178,25 @@ export async function loadTranscripts(
       }
     }
   }
+  const later: { rel: string; path: string; size: number | null }[] = []
   await walk(base, '', 0)
+  if (bound.onFile) {
+    // one file at a time, in walkOrder: no text is kept after the callback
+    for (const f of walkOrder(later)) {
+      let text: string | null = null
+      if (f.size === null || f.size <= READ_LIMIT) {
+        try {
+          text = String(await fs.read(f.path))
+        } catch {
+          text = null
+        }
+      }
+      const got = text === null ? (f.size ?? 0) : utf8(text).length
+      if (text !== null) readBytes += got
+      if (bound.maxBytes !== undefined && readBytes > bound.maxBytes) throw new Error('transcripts over the read bound')
+      bound.onFile({ rel: f.rel, size: f.size ?? got, text: text !== null && got > READ_LIMIT ? null : text })
+    }
+  }
   return walkOrder(out)
 }
 
@@ -361,6 +388,7 @@ export class Wiring {
    *  of its own (answers true), the fetched figure does not overwrite that line in this refresh. */
   async refreshStatus(first?: () => Promise<boolean>): Promise<string> {
     this.dailyTick()
+    if (await this.authOk()) this.refreshPanel()
     if (!(await this.authOk())) {
       const text = await this.line(null, null)
       this.show(text)
@@ -441,6 +469,7 @@ export class Wiring {
   private async band(): Promise<void> {
     if (!this.d.setBand) return
     const state = await this.bandState()
+    setBandPanel(['facts', 'wait', 'off'].includes(state.state) ? await this.panel().catch(() => null) : null)
     try {
       this.d.setBand(state)
     } catch {
@@ -520,7 +549,8 @@ export class Wiring {
     })
     // a person in an org (any savings choice, "each" included) is told on the board that the admin sees the figure
     const org = await readOrg(this.d.store)
-    return boardData(base, { outboxLines: await this.outboxToday(), todayCounts: await this.todayCounts(), savings, report, status: { ...(status ?? {}), org } })
+    const panel = await this.panel().catch(() => null)
+    return boardData(base, { outboxLines: await this.outboxToday(), todayCounts: await this.todayCounts(), savings, report, status: { ...(status ?? {}), org }, panel: panel ? boardLines(panel) : null })
   }
 
   /** Today's outbox lines of every session, for the board's timeline (this session's held lines written first). */
@@ -633,9 +663,124 @@ export class Wiring {
     return parse(await get(this.d.store, SALT_KEY)) ?? raw // two sessions making one at once: the stored one wins
   }
 
-  /** The transcript facts (the diagnostic tool's scan) of the projects root. */
-  async facts(bound: { since?: number; maxBytes?: number } = {}): Promise<Facts> {
-    return scan(await loadTranscripts(this.d.fs, this.d.projectsRoot, 6, bound), this.d.prices ?? {})
+  /** The transcript facts (the diagnostic tool's scan) of the projects root. `full`: one file at a time (no text
+   * kept), and the days of the days file (TIME_DAYS_FILE, written by the owner tool that reads every transcript,
+   * over-4-MiB ones included) take the place of the scan's time figures and go to `full_days` for the panel. */
+  async facts(bound: { since?: number; maxBytes?: number } = {}, full = false): Promise<Facts> {
+    if (!full) return scan(await loadTranscripts(this.d.fs, this.d.projectsRoot, 6, bound), this.d.prices ?? {})
+    const s = new Scanner(this.d.prices ?? {})
+    await loadTranscripts(this.d.fs, this.d.projectsRoot, 6, { ...bound, onFile: (f) => s.add(f) })
+    const facts = s.finish()
+    const file = await this.timeDays()
+    if (file) {
+      facts.full_days = file
+      for (const [day, d] of Object.entries(file)) {
+        facts.time_by_day[day] = {
+          typed_bytes: num(d.typed_bytes) ?? 0,
+          agent_seconds: num(d.agent_seconds) ?? 0,
+          agent_sum_seconds: num(d.agent_sum_seconds) ?? 0,
+          turns: num(d.turns) ?? 0,
+        }
+      }
+    }
+    return facts
+  }
+
+  /** The days file's days (written by a separate tool that reads every transcript), or null when there is none. */
+  private async timeDays(): Promise<Record<string, Obj> | null> {
+    try {
+      const o = JSON.parse(String(await this.d.fs.read(`${this.d.dataDir}/services/${TIME_DAYS_FILE}`)))
+      if (!isObj(o) || !isObj(o.days)) return null
+      // the day the tool ran (and any later one) was not over yet: those come from the scan
+      const cut = num(o.at) !== null ? localDay(o.at) : this.today()
+      return Object.fromEntries(Object.entries(o.days).filter(([d, v]) => d < cut && isObj(v))) as Record<string, Obj>
+    } catch {
+      return null
+    }
+  }
+
+  // ---------------- the usage panel (panel.ts): band, status command, board
+
+  /** The panel from the stored days (no scan here), the plan last seen and the cached savings figure. */
+  async panel(): Promise<Panel> {
+    const held = await get(this.d.store, USAGE_DAYS_KEY)
+    const days = isObj(held) && isObj(held.days) ? held.days : {}
+    const savings = (await this.metricsOnNow()) ? await this.savingsBody(false) : null
+    return panelOf(days, heldPlan(), savings, this.today(), this.now())
+  }
+
+  async panelLines(): Promise<string[]> {
+    return panelLines(await this.panel())
+  }
+
+  /** The stored days, scanned again when due (panel.ts refreshUsage: every 10 minutes at most), then a redraw. */
+  private refreshPanel(): void {
+    void this.track(
+      (async () => {
+        const before = JSON.stringify((await this.panel()).columns)
+        await refreshUsage(this.d.store, (since) => this.facts(since === null ? {} : { since }, true), this.now())
+        if (JSON.stringify((await this.panel()).columns) !== before) await this.band() // a redraw only on a change
+      })().catch(() => undefined),
+    )
+  }
+
+  /**
+   * `sharing refresh_time`: the past days of this computer's transcripts the daily upload may send (from the upload
+   * floor on, at most the 395 days the service keeps) sent again with their time figures as a time-only refresh,
+   * under the same switches as the daily upload (the savings record, the metrics transport, offline). The service
+   * adds `time` only to a day of this account it already holds that has no time figures yet, and stores nothing
+   * else, so dollars never change, another computer's figures are never overwritten and sending twice changes
+   * nothing. Not after an account switch on this computer (its transcripts may be the other account's work).
+   * Runs in the background; the answer says it started, and asking again says how the last run went.
+   */
+  async refreshTime(): Promise<string> {
+    if (!(await uploadOn(this.d.store))) return 'The savings record is not on for this account, so no time figures were sent.'
+    const settings = await this.settings()
+    if (settings.services.metrics !== true) return 'The daily upload is off, so no time figures were sent.'
+    if (settings.offline) return 'Offline mode is on, so no time figures were sent.'
+    if (await accountSwitched(this.d.store)) {
+      return 'This computer last uploaded for another account, so its past time figures were not sent: they may be ' +
+        "that account's work. The time figures of new days go with the daily upload."
+    }
+    const last = await get(this.d.store, TIME_REFRESH_KEY)
+    if (isObj(last) && last.running === true && (num(last.at) ?? 0) > this.now() - 30 * 60 * 1000) {
+      return 'The time figures are being sent already; ask again in a few minutes.'
+    }
+    const before = isObj(last) && last.running !== true
+      ? ` Last run: ${num(last.sent) ?? 0} days sent${typeof last.error === 'string' ? ` (stopped: ${last.error})` : ''}.`
+      : ''
+    await put(this.d.store, TIME_REFRESH_KEY, { running: true, at: this.now() })
+    void this.track(this.sendTime().catch(() => put(this.d.store, TIME_REFRESH_KEY, { running: false, at: this.now(), sent: 0, error: 'failed' })))
+    return 'Sending the time figures of the past days of this computer again, in the background. The service adds ' +
+      'them only to days it already holds without time figures; dollars do not change. Run this again to see how ' +
+      'it went.' + before
+  }
+
+  private async sendTime(): Promise<void> {
+    const facts = await this.facts({}, true)
+    const today = this.today()
+    const keep = plusDays(today, -395)
+    const upload = await uploadFloor(this.d.store, today) // the daily upload's floor (the choice, an account switch)
+    const floor = upload > keep ? upload : keep
+    let sent = 0
+    let error: string | null = null
+    for (const day of Object.keys(facts.time_by_day).sort()) {
+      if (day < floor || day >= today) continue
+      let body: Obj
+      try {
+        body = await this.dailyBody(day, facts)
+      } catch {
+        continue
+      }
+      if (!isObj(body.time)) continue
+      const r = await this.d.svc.call('POST', DAILY_ROUTE, { ...body, time_only: true }, { kind: 'daily', hook: 'background' })
+      if (!r.ok) {
+        error = r.error || 'failed'
+        break
+      }
+      sent += 1
+    }
+    await put(this.d.store, TIME_REFRESH_KEY, { running: false, at: this.now(), sent, error })
   }
 
   /** One day's body for a preview inside a hook (10 s of its own time, where parsing is counted and reads are not):
@@ -660,8 +805,10 @@ export class Wiring {
     } catch {
       kinds = null
     }
+    const f = facts ?? (await this.facts())
     return dailyBody(day, {
-      facts: facts ?? (await this.facts()),
+      facts: f,
+      time: f.time_by_day?.[day] ?? null,
       savings: await this.daySavings(day),
       salt: await this.salt(),
       prices: this.d.prices ?? {},
@@ -718,7 +865,7 @@ export class Wiring {
       const st = start < floor ? { ...saved, last_uploaded_day: plusDays(floor, -1) } : saved
       if (first > yesterday) return { sent: [], error: null }
       // only the transcripts changed since the first day to send began: the same figures, far less to parse
-      const facts = await this.facts({ since: new Date(`${first}T00:00:00`).getTime() })
+      const facts = await this.facts({ since: new Date(`${first}T00:00:00`).getTime() }, true)
       const withCounts = new Set<string>()
       for (const d of await counterDays(this.d.store)) if (!dayEmpty(await readDay(this.d.store, d))) withCounts.add(d)
       const active = (day: string): boolean => {
@@ -741,7 +888,12 @@ export class Wiring {
           }
           throw e
         }
-        const r = await this.d.svc.call('POST', DAILY_ROUTE, body, { kind: 'daily', hook: 'background' })
+        let r = await this.d.svc.call('POST', DAILY_ROUTE, body, { kind: 'daily', hook: 'background' })
+        if (!r.ok && r.status === 422 && 'time' in body) {
+          // a server older than the time figures refuses the field: send the day once more without it
+          const { time: _time, ...rest } = body
+          r = await this.d.svc.call('POST', DAILY_ROUTE, rest, { kind: 'daily', hook: 'background' })
+        }
         if (!r.ok) return { sent, error: r.error || 'failed' }
         sent.push(day)
         await this.saveState({ last_uploaded_day: day })

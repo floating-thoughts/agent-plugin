@@ -21,6 +21,7 @@ export const MAX_INDEX_ROWS = 500
 export const MAX_COMPACT_ROWS = 50
 export const MAX_STEPS = 4000
 export const MAX_STEP_MODELS = 10
+export const MAX_TRIM_ROWS = 20
 
 const DAY_MS = 86400000
 const enc = new TextEncoder()
@@ -42,11 +43,13 @@ export type DayRecord = {
   route: Record<string, RouteRow> // model + '\t' + (long ? '1' : '0')
   index: Record<string, number> // model + '\t' + file_tokens -> reads
   compact: Record<string, CompactRow> // ref -> row
+  trim?: Record<string, [number, number]> // model -> [tokens, runs]: rows rewritten after a compaction (trim.ts)
 }
 export type DayCounters = {
   route: { model: string; long: boolean; turns: number; input_tokens: number; output_tokens: number; cache_read_tokens: number; cache_write_tokens: number }[]
   index: { model: string; file_tokens: number; reads: number }[]
   compact: { ref: string; start: CompactStart | null; models: string[]; steps: [number, number][] }[]
+  trim?: { model: string; tokens: number; runs: number }[] // only when the day has any
 }
 
 // Token estimate: CJK characters count one each, the rest a quarter (length in UTF-16 code units).
@@ -86,7 +89,41 @@ function asRecord(v: unknown, day: string): DayRecord {
   const r = v as Partial<DayRecord>
   const obj = (x: unknown): boolean => !!x && typeof x === 'object' && !Array.isArray(x)
   if (r.v !== 1 || !obj(r.route) || !obj(r.index) || !obj(r.compact)) return emptyRecord(day)
-  return { v: 1, day, route: r.route as DayRecord['route'], index: r.index as DayRecord['index'], compact: r.compact as DayRecord['compact'] }
+  const out: DayRecord = { v: 1, day, route: r.route as DayRecord['route'], index: r.index as DayRecord['index'], compact: r.compact as DayRecord['compact'] }
+  if (obj(r.trim)) out.trim = r.trim as DayRecord['trim']
+  return out
+}
+
+// ---------------------------------------------------------------- trim rows (trim.ts)
+// A session's trim figures sit in their own record, COUNTER_PREFIX + '<day>:<key>:trim', so they never race the
+// Counters instance that rewrites the session's main record whole; readDay merges both like any other record.
+
+/** `prev` (a stored record or nothing) with one trim run of `tokens` added for `model`. Pure. */
+export function trimRecord(prev: unknown, day: string, model: string, tokens: number): DayRecord {
+  const r = asRecord(prev, day)
+  const trim = { ...(r.trim ?? {}) }
+  const have = trim[model]
+  const row: [number, number] = Array.isArray(have) && have.length === 2 && have.every(isCount) ? [have[0], have[1]] : [0, 0]
+  if (!Array.isArray(have) && Object.keys(trim).length >= MAX_TRIM_ROWS) return { ...r, trim }
+  trim[model] = [row[0] + tokens, row[1] + 1]
+  return { ...r, trim }
+}
+
+let trimWrites: Promise<void> = Promise.resolve()
+
+/** Adds one trim run to this session's trim record of the day of `nowMs`. Writes of this process never overlap. */
+export function addTrim(store: KV, session: string, model: string, tokens: number, nowMs: number, dayOf: (ms: number) => string = localDay): Promise<void> {
+  needStr(session, 'session')
+  needStr(model, 'model')
+  needCount(tokens, 'tokens')
+  const day = dayOf(nowMs)
+  const key = COUNTER_PREFIX + day + ':' + sessionKey(session) + ':trim'
+  const next = trimWrites.then(async () => {
+    const prev = await store.get(key).catch(() => undefined)
+    await store.set(key, trimRecord(prev, day, model, tokens))
+  })
+  trimWrites = next.catch(() => undefined)
+  return next
 }
 
 function addStep(row: CompactRow, context: number, model: string): void {
@@ -277,6 +314,7 @@ export async function readDay(store: KV, day: string): Promise<DayCounters> {
   const route = new Map<string, RouteRow>()
   const index = new Map<string, number>()
   const compact = new Map<string, CompactRow>()
+  const trim = new Map<string, [number, number]>()
   for (const key of await store.keys()) {
     if (!key.startsWith(prefix)) continue
     let v: unknown
@@ -302,6 +340,11 @@ export async function readDay(store: KV, day: string): Promise<DayCounters> {
       }
       compact.set(ref, have)
     }
+    for (const [model, row] of Object.entries(r.trim ?? {})) {
+      if (!Array.isArray(row) || row.length !== 2 || !row.every(isCount)) continue
+      const have = trim.get(model) ?? [0, 0]
+      trim.set(model, [have[0] + row[0], have[1] + row[1]])
+    }
   }
   const cmp = (a: string, b: string): number => (a < b ? -1 : a > b ? 1 : 0)
   const routeRows = [...route.entries()]
@@ -322,7 +365,11 @@ export async function readDay(store: KV, day: string): Promise<DayCounters> {
     .sort((a, b) => cmp(a.model, b.model) || a.file_tokens - b.file_tokens)
     .slice(0, MAX_INDEX_ROWS)
   const compactRows = [...compact.keys()].sort(cmp).slice(0, MAX_COMPACT_ROWS).map((ref) => ({ ref, ...compact.get(ref)! }))
-  return { route: routeRows, index: indexRows, compact: compactRows }
+  const out: DayCounters = { route: routeRows, index: indexRows, compact: compactRows }
+  if (trim.size) {
+    out.trim = [...trim.keys()].sort(cmp).slice(0, MAX_TRIM_ROWS).map((model) => ({ model, tokens: trim.get(model)![0], runs: trim.get(model)![1] }))
+  }
+  return out
 }
 
 // Delete day records older than KEEP_DAYS and open counts started before then. Best effort, never throws.

@@ -340,11 +340,7 @@ footer { margin-top: 36px; color: var(--faint); font-size: 12.5px; text-align: c
         add(wrap, el("p", "eyebrow", "Saved with agent-services"));
         add(wrap, el("p", "hero-value num", money(sav.usd)));
         var sub = el("p", "hero-sub");
-        if (isNum(sav.pct) && sav.pct > 0) {
-          add(sub, "That is ", el("strong", null, pct(sav.pct)), " less than the same work would have cost");
-        } else {
-          add(sub, "Compared with what the same work would have cost");
-        }
+        add(sub, "Compared with what the same work would have cost");
         add(sub, sav.first_day ? " since " + fmtDay(sav.first_day, true) + "." : ".");
         add(wrap, sub);
         var stats = el("div", "hero-stats");
@@ -510,6 +506,16 @@ footer { margin-top: 36px; color: var(--faint); font-size: 12.5px; text-align: c
       });
       if (!ul.firstChild) { ul.appendChild(el("li", null, "Your weekly summary appears after your first full day of measured savings.")); }
       c.appendChild(ul);
+      // the usage panel (panel.ts boardLines): tokens, quota and context, time saved for you, concurrent saving, the method
+      var usage = w && Array.isArray(w.usage_lines) ? w.usage_lines : [];
+      if (usage.length) {
+        var ul2 = el("ul", "week-lines usage-lines");
+        usage.forEach(function (t, i) {
+          if (typeof t !== "string") { return; }
+          ul2.appendChild(el("li", i === usage.length - 1 ? "admin" : null, t));
+        });
+        c.appendChild(ul2);
+      }
       if (w && typeof D.today === "string" && /^\d{4}-\d{2}-\d{2}$/.test(D.today)) {
         document.getElementById("week-hint").textContent = fmtDay(addDays(D.today, -((w.days || 7) - 1))) + " – " + fmtDay(D.today);
       }

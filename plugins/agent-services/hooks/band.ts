@@ -36,6 +36,7 @@
 import type { EngineInterface } from 'claude-code'
 import { money, type Timeline } from './board_facts'
 import { ORG_PAUSED_LINE } from './org'
+import { panelLines, type Panel } from './panel'
 import { COMMAND, NAME, SEP, shortDay, todayText } from './status'
 
 type Obj = Record<string, any>
@@ -54,7 +55,7 @@ export type BandState = { state: BandKind; facts?: BandFacts | null; setup?: num
 export const BAND_TEXT: Readonly<Record<string, string>> = {
   wait: `${NAME} is on. Your savings show here after your first full day of use.`,
   off: `${NAME} is on. To see how much it saves you, type ${COMMAND} sharing on.`,
-  signed_out: `${NAME}: signed out. Type ${COMMAND} login to sign in.`,
+  signed_out: `${NAME}: signed out. Type ${COMMAND} login to sign in. Command guarding and secret masking are off.`,
   locked: `${NAME}: this account is locked. Contact support, then type ${COMMAND} login.`,
   paused: ORG_PAUSED_LINE,
   offline: `${NAME}: offline mode is on, so nothing is sent. Type ${COMMAND} offline off to turn it off.`,
@@ -188,13 +189,66 @@ export function bandSetup(n: unknown): void {
   }
 }
 
-/** The band: one dim line above the prompt from the state bandSetter wrote, on the terminal and the desktop app alike;
- *  the event goes on only while a survey holds the band. */
+let panelShown: Panel | null = null // the usage panel setBandPanel last wrote (wiring.ts, after each band state)
+
+/** wiring.ts: the usage panel (panel.ts panelOf) shown under the band's line; a redraw when it changed. Never throws. */
+export function setBandPanel(panel: Panel | null): void {
+  const next = isObj(panel) && Array.isArray(panel.columns) && panel.columns.length === 3 && typeof panel.method === 'string' ? panel : null
+  if (JSON.stringify(next) === JSON.stringify(panelShown)) return
+  panelShown = next
+  try {
+    redraw?.()
+  } catch {
+    // no redraw: the band shows it at its next draw
+  }
+}
+
+/** The usage panel shown under the band's line, in the states that show figures; null otherwise. */
+export function bandPanel(state: unknown): Panel | null {
+  return isObj(state) && ['facts', 'wait', 'off'].includes(state.state) ? panelShown : null
+}
+
+/** The band: one dim line above the prompt from the state bandSetter wrote, on the terminal and the desktop app alike,
+ *  then the usage panel in three columns (Token | Quota and context | Time saved) and its disclosure; the event goes
+ *  on only while a survey holds the band. */
 export function installBand(on: any): void {
   on('ui.render', { component: 'AbovePrompt' }, async ($: EngineInterface, e: Obj, next: (e: Obj) => unknown) => {
     if (e.props?.hasSurvey === true) return next(e)
     const line = bandText(shown && setupOpen ? { ...shown, setup: setupOpen } : shown, e.props?.bodyColumns)
-    const { Text } = $.ui.resolve(e as any) as any
-    return Text({ dimColor: true, children: line })
+    const { Text, Box } = $.ui.resolve(e as any) as any
+    const panel = bandPanel(shown)
+    if (!panel) return Text({ dimColor: true, children: line })
+    // the band leaves out the disclosure (panel.method): the status command and the board still show it
+    if (typeof Box !== 'function') return Text({ dimColor: true, children: [line, ...panelLines(panel).slice(0, -1)].join('\n') })
+    const column = (c: Panel['columns'][number], i: number) =>
+      Box({
+        key: String(i), flexDirection: 'column', borderStyle: 'round', borderDimColor: true, paddingX: 1, flexShrink: 0,
+        children: [Text({ key: 't', bold: true, children: c.title }), cells(c.rows, c.align)],
+      })
+    // one sub-column per cell position, so the figures line up in proportional fonts (the desktop app) as well:
+    // labels flush left, figures flush right
+    const cells = (rows: string[][], align?: string[]) => {
+      const n = Math.max(...rows.map((r) => r.length))
+      return Box({
+        key: 'cells', flexDirection: 'row', columnGap: 2,
+        children: Array.from({ length: n }, (_, k) => Box({
+          key: String(k), flexDirection: 'column', alignItems: 'stretch',
+          // each cell in its own full-width row box: the desktop app lays a bare Text out full width, so alignItems
+          // on the column alone does not move it
+          children: rows.map((r, j) => Box({
+            key: String(j), flexDirection: 'row',
+            justifyContent: { left: 'flex-start', center: 'center', right: 'flex-end' }[align?.[k] ?? (k === 0 ? 'left' : 'right')] ?? 'flex-end',
+            children: Text({ children: r[k] || ' ' }),
+          })),
+        })),
+      })
+    }
+    return Box({
+      flexDirection: 'column',
+      children: [
+        Text({ key: 'line', dimColor: true, children: line }),
+        Box({ key: 'cols', flexDirection: 'row', columnGap: 1, flexWrap: 'nowrap', children: panel.columns.map(column) }),
+      ],
+    })
   }).catch(($: EngineInterface, e: Obj, next: (e: Obj) => unknown) => next(e))
 }

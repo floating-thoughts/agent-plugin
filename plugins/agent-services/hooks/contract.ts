@@ -6,7 +6,7 @@ export type ToolSpec = {
   input_schema: Record<string, unknown>
 }
 
-export const CONTRACT_SHA256 = "e3d6f22731e47fe9642bc53b3eb0ed514b538d1f2b98d599e6b924ca7c3d91e2"
+export const CONTRACT_SHA256 = "45df304dd97df0a047c79830005b456ba5b0f45a4e8ea22d30add3633d981721"
 
 export const API = "svc/1" as const
 export const PREFIX = "/svc/v1" as const
@@ -1062,6 +1062,10 @@ export const CONTRACT = {
     "index": {
      "$ref": "#/definitions/Lever"
     },
+    "trim": {
+     "$ref": "#/definitions/Lever",
+     "description": "optional (server 0.7.0): only when a day carries trim rows"
+    },
     "by_day": {
      "type": "array",
      "maxItems": 400,
@@ -1097,6 +1101,26 @@ export const CONTRACT = {
         "type": "number",
         "minimum": -1000000000,
         "maximum": 1000000000
+       },
+       "trim_usd": {
+        "type": "number",
+        "minimum": -1000000000,
+        "maximum": 1000000000
+       },
+       "agent_seconds": {
+        "type": "integer",
+        "minimum": 0,
+        "maximum": 100000000
+       },
+       "concurrent_seconds": {
+        "type": "integer",
+        "minimum": 0,
+        "maximum": 100000000
+       },
+       "typed_bytes": {
+        "type": "integer",
+        "minimum": 0,
+        "maximum": 10000000000
        }
       },
       "required": [
@@ -1109,6 +1133,62 @@ export const CONTRACT = {
       ],
       "additionalProperties": false
      }
+    },
+    "time": {
+     "type": "object",
+     "description": "optional (server 0.7.0): time saved over the same days; agent_seconds = time saved for the person (clock time with at least one agent active), concurrent_seconds = concurrent saving (the agents' summed run time less that clock time), typing_seconds = the person's own time estimated from typed_bytes at typing_bytes_per_minute; method = the disclosure shown wherever the figures appear",
+     "properties": {
+      "agent_seconds": {
+       "type": "integer",
+       "minimum": 0,
+       "maximum": 100000000000
+      },
+      "concurrent_seconds": {
+       "type": "integer",
+       "minimum": 0,
+       "maximum": 100000000000
+      },
+      "typed_bytes": {
+       "type": "integer",
+       "minimum": 0,
+       "maximum": 10000000000000
+      },
+      "turns": {
+       "type": "integer",
+       "minimum": 0,
+       "maximum": 10000000000
+      },
+      "typing_seconds": {
+       "type": "integer",
+       "minimum": 0,
+       "maximum": 100000000000
+      },
+      "typing_bytes_per_minute": {
+       "type": "integer",
+       "minimum": 1,
+       "maximum": 100000
+      },
+      "days": {
+       "type": "integer",
+       "minimum": 0,
+       "maximum": 1000000
+      },
+      "method": {
+       "type": "string",
+       "maxLength": 1000
+      }
+     },
+     "required": [
+      "agent_seconds",
+      "concurrent_seconds",
+      "typed_bytes",
+      "turns",
+      "typing_seconds",
+      "typing_bytes_per_minute",
+      "days",
+      "method"
+     ],
+     "additionalProperties": false
     }
    },
    "required": [
@@ -2143,6 +2223,69 @@ export const CONTRACT = {
   },
   {
    "method": "POST",
+   "path": "/served/rules",
+   "request": {
+    "type": "object",
+    "properties": {
+     "channel": {
+      "enum": [
+       "stable",
+       "beta"
+      ]
+     }
+    },
+    "required": [
+     "channel"
+    ],
+    "additionalProperties": false
+   },
+   "responses": {
+    "200": {
+     "type": "object",
+     "properties": {
+      "version": {
+       "$ref": "#/definitions/Version"
+      },
+      "scope": {
+       "enum": [
+        "product",
+        "account"
+       ],
+       "description": "account = the product tables plus rules kept for this account only"
+      },
+      "tables": {
+       "type": "object",
+       "description": "rule tables by name (command guard, secret masking, trim, subagents, watch); the plugin runs them locally and keeps them in memory only"
+      }
+     },
+     "required": [
+      "version",
+      "scope",
+      "tables"
+     ],
+     "additionalProperties": false
+    }
+   },
+   "errors": {
+    "403": [
+     "not_in_plan"
+    ],
+    "404": [
+     "no_rules"
+    ]
+   },
+   "x-inventory": {
+    "service": "updates",
+    "purpose": "fetch the rule tables the plugin runs locally (command guard, secret masking, row trimming, subagent and shell watch); sends only the channel; no command, prompt or tool text is sent",
+    "default": "on (once when a signed-in session starts)",
+    "retention": "request content not stored; access log kept 30 days",
+    "sent_to": [
+     "our_service"
+    ]
+   }
+  },
+  {
+   "method": "POST",
    "path": "/incidents",
    "request": {
     "type": "object",
@@ -2648,6 +2791,39 @@ export const CONTRACT = {
          ],
          "additionalProperties": false
         }
+       },
+       "trim": {
+        "type": "array",
+        "maxItems": 20,
+        "description": "optional (plugin 0.7.0): attachment rows rewritten to one line after a compaction, one row per model per day; numbers only",
+        "items": {
+         "type": "object",
+         "properties": {
+          "model": {
+           "type": "string",
+           "pattern": "^[0-9A-Za-z.:/_-]+$",
+           "maxLength": 80
+          },
+          "tokens": {
+           "type": "integer",
+           "minimum": 0,
+           "maximum": 1000000000000,
+           "description": "token estimate removed from the transcript (every later request sends that much less)"
+          },
+          "runs": {
+           "type": "integer",
+           "minimum": 0,
+           "maximum": 1000000,
+           "description": "compactions whose re-attached rows were rewritten"
+          }
+         },
+         "required": [
+          "model",
+          "tokens",
+          "runs"
+         ],
+         "additionalProperties": false
+        }
        }
       },
       "required": [
@@ -2656,6 +2832,43 @@ export const CONTRACT = {
        "compact"
       ],
       "additionalProperties": false
+     },
+     "time": {
+      "type": "object",
+      "description": "optional (plugin 0.7.0): the day's time figures on this computer, numbers only; never prompt text. typed_bytes = UTF-8 bytes of prompts a person typed (no tool results, command output, reminders, notifications, compaction summaries, pasted blocks, prompts from plugins or the system, or subagent transcripts); agent_seconds = clock time with at least one agent active (each transcript's events at most 10 minutes apart form an active interval; the union over every session and subagent, so overlaps count once); agent_sum_seconds = the same intervals added up (each session and subagent counted); turns = the turns counted",
+      "properties": {
+       "typed_bytes": {
+        "type": "integer",
+        "minimum": 0,
+        "maximum": 10000000000
+       },
+       "agent_seconds": {
+        "type": "integer",
+        "minimum": 0,
+        "maximum": 100000000
+       },
+       "agent_sum_seconds": {
+        "type": "integer",
+        "minimum": 0,
+        "maximum": 100000000
+       },
+       "turns": {
+        "type": "integer",
+        "minimum": 0,
+        "maximum": 10000000
+       }
+      },
+      "required": [
+       "typed_bytes",
+       "agent_seconds",
+       "agent_sum_seconds",
+       "turns"
+      ],
+      "additionalProperties": false
+     },
+     "time_only": {
+      "type": "boolean",
+      "description": "optional (plugin 0.7.0): true = only refresh the time figures of a day already uploaded; the server then changes nothing but `time` on the stored day, and stores nothing when the day is not stored yet"
      }
     },
     "required": [

@@ -1,7 +1,7 @@
 // The store's day counters as the Python client reads them (moved from wiring.ts unchanged): model
 // ids normalized, the status line's and the dashboard's event counts, and the days with a counter record. The
 // counters themselves are counters.ts; this module only reads them.
-import { COUNTER_PREFIX, MAX_COMPACT_ROWS, MAX_INDEX_ROWS, MAX_ROUTE_ROWS, MAX_STEP_MODELS, MAX_STEPS, readDay } from './counters'
+import { COUNTER_PREFIX, MAX_COMPACT_ROWS, MAX_INDEX_ROWS, MAX_ROUTE_ROWS, MAX_STEP_MODELS, MAX_STEPS, MAX_TRIM_ROWS, readDay } from './counters'
 import type { DayCounters } from './counters'
 import type { KV } from './engine_types'
 import { isDay } from './metrics'
@@ -53,14 +53,28 @@ export function normalizeDay(dc: DayCounters): DayCounters {
     const start = row.start ? { ...row.start, model: normModel(row.start.model) } : null
     return { ref: row.ref, start, models, steps }
   })
-  return {
+  const out: DayCounters = {
     route: [...route.values()].sort((a, b) => cmp(a.model, b.model) || Number(a.long) - Number(b.long)).slice(0, MAX_ROUTE_ROWS),
     index: [...index.values()].sort((a, b) => cmp(a.model, b.model) || a.file_tokens - b.file_tokens).slice(0, MAX_INDEX_ROWS),
     compact: compact.slice(0, MAX_COMPACT_ROWS),
   }
+  if (dc.trim?.length) {
+    const trim = new Map<string, { model: string; tokens: number; runs: number }>()
+    for (const r of dc.trim) {
+      const model = normModel(r.model)
+      const have = trim.get(model)
+      if (!have) trim.set(model, { model, tokens: r.tokens, runs: r.runs })
+      else {
+        have.tokens += r.tokens
+        have.runs += r.runs
+      }
+    }
+    out.trim = [...trim.values()].sort((a, b) => cmp(a.model, b.model)).slice(0, MAX_TRIM_ROWS)
+  }
+  return out
 }
 
-export const dayEmpty = (dc: DayCounters): boolean => !dc.route.length && !dc.index.length && !dc.compact.length
+export const dayEmpty = (dc: DayCounters): boolean => !dc.route.length && !dc.index.length && !dc.compact.length && !dc.trim?.length
 
 /** The status line's and the dashboard's event counts of one day: route turns, compactions and indexed reads. */
 export function countsOf(dc: DayCounters): Record<string, number> {
