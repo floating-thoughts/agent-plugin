@@ -5,6 +5,7 @@
 import type { EngineInterface, Register } from 'claude-code'
 import { coreEvent, dataDir, STATUS_MAX, type Answer } from './core'
 import { publishDashboard } from './dashboard'
+import { noteGate, selfUpdate } from './update'
 
 type Ev = Record<string, any>
 type Usage = { input: number; output: number; cache_read: number; cache_write: number }
@@ -52,6 +53,7 @@ const show = ($: EngineInterface, notice: string | null, toast = false) => {
 const send = async ($: EngineInterface, kind: string, agent: string | null, fields: Ev = {}, later = false) => {
   const session = await $.session.id()
   const answer: Answer = await coreEvent($, { v: 1, harness: 'claude-code', kind, session, agent, ...fields })
+  noteGate(answer) // update.ts skips its update while the gate is closed
   if (!later) show($, answer.notice)
   return answer
 }
@@ -83,6 +85,7 @@ export const register: Register = on => {
     const a = await send($, 'session_start', null, { cwd, inject_on: ['prompt'] })
     const out = await next(e)
     await showStatus($, a)
+    selfUpdate($, e.isInteractive === true) // update.ts: later, in the background; never throws
     return out
   }).catch(($, e, next) => next(e))
 
