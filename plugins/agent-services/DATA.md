@@ -210,7 +210,8 @@ text of your messages (only to see whether one asks for a review), and the marke
 **Local helpers** (they send nothing of their own):
 
 - The usage scan tool: only when a file named `usage_scan.py` sits in `~/.agent-services/tools/` (the plugin ships
-  none and never writes there), the plugin runs it with Python, trying `py -3`, then `python3`, then `python` from
+  none and never writes there) and its content is one of the tool versions the plugin lists by checksum
+  (any other file there, edited or written by another program, is never run), the plugin runs it with Python, trying `py -3`, then `python3`, then `python` from
   your PATH, as a program with fixed arguments (`usage_scan.py --days`, no shell), in the background when the usage
   panel's figures are refreshed or the daily summary is built, at most once every 15 minutes across sessions, with
   a 5-minute time limit. It gets on its input your Claude Code projects folder, the start of the day the last

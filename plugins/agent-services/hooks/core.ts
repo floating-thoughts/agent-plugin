@@ -863,6 +863,7 @@ export class Core {
       }
     }
     s.reset(this.now())
+    await this.keepCounts(s, sid) // a reload after this must not add the old counts back
     return answer()
   }
 
@@ -874,6 +875,7 @@ export class Core {
       // nothing open
     }
     s.reset(this.now())
+    await this.keepCounts(s, e.session as string)
     return answer()
   }
 

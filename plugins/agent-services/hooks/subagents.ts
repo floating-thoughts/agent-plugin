@@ -234,14 +234,15 @@ export function redlineRefusal(week: Week, isModule: boolean): string | null {
   return null
 }
 
-/** A person's own prompt that matches the table's override words: spawns past the usage line are allowed until the
- * current weekly reset, and the user is told so. Fails quietly. */
+/** A person's own prompt that is only the table's override word, sent while the usage line is reached: spawns past
+ * the line are allowed until the current weekly reset, and the user is told so. Fails quietly. */
 export async function redlineOverride($: EngineInterface, text: unknown): Promise<void> {
   try {
     const r = part('redline')
     if (!r || typeof text !== 'string' || !rx(String(r.override_rx ?? '(?!)'), 'i')?.test(text.slice(0, 2000))) return
     const week = planOf(await $.session.usage()).week
-    if (!week || !week.resets_at) return
+    // only once the line is reached: the word before that grants nothing (no silent override for the rest of the week)
+    if (!week || !week.resets_at || redlineRefusal(week, true) === null) return
     await engineStore($).set('redline_override', week.resets_at)
     try {
       $.ui.toast(fill(r.override_notice, { resets: week.resets_at }))
