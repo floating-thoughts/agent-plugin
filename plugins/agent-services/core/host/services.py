@@ -123,7 +123,7 @@ def _shell_version() -> str:
 
 SHELL_VERSION = _shell_version()
 GATE_NOTICES = {
-    "login": "agent-services is paused: sign in with /agent-services to use this plugin.",
+    "login": "agent-services is paused: sign in with /agent-services:agent-services to use this plugin.",
     "locked": "agent-services is paused: this account is locked; contact support.",
     "upgrade": "agent-services is paused: this plugin version is no longer accepted; update the plugin "
                "(minimum {min_shell}).",

@@ -38,7 +38,7 @@ claude plugin install agent-services@agent-plugin
 Then sign in inside Claude Code (a code is mailed to you; give it when asked):
 
 ```
-/agent-services login <email>
+/agent-services:agent-services login <email>
 ```
 
 ### 2. A team working in one project
@@ -57,7 +57,7 @@ it if it does) and commit it. Everyone who opens the project and trusts the fold
 }
 ```
 
-Each member then signs in once with `/agent-services login <email>`.
+Each member then signs in once with `/agent-services:agent-services login <email>`.
 
 ### 3. Machines managed by an organisation
 
@@ -81,7 +81,7 @@ Linux:   /etc/claude-code/managed-settings.json
 }
 ```
 
-Each user then signs in once with `/agent-services login <email>`.
+Each user then signs in once with `/agent-services:agent-services login <email>`.
 
 ## Service address
 
@@ -90,7 +90,7 @@ any setup. It talks to the service named in `client.json` (in `~/.agent-services
 If you were given another address and a server key, set them once before signing in:
 
 ```
-/agent-services connect https://<service host> <server key> e2e:<encryption key>
+/agent-services:agent-services connect https://<service host> <server key> e2e:<encryption key>
 ```
 
 The connection is checked with your system's certificate store, and every answer must be signed with that server key;
