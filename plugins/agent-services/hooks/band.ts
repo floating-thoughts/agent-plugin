@@ -232,7 +232,7 @@ export function installBand(on: any): void {
       return Box({
         key: 'cells', flexDirection: 'row', columnGap: 2,
         children: Array.from({ length: n }, (_, k) => Box({
-          key: String(k), flexDirection: 'column', alignItems: 'stretch',
+          key: String(k), flexDirection: 'column', alignItems: 'stretch', flexGrow: k === 0 ? 0 : 1, // the figures fill the box: the last one ends under the title's right edge
           // each cell in its own full-width row box: the desktop app lays a bare Text out full width, so alignItems
           // on the column alone does not move it
           children: rows.map((r, j) => Box({
