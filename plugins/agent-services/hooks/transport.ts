@@ -3,6 +3,7 @@
 import type { CallOptions, GateState, ServedSelect, SvcResult, Transport } from './engine_types'
 import type { Hook, Kind, Svc } from './svc'
 import { HOOK_BUDGET_MS, TIMEOUTS_MS } from './svc'
+import { TOOLBOX_ROUTE } from './svc_wire'
 
 const result = (r: { ok: boolean; status: number | null; body: unknown; error: string | null }): SvcResult => ({
   ok: r.ok,
@@ -59,6 +60,15 @@ export function svcTransport(svc: Svc): Transport {
     async fetchServed(sessionRef: string, role: string, phase: string, opts: CallOptions, state?: Record<string, unknown>, select?: ServedSelect): Promise<SvcResult> {
       try {
         return result(await svc.fetchServed(sessionRef, role, phase, hookFor(opts?.deadlineMs), state, select))
+      } catch {
+        return FAILED
+      }
+    },
+    async fetchToolbox(sessionRef: string, pack: string, topic: string | undefined, opts: CallOptions): Promise<SvcResult> {
+      try {
+        const body: Record<string, unknown> = { session_ref: sessionRef, pack }
+        if (topic !== undefined) body.topic = topic
+        return result(await svc.call('POST', TOOLBOX_ROUTE, body, { kind: 'served', hook: hookFor(opts?.deadlineMs) }))
       } catch {
         return FAILED
       }

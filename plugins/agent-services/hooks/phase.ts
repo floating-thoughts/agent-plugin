@@ -30,6 +30,7 @@ import { levelNow, methodsActive, queueNotice, seenVersion } from './methods'
 import { autonomyNote, readAutonomy } from './autonomy'
 import { askVerdict, knownVerdict, PLAN_STEPS_SENT_MAX } from './gate_verdict'
 import type { AskGate, GateLevel, GateState } from './gate_verdict'
+import { ToolboxPush } from './toolbox'
 export { methodsStart } from './methods' // register.ts wires it beside pushStart
 export { noteAutonomy } from './autonomy' // register.ts tool.call, after the call ran
 
@@ -513,6 +514,7 @@ type PushRuntime = {
   core: {
     ask(tool: string, args: unknown, o: { session: unknown; harness?: unknown; cwd?: unknown }): Promise<Obj>
     servedGate?(session: unknown, state: Obj): Promise<unknown>
+    toolboxIndex?(session: string): Promise<unknown> // core.ts: the toolbox index (toolbox.ts pushes it)
   }
   readText: Read
   sleep: (ms: number) => Promise<unknown>
@@ -520,6 +522,23 @@ type PushRuntime = {
 } | null
 
 const pushes = new WeakMap<object, LessonPush>() // one per runtime (register.ts builds one per session)
+const toolboxes = new WeakMap<object, ToolboxPush>() // the toolbox index, one per runtime (toolbox.ts)
+
+/** The runtime's toolbox index push, or null when its core cannot fetch the index. */
+function toolboxPush(r: NonNullable<PushRuntime>): ToolboxPush | null {
+  if (typeof r.core.toolboxIndex !== 'function') return null
+  let p = toolboxes.get(r)
+  if (!p) {
+    p = new ToolboxPush({
+      active: async () => (await r.svc.authState()) === 'ok',
+      index: () => r.core.toolboxIndex!(r.session),
+      sleep: r.sleep,
+      waitMs: PHASE_WAIT_MS,
+    })
+    toolboxes.set(r, p)
+  }
+  return p
+}
 
 /** The session's SENT_KEY record in the plugin store (undefined: no store, memory only). */
 function sentStore(store: PushStore | undefined, session: string): PushDeps['seen'] {
@@ -562,20 +581,23 @@ let onNoteSent = false // level on: the autonomy note was sent in this process (
  * the next prompt. Never throws. */
 export function pushAgain(r: PushRuntime, agent: unknown): void {
   try {
-    if (r && !agent) { lessonPush(r).again(); onNoteSent = false }
+    if (r && !agent) { lessonPush(r).again(); toolboxPush(r)?.again(); onNoteSent = false }
   } catch {
     // nothing to push
   }
 }
 
-/** register.ts prompt.submit: the served-lessons blocks for this prompt, and the planning reminder ([] for a
- * subagent, signed out, at level "off", on error). */
+/** register.ts prompt.submit: the served-lessons blocks for this prompt, the toolbox index (toolbox.ts) and the
+ * planning reminder ([] for a subagent, signed out, at level "off", on error). */
 export async function pushLessons(rt: Promise<PushRuntime>, agent: unknown, cwd: () => Promise<string>,
   notify?: (line: string) => void): Promise<string[]> {
   if (agent) return []
+  let toolbox: Promise<string | null> = Promise.resolve(null)
   try {
     const r = await rt
     if (!r || (await levelNow()) === 'off') return []
+    // the toolbox index (toolbox.ts): once per session and after /clear or a compaction, at level suggest and on
+    toolbox = toolboxPush(r)?.prompt() ?? Promise.resolve(null)
     // the methods came with CLAUDE.md (methods.ts): no push repeats them
     const push = lessonPush(r)
     let text = !methodsActive() ? await push.prompt(async () => cwd()) : null
@@ -592,8 +614,10 @@ export async function pushLessons(rt: Promise<PushRuntime>, agent: unknown, cwd:
       if (note) { text = note; onNoteSent = true }
     }
     const remind = takeReminder(r)
-    return [text, remind].filter((t): t is string => !!t)
+    return [text, await toolbox, remind].filter((t): t is string => !!t)
   } catch {
-    return []
+    // the index was marked sent once prompt() answered: still give it, or it waits for the next compaction
+    const tb = await toolbox.catch(() => null)
+    return tb ? [tb] : []
   }
 }

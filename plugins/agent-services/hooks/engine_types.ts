@@ -33,6 +33,9 @@ export interface Transport {
   // One phase of a role's served items (bound per session_ref, as Connector.fetch_served). Never throws. With `state`
   // (phase.ts gateState): the planning-gate verdict in the answer's `gate`, and no items. `select`: ServedSelect.
   fetchServed(sessionRef: string, role: string, phase: string, opts: CallOptions, state?: Record<string, unknown>, select?: ServedSelect): Promise<SvcResult>
+  // One toolbox answer (POST /toolbox/fetch): the index for pack 'index', else one pack, for a session opened by
+  // /served/session. Only the session ref, the pack key and the optional topic are sent. Never throws.
+  fetchToolbox(sessionRef: string, pack: string, topic: string | undefined, opts: CallOptions): Promise<SvcResult>
   // Forget the served binding of a session (local only, as Connector.end_served_session).
   endServedSession(sessionRef: string): void
 }

@@ -243,6 +243,29 @@ export function servedSummary(text: string): string | null {
   })
 }
 
+export const TOOLBOX_ROUTE = '/toolbox/fetch'
+
+/** What the request log keeps of a toolbox answer: no served text (the index's note and lines, a pack's title and
+ * items), only the kind, key, version and each item's id and sha256. */
+export function toolboxSummary(text: string): string | null {
+  let b: unknown
+  try {
+    b = JSON.parse(text)
+  } catch {
+    return null
+  }
+  if (!isObj(b)) return null
+  const items = Array.isArray(b.items) ? b.items : []
+  const entries = Array.isArray(b.entries) ? b.entries : []
+  return JSON.stringify({
+    kind: b.kind ?? null,
+    key: b.key ?? null,
+    version: b.version ?? null,
+    entries: entries.filter(isObj).map((e: any) => e.key ?? null),
+    items: items.filter(isObj).map((i: any) => ({ id: i.id ?? null, sha256: i.sha256 ?? null })),
+  })
+}
+
 export function redactFields(text: string | null, fields: readonly string[] | null | undefined): string | null {
   if (text == null || !fields || !fields.length) return text
   let o: unknown

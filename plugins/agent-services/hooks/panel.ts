@@ -1,13 +1,15 @@
 // The usage panel: the same three columns the band, the status command and the board show.
 //
-//   Token (incl. cache reads)   This week / This month / All time: tokens and dollars at API prices, from this
+//   Token (incl. cache reads)   This week / This month / All time: tokens and dollars at API prices. "all devices" when
+//                               the service sent the account's days (GET /metrics/savings usage_by_day), merged with
+//                               this computer's: one figure per day (mergedDays). Otherwise "this computer", from this
 //                               computer's transcripts (usageDaysOf over the scan, kept per day under USAGE_DAYS_KEY)
 //   Quota . context N% (Nk)     Week % and 5-hour % of the plan with the time to their reset, and the context, from
 //                               the engine's session usage (planOf); then "Saved (est.) $X", the service's savings figure
 //                               ("off" while the savings record is off)
 //   Time . total so far         Spent by you: the person's typing time; Agent time: clock time with at least one agent
 //                               active; Concurrent: the agents' summed run time less that
-//                               clock time. Totals over the same stored days as the Token column.
+//                               clock time. Totals over this computer's stored days (the account's days carry no time).
 //
 // Unknown figures show "--". methodLine() is the disclosure shown wherever the time figures appear (METHOD_LINE is
 // its built-in form); the service sends the same sentence with its figures. The idle gap, the typing speed and the
@@ -270,9 +272,54 @@ const plusDays = (day: string, n: number): string => {
   return d.toISOString().slice(0, 10)
 }
 
+/** The account's days from GET /metrics/savings (usage_by_day, summed over its computers), or null when the service sent
+ *  none: an older service, the savings record off (`error`) or the account's figures hidden. mine_* is what this
+ *  computer itself stored for the day (0 when it stored nothing). */
+type AccountDay = { tokens: number; usd: number; mine: boolean; mine_tokens: number; mine_usd: number; legacy_tokens: number; legacy_usd: number }
+function accountDaysOf(savings: unknown): Record<string, AccountDay> | null {
+  if (!isObj(savings) || 'error' in savings || !Array.isArray(savings.usage_by_day)) return null
+  const out: Record<string, AccountDay> = {}
+  for (const r of savings.usage_by_day) {
+    if (isObj(r) && typeof r.day === 'string' && num(r.tokens) !== null && num(r.api_usd) !== null) {
+      out[r.day] = { tokens: r.tokens, usd: r.api_usd, mine: r.mine === true, mine_tokens: num(r.mine_tokens) ?? 0,
+        mine_usd: num(r.mine_api_usd) ?? 0, legacy_tokens: num(r.legacy_tokens) ?? 0, legacy_usd: num(r.legacy_api_usd) ?? 0 }
+    }
+  }
+  return out
+}
+
+/** One figure per day: the account's sum over all its rows of the day, less this computer's own stored row and less a
+ *  legacy row (from before computers were kept apart) that this computer may own, plus this computer's own figure. A
+ *  legacy row on a day this computer stored itself is another computer's: the plugin uploads each day once. The own
+ *  figure is the largest of the local figure, its stored row and that legacy row: the stored row is built from the
+ *  transcripts without the ones over 4 MiB (the panel counts them) and can lag the local refresh by up to ten minutes. */
+function mergedDays(local: Record<string, UsageDay>, account: Record<string, AccountDay>): Record<string, UsageDay> {
+  const out: Record<string, UsageDay> = {}
+  for (const d of Array.from(new Set([...Object.keys(account), ...Object.keys(local)]))) {
+    const a = account[d]
+    const x = local[d]
+    const mineTokens = a ? a.mine_tokens : 0
+    const mineUsd = a ? a.mine_usd : 0
+    const localTokens = isObj(x) ? (num(x.tokens) ?? 0) : 0
+    const localUsd = isObj(x) ? (num(x.usd) ?? 0) : 0
+    const legacyOwnTokens = a && !a.mine ? a.legacy_tokens : 0
+    const legacyOwnUsd = a && !a.mine ? a.legacy_usd : 0
+    const candidates = [{ tokens: localTokens, usd: localUsd }, { tokens: mineTokens, usd: mineUsd },
+      { tokens: legacyOwnTokens, usd: legacyOwnUsd }]
+    const own = candidates.reduce((best, c) => (c.tokens > best.tokens ? c : best))
+    const others = a ? { tokens: Math.max(0, a.tokens - mineTokens - legacyOwnTokens),
+      usd: Math.max(0, a.usd - mineUsd - legacyOwnUsd) } : { tokens: 0, usd: 0 }
+    out[d] = { tokens: others.tokens + own.tokens, usd: others.usd + own.usd, typed_bytes: 0, agent_seconds: 0,
+      agent_sum_seconds: 0, turns: 0 }
+  }
+  return out
+}
+
 /** The three columns, from the stored days, the plan, the GET /metrics/savings body (or null) and today. */
 export function panelOf(days: unknown, p: Plan | null, savings: unknown, today: string, nowMs: number, week: unknown = null): Panel {
-  const all: Record<string, UsageDay> = isObj(days) ? (days as Record<string, UsageDay>) : {}
+  const local: Record<string, UsageDay> = isObj(days) ? (days as Record<string, UsageDay>) : {}
+  const account = accountDaysOf(savings)
+  const all = account ? mergedDays(local, account) : local
   const pick = (keep: (d: string) => boolean): string[] => {
     const list = Object.keys(all).filter(keep)
     if (!list.length) return ['--', '']
@@ -282,7 +329,7 @@ export function panelOf(days: unknown, p: Plan | null, savings: unknown, today: 
   }
   const weekFrom = plusDays(today, -6)
   const token: Column = {
-    title: 'Token',
+    title: account && Object.keys(account).length ? 'Token (all devices)' : 'Token (this computer)',
     rows: [
       ['Week', ...pick((d) => d >= weekFrom && d <= today)],
       ['Month', ...pick((d) => d.slice(0, 7) === today.slice(0, 7) && d <= today)],
@@ -309,9 +356,9 @@ export function panelOf(days: unknown, p: Plan | null, savings: unknown, today: 
     ],
     align: ['left', 'center', 'right'],
   }
-  // the same stored days as the Token column (refreshed every 10 minutes), never the service's figures: those come
-  // from the daily upload, so today never showed and the two columns disagreed (one source for every number)
-  const { agent_seconds: you, typing_seconds: typing, concurrent_seconds: concurrent } = timeOf(all)
+  // this computer's stored days (refreshed every 10 minutes), never the service's figures: those come from the daily
+  // upload, so today never showed and the two columns disagreed; the account's days carry no time figures
+  const { agent_seconds: you, typing_seconds: typing, concurrent_seconds: concurrent } = timeOf(local)
   const time: Column = {
     title: `Time${DOT}total so far`, // cumulative: every stored day, not this week
     rows: [

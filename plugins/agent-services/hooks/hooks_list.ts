@@ -83,7 +83,7 @@ export const HOOKS: readonly HookRow[] = [
   },
   {
     event: 'tool.call', matcher: 'tool: mcp__agent-services__<tool>', file: 'tools.ts', does: ['answer', 'network'],
-    what: 'Answers this plugin\'s own tools: router_advice, lesson_lookup, checkpoint_advice, savings and status.',
+    what: 'Answers this plugin\'s own tools: router_advice, lesson_lookup, checkpoint_advice, savings, toolbox and status (toolbox sends only the session id, the pack key and the optional topic).',
     shown: 'The tool call and its answer.',
   },
   {
@@ -136,7 +136,8 @@ export const HOOKS: readonly HookRow[] = [
       'it, so the code never reaches the model. Adds context blocks for the model, after your text and without ' +
       'changing it: the service\'s compaction advice, the working methods of the current phase (in full once per ' +
       'session, and again only after /clear, a compaction, a phase change or a new served version; nothing on ' +
-      'other prompts), and the plugin ' +
+      'other prompts), the toolbox index (the list of toolbox packs, fetched once per session with the first prompt, sending only the session id and the key index; in full once per ' +
+      'session and again only after /clear or a compaction; not at methods level off), and the plugin ' +
       'notes (a newer version, and that /agent-services methods diff shows a change; never the setup questions), the ' +
       'autonomy choice you gave (one line with the working methods), one ' +
       'planning reminder at methods level ' +

@@ -39,6 +39,7 @@ import {
   utf8,
 } from './e2e'
 import type { Random } from './e2e'
+import { deviceFileOf, resolveDeviceId, type DeviceFile, type DurableDir } from './device_id'
 import { Outbox } from './outbox'
 import type { RequestLine } from './outbox'
 import { keepOrg, ORG_PAUSED_LINE, validOrg } from './org'
@@ -74,6 +75,8 @@ import {
   retrySeconds,
   servedProps,
   servedSummary,
+  toolboxSummary,
+  TOOLBOX_ROUTE,
   throttled,
   ungated,
 } from './svc_wire'
@@ -218,6 +221,7 @@ export type Deps = {
   config?: ClientConfig // a staging build only; the shipped shell passes nothing
   shellVersion?: string
   harness?: string
+  durable?: DurableDir | null // the data folder of the durable device id (device_id.ts); absent: the store only
 }
 
 export type Result = {
@@ -264,7 +268,7 @@ export function gateNotice(state: GateState, retryInMs: number | null = null): s
 
 export class Svc {
   readonly session: string
-  private d: Required<Omit<Deps, 'outbox' | 'config'>> & { outbox: Outbox | null }
+  private d: Required<Omit<Deps, 'outbox' | 'config' | 'durable'>> & { outbox: Outbox | null; file: DeviceFile | null }
   private cfg: ReturnType<typeof parseConfig>
   private gs: GateState = { open: false, reason: 'unknown', min_shell: null }
   private envelopeUntil: number | null = null // ms: the bad_envelope stop holds until then (null: none known)
@@ -293,6 +297,7 @@ export class Svc {
       claudeHash: deps.claudeHash ?? (async () => ''),
       shellVersion: deps.shellVersion ?? 'dev',
       harness: deps.harness ?? 'claude-code',
+      file: deps.durable ? deviceFileOf(deps.durable) : null,
     }
     this.cfg = parseConfig(deps.config ?? DEFAULT_CONFIG)
     this.holder = `${this.session}#${hex(this.d.random(4))}`
@@ -561,7 +566,7 @@ export class Svc {
       {
         token,
         accountId: (await getText(this.kv, KEYS.accountId)) ?? '',
-        deviceId: (await getText(this.kv, KEYS.deviceId)) ?? '',
+        deviceId: (await resolveDeviceId(this.kv, this.d.file, this.d.random, false)) ?? '',
         deviceSeed: seed,
         claudeHash: this.claude ?? '',
       },
@@ -715,6 +720,7 @@ export class Svc {
         shown = JSON.stringify(Object.fromEntries(Object.entries(parsed).map(([k, v]) => [k, o.served!.includes(k) ? hashStrings(v) : v])))
       }
       if (ok && wire.split('?', 1)[0] === PREFIX + SERVED_ROUTE) shown = servedSummary(data)
+      if (ok && wire.split('?', 1)[0] === PREFIX + TOOLBOX_ROUTE) shown = toolboxSummary(data)
       if (o.secret) shown = redactFields(shown, o.secret)
       this.logged(line, ist, shown, null)
       if (ok) {
@@ -1232,11 +1238,8 @@ export class Svc {
   }
 
   private async device(): Promise<{ id: string; pub: string }> {
-    let id = await getText(this.kv, KEYS.deviceId)
-    if (!id || !/^dev_[0-9a-f]{16}$/.test(id)) {
-      id = 'dev_' + hex(this.d.random(8))
-      if (!(await safeSet(this.kv, KEYS.deviceId, id))) throw new Error('store')
-    }
+    const id = await resolveDeviceId(this.kv, this.d.file, this.d.random, true)
+    if (!id) throw new Error('store')
     let seed: Uint8Array | null = null
     try {
       const raw = b64Decode((await getText(this.kv, KEYS.deviceKey)) ?? '')
