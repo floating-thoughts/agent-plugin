@@ -21,8 +21,9 @@
 //   `consent` in the entry is what the server last confirmed for it (true granted, false withdrawn); absent means not
 //   recorded yet, so the next daily upload records the "on" first (a yes given before 0.7.9 included) and uploads
 //   nothing that day when that fails.
-// - canAskNow is the one "can we ask the user now" check: an interactive session with a surface to ask on. A -p
-//   run, a CI run or an SDK call without a surface gets no question, no dialog and no question note.
+// - canAskNow is the one "can we ask the user now" check: an interactive session with a surface to ask on, or an
+//   attended one (attended: a surface, or the desktop app, 2026-11-13). A -p run, a CI run or an SDK call without a
+//   surface outside the desktop app gets no question, no dialog and no question note.
 import type { EngineInterface } from 'claude-code'
 import { localDay } from './counters'
 import { plusDays } from './pyfmt'
@@ -240,15 +241,30 @@ export async function dashboardUrl(readText: (path: string) => Promise<string | 
 
 let askable = false // set once per session by canAskNow
 
-/** session.start: an interactive session with at least one surface to ask on. Kept for canAsk(). Never throws. */
+const engineCall = <T>(f: () => Promise<T> | T, d: T): Promise<T> => Promise.resolve().then(f).catch(() => d)
+
+/** The desktop app (CLAUDE_CODE_ENTRYPOINT): its sessions report isInteractive false although a person is there. */
+export async function onDesktop($: EngineInterface): Promise<boolean> {
+  return String((await engineCall(() => $.env.get('CLAUDE_CODE_ENTRYPOINT'), '')) ?? '').trim() === 'claude-desktop'
+}
+
+/** Someone is at this session although isInteractive may be false (the desktop app's SDK sessions never set it): a
+ * surface now, or the desktop app (CLAUDE_CODE_ENTRYPOINT, measured 2026-11-13 on Claude Code 2.1.321 in the desktop
+ * app). A -p run has neither. Used here and by update.ts at every check (a surface may attach after session.start).
+ * Never throws. */
+export async function attended($: EngineInterface): Promise<boolean> {
+  if (await onDesktop($)) return true
+  const s = await engineCall(() => $.session.surfaces(), [] as unknown)
+  return Array.isArray(s) && s.length > 0
+}
+
+/** session.start: an interactive session with a surface to ask on, or a desktop-app session (since 2026-11-13). A
+ * terminal surface alone is not enough for a dialog: a non-interactive run can report one and nobody would answer;
+ * a 'desktop' surface is. Kept for canAsk(). Never throws. */
 export async function canAskNow($: EngineInterface, isInteractive: unknown): Promise<boolean> {
-  let surfaces: unknown = []
-  try {
-    surfaces = await Promise.resolve().then(() => $.session.surfaces())
-  } catch {
-    surfaces = []
-  }
-  askable = isInteractive === true && Array.isArray(surfaces) && surfaces.length > 0
+  const surfaces = await engineCall(() => $.session.surfaces(), [] as unknown)
+  const list = Array.isArray(surfaces) ? surfaces : []
+  askable = (isInteractive === true && list.length > 0) || list.includes('desktop') || (await onDesktop($))
   return askable
 }
 
