@@ -6,7 +6,7 @@ export type ToolSpec = {
   input_schema: Record<string, unknown>
 }
 
-export const CONTRACT_SHA256 = "637b3eef61578c7979cf562aaa7916efc12a119231e13b7d08777251bfcdd435"
+export const CONTRACT_SHA256 = "0022e2b0e3736fbd958588c33d029255a081e1c9023e8cd45588020929aa2a85"
 
 export const API = "svc/1" as const
 export const PREFIX = "/svc/v1" as const
@@ -217,7 +217,7 @@ export const CONTRACT = {
   "response_signature": "With server_keys in the client config, every answer must carry X-Agent-Server-Signature: v=1; kid=<16 hex: sha256(raw public key)[:16]>; ts=<unix seconds>; sig=<base64 Ed25519 signature> over the UTF-8 lines agent-svc-response/1, status, METHOD, path without query, the request's X-Agent-Challenge (32 hex, fresh per request), ts, sha256 hex of the body bytes, joined by a newline. The client refuses an answer that is unsigned, signed by a key not in server_keys, bound to another request (replay) or more than 300 seconds off its clock, never uses it, and closes the shell gate (reason unverified); an unsigned 5xx, 403 or 429 (the tunnel edge's own page) counts as an unreachable server and is backed off (an unsigned Retry-After is honored up to 60 seconds); with e2e_keys, a signed success that is not a sealed answer, or one that does not open, is never used either. Verifier: host/services.py _verify_response",
   "egress": "Only the plugin's hooks module sends (its svc channel, inside the Claude Code process); sessions, other hooks, other plugins, tools and the UI never connect to the service directly. Until the migration release the Python client (the local connector process, host/services.py) is the one sender instead",
   "e2e": {
-   "envelope": "End-to-end envelope (host/e2e.py, both sides), used for every request but GET /health whenever the client config has e2e_keys (required for a hostname endpoint, optional for the IPv4 one). The client makes a fresh X25519 key per request; shared = X25519(that key, the first key in e2e_keys); HKDF-SHA256(shared, salt agent-svc-e2e/1, info \"keys\" + ephemeral public key + server public key) gives 64 bytes: the request key (first 32) and the answer key (last 32). Outer request: POST to an outer path (x-transport outer_paths) with X-Agent-E2E: v=1; kid=<16 hex: sha256(raw X25519 public key)[:16]>; epk=<base64 ephemeral public key>; ts=<unix seconds>, X-Agent-Challenge and Content-Type application/octet-stream; body = 12-byte nonce || AES-256-GCM(request key, inner, aad). Inner: compact JSON {method, path (with query), headers} + newline + the raw body; the headers are the credential headers (Authorization, X-Agent-Account, X-Agent-Device, X-Agent-Claude, X-Agent-Timestamp, X-Agent-Nonce, X-Agent-Signature) and Content-Type, which never travel outside the envelope. AAD: the lines agent-svc-e2e/1, req (or resp), POST, the outer path, kid, epk, ts, challenge. Answer: 200 application/octet-stream, body = random 12-byte nonce || AES-256-GCM(answer key, compact JSON {status, headers} + newline + body, aad with resp); errors found before the envelope opens (limits, bad_envelope) are plain JSON. The server refuses a timestamp more than 300 seconds off, an unknown kid (before any key work), an envelope that does not open, a login route outside the login outer path, and a replayed ephemeral key, all as 400 bad_envelope counted as a failed authentication of the client IP. The Ed25519 response signature covers the outer answer (the ciphertext), so a client checks it before decrypting and a signature never confirms a guess about the plaintext",
+   "envelope": "End-to-end envelope (host/e2e.py, both sides), used for every request but GET /health whenever the client config has e2e_keys (required for a hostname endpoint, optional for the IPv4 one). The client makes a fresh X25519 key per request; shared = X25519(that key, the first key in e2e_keys); HKDF-SHA256(shared, salt agent-svc-e2e/1, info \"keys\" + ephemeral public key + server public key) gives 64 bytes: the request key (first 32) and the answer key (last 32). Outer request: POST to an outer path (x-transport outer_paths) with X-Agent-E2E: v=1; kid=<16 hex: sha256(raw X25519 public key)[:16]>; epk=<base64 ephemeral public key>; ts=<unix seconds>, X-Agent-Challenge and Content-Type application/octet-stream; body = 12-byte nonce || AES-256-GCM(request key, inner, aad). Inner: compact JSON {method, path (with query), headers} + newline + the raw body; the headers are the credential headers (Authorization, X-Agent-Account, X-Agent-Device, X-Agent-Claude, X-Agent-Timestamp, X-Agent-Nonce, X-Agent-Signature) and Content-Type, which never travel outside the envelope. AAD: the lines agent-svc-e2e/1, req (or resp), POST, the outer path, kid, epk, ts, challenge. Answer: 200 application/octet-stream, body = random 12-byte nonce || AES-256-GCM(answer key, compact JSON {status, headers} + newline + body, aad with resp); errors found before the envelope opens (limits, bad_envelope) are plain JSON. The server refuses a timestamp more than 300 seconds off, an unknown kid (before any key work), an envelope that does not open, a login route outside the login outer path, and a replayed ephemeral key, all as 400 bad_envelope counted as a failed authentication of the client IP; one that opens but is stamped before the server's start is 503 restarted (Retry-After), not counted. The Ed25519 response signature covers the outer answer (the ciphertext), so a client checks it before decrypting and a signature never confirms a guess about the plaintext",
    "encodings": [
     "binary",
     "base64"
@@ -309,7 +309,8 @@ export const CONTRACT = {
   ],
   "503": [
    "unavailable",
-   "busy"
+   "busy",
+   "restarted"
   ]
  },
  "x-client-config": {
@@ -715,6 +716,259 @@ export const CONTRACT = {
    }
   }
  ],
+ "x-mcp": {
+  "path": "/mcp",
+  "transport": "Streamable HTTP, JSON-RPC 2.0 (single messages or a batch): POST /mcp with Content-Type application/json; the answer is application/json (200, or 202 with no body when every message was a notification); no SSE stream and no Mcp-Session-Id; GET, DELETE and other methods answer 405. /mcp, the OAuth paths (x-oauth) and /.well-known/oauth-* take plaintext requests and send unsigned answers (the Codex path through the tunnel, disclosed in the Codex plugin data note); every other path keeps the envelope and the response signature (x-transport).",
+  "auth": "Every request, initialize included, carries Authorization: Bearer <OAuth access token> (x-oauth). Without a valid token the answer is 401 with WWW-Authenticate: Bearer resource_metadata=\"<base>/.well-known/oauth-protected-resource/mcp\", where <base> is the limits setting unsubscribe_base_url (the server's public https base). initialize checks the token only: no store write and no outbound call.",
+  "protocol_versions": [
+   "2025-06-18",
+   "2025-03-26",
+   "2025-11-25"
+  ],
+  "instructions": "agent-services: working methods and subagent routing for Codex.\nCall lesson_lookup with a work phase (plan, implement, test, review, deliver, checkpoint) for that phase's methods.",
+  "tools": [
+   {
+    "name": "router_advice",
+    "description": "Ask agent-services which model and reasoning_effort a spawn_agent call should use (an agent-services suggestion). Pass task_name as you will give it to spawn_agent: lowercase letters, digits and underscores, starting with a task word (plan, replan, acceptance, review, default, explore) and an underscore. Only the task name is sent; the brief stays on this machine. Without task_name the whole tier table comes back. Returns advice: a sentence naming the model and effort, or null for an unknown task word.",
+    "inputSchema": {
+     "type": "object",
+     "properties": {
+      "task_name": {
+       "type": "string",
+       "pattern": "^[a-z0-9_]{1,64}$",
+       "maxLength": 64
+      }
+     },
+     "additionalProperties": false
+    },
+    "annotations": {
+     "readOnlyHint": true
+    }
+   },
+   {
+    "name": "lesson_lookup",
+    "description": "Fetch the agent-services working methods for one work phase (plan, implement, test, review, deliver, checkpoint). Returns the version, the catalog line, the items wrapped in <agent-method> and the rule for using them; an empty list when nothing is served. The plan phase also arrives once per thread with the session; call this for the other phases when you reach them.",
+    "inputSchema": {
+     "type": "object",
+     "properties": {
+      "role": {
+       "type": "string",
+       "enum": [
+        "codex"
+       ]
+      },
+      "phase": {
+       "type": "string",
+       "enum": [
+        "plan",
+        "implement",
+        "test",
+        "review",
+        "deliver",
+        "checkpoint"
+       ]
+      }
+     },
+     "required": [
+      "phase"
+     ],
+     "additionalProperties": false
+    },
+    "annotations": {
+     "readOnlyHint": true
+    }
+   },
+   {
+    "name": "checkpoint_advice",
+    "description": "Ask whether now is a good moment to compact the conversation, given how full the context is and what was done since the last compaction. Returns now (true or false) and the lines to keep in the summary. Pass event when a work event prompted the question (module_done, topic_switch, milestone, user_request).",
+    "inputSchema": {
+     "type": "object",
+     "properties": {
+      "context_pct": {
+       "type": "number",
+       "minimum": 0,
+       "maximum": 100
+      },
+      "turns": {
+       "type": "integer",
+       "minimum": 0,
+       "maximum": 1000000
+      },
+      "tool_calls": {
+       "type": "integer",
+       "minimum": 0,
+       "maximum": 1000000
+      },
+      "todos_done": {
+       "type": "integer",
+       "minimum": 0,
+       "maximum": 1000000
+      },
+      "commits": {
+       "type": "integer",
+       "minimum": 0,
+       "maximum": 1000000
+      },
+      "minutes": {
+       "type": "integer",
+       "minimum": 0,
+       "maximum": 1000000
+      },
+      "event": {
+       "type": "string",
+       "enum": [
+        "module_done",
+        "topic_switch",
+        "milestone",
+        "user_request"
+       ]
+      }
+     },
+     "required": [
+      "context_pct"
+     ],
+     "additionalProperties": false
+    },
+    "annotations": {
+     "readOnlyHint": true
+    }
+   },
+   {
+    "name": "status",
+    "description": "Whether agent-services is active for this Codex sign-in: signed in, the license state, whether the company paused the service, and the methods choice. When the agent-services tools are not available at all, the sign-in is missing or expired: the user runs `codex mcp login agent-services`.",
+    "inputSchema": {
+     "type": "object",
+     "properties": {},
+     "additionalProperties": false
+    },
+    "annotations": {
+     "readOnlyHint": true
+    }
+   },
+   {
+    "name": "setup",
+    "description": "Read what agent-services does, changing nothing: \"methods preview\" returns the methods text the session hooks add once per thread; \"info hooks\" lists the plugin hooks and what each one sends.",
+    "inputSchema": {
+     "type": "object",
+     "properties": {
+      "command": {
+       "type": "string",
+       "enum": [
+        "methods preview",
+        "info hooks"
+       ]
+      }
+     },
+     "required": [
+      "command"
+     ],
+     "additionalProperties": false
+    },
+    "annotations": {
+     "readOnlyHint": true
+    }
+   },
+   {
+    "name": "setup_methods",
+    "description": "Change the stored methods choice of this account; call it only with the user's answer. \"methods suggest\" (the default) adds the agent-services methods once per thread as suggestions; \"methods on\" records that the user takes them as their own working methods (same delivery); \"methods off\" stops adding them; \"methods accept\" records the current methods text as the approved one; \"methods keep\" keeps the approved one. Returns the choice now stored.",
+    "inputSchema": {
+     "type": "object",
+     "properties": {
+      "command": {
+       "type": "string",
+       "enum": [
+        "methods on",
+        "methods off",
+        "methods suggest",
+        "methods accept",
+        "methods keep"
+       ]
+      }
+     },
+     "required": [
+      "command"
+     ],
+     "additionalProperties": false
+    }
+   }
+  ],
+  "hook_tools": [
+   {
+    "name": "hook_session",
+    "description": "Codex SessionStart and UserPromptSubmit mcp_tool hook, not listed in tools/list: adds the methods core (at most 8,000 characters) once per thread (_meta.threadId) on whichever event comes first; later calls in the thread and a methods choice of off add nothing. Input is a literal event name, never a prompt field.",
+    "inputSchema": {
+     "type": "object",
+     "properties": {
+      "event": {
+       "type": "string",
+       "enum": [
+        "SessionStart",
+        "UserPromptSubmit"
+       ]
+      }
+     },
+     "additionalProperties": false
+    }
+   },
+   {
+    "name": "hook_spawn",
+    "description": "Codex PreToolUse mcp_tool hook on spawn_agent, not listed in tools/list. v2 (matcher collaborationspawn_agent) sends {\"v\": \"v2\", \"task\": \"${tool_input.task_name}\"}: the first spawn per (thread, task name) with a known task word is denied with the advised model and effort, the repeat passes. v1 (matcher spawn_agent) sends {\"v\": \"v1\", \"turn\": \"${turn_id}\"}: the first spawn per (thread, turn) is denied with the whole tier table, the rest of that turn passes. Never the brief (tool_input.message) or the whole tool_input.",
+    "inputSchema": {
+     "type": "object",
+     "properties": {
+      "v": {
+       "type": "string",
+       "enum": [
+        "v1",
+        "v2"
+       ]
+      },
+      "task": {
+       "type": "string",
+       "pattern": "^[a-z0-9_]{1,64}$",
+       "maxLength": 64
+      },
+      "turn": {
+       "type": "string",
+       "pattern": "^[0-9A-Za-z._:-]{1,128}$",
+       "maxLength": 128
+      }
+     },
+     "required": [
+      "v"
+     ],
+     "additionalProperties": false
+    }
+   }
+  ],
+  "hook_answer": "A hook tool's result is one text content holding Codex hook JSON: {\"hookSpecificOutput\": {\"hookEventName\", \"additionalContext\"}} for hook_session, {\"hookSpecificOutput\": {\"hookEventName\": \"PreToolUse\", \"permissionDecision\": \"deny\", \"permissionDecisionReason\"}} for a routed spawn, and {} (no decision, Codex goes on as without the hook) otherwise, also for bad input, a paused company, an inactive license or any server-side failure (the hooks fail open). Per-thread state (methods sent, spawns denied) is kept in process memory for 2 hours; nothing from a hook input is stored or logged.",
+  "gate": "Tools other than status, setup and setup_methods, and both hook tools, follow the same rules as the svc/1 routes they stand for (router_advice and hook_spawn: POST /router/decide; checkpoint_advice: POST /checkpoint/timing; lesson_lookup and hook_session: POST /served/fetch): a paused company, an inactive or missing license, or a plan without the route gives a tool error (isError true, the error code as text), and an empty hook answer."
+ },
+ "x-oauth": {
+  "description": "OAuth 2.1 authorization server for the Codex MCP path (plaintext, unsigned; through the Cloudflare Tunnel). Issuer = limits unsubscribe_base_url; protected resource = <issuer>/mcp. One static public client, no dynamic registration.",
+  "client_id": "agent-services-codex",
+  "token_endpoint_auth_method": "none",
+  "scopes": [
+   "mcp"
+  ],
+  "pkce": [
+   "S256"
+  ],
+  "redirect_uris": "http:// on the standard IPv4 loopback host address or on [::1]; any port and path (RFC 8252 loopback redirects); not the name localhost, no other address",
+  "resource": "<issuer>/mcp (RFC 8707), required at authorize and token",
+  "code_seconds": 60,
+  "access_token_seconds": 3600,
+  "refresh": "rotates on each use; lives as long as the grant (device-session idle 30 d / total 90 d); a token first used at most 30 s ago is accepted again unless a successor is in use; using a successor revokes its siblings; reuse after 30 s revokes the grant",
+  "endpoints": {
+   "GET /.well-known/oauth-protected-resource": "RFC 9728 (also at /.well-known/oauth-protected-resource/mcp)",
+   "GET /.well-known/oauth-authorization-server": "RFC 8414",
+   "GET|POST /oauth/authorize": "HTML page: email, then code with the consent line; 303 to redirect_uri with code, state, iss",
+   "POST /oauth/token": "application/x-www-form-urlencoded: client_id, grant_type (authorization_code | refresh_token), code, code_verifier, redirect_uri, resource, refresh_token; JSON answer access_token, token_type Bearer, expires_in, refresh_token, scope; errors RFC 6749 (invalid_request, invalid_client 401, invalid_grant, invalid_target, unsupported_grant_type); 503 not_configured without a public base",
+   "POST /oauth/revoke": "RFC 7009, form client_id, token (refresh or access), optional token_type_hint; ends the whole grant; 200 always for a valid request"
+  },
+  "grant": "a sessions row with kind 'oauth', harness 'codex', device_id 'codex_<16 hex>', empty device_pubkey; pending until the code is exchanged; not in device lists and no device switch; an active grant shares max_devices (default 1) with the account's Claude device sessions, newest wins (a Codex sign-in ends the Claude session, a Claude sign-in ends the grant and revokes its tokens); a pending grant counts for nothing; logout, admin revoke and licenses apply; the device-signed path refuses it (auth checks kind 'device'); the privacy export includes grants of every status",
+  "rate_limits": "every OAuth path takes the per-IP login bucket before the body is read; POST /oauth/authorize also the per-email and IP bucket and the sign-in guess lock; the request log keeps the path only, never the query or the body"
+ },
  "definitions": {
   "Error": {
    "type": "object",
@@ -787,6 +1041,12 @@ export const CONTRACT = {
     "plugin"
    ],
    "description": "control = scheduling session; auto = a session that advances on its own; plugin = plugin"
+  },
+  "McpServedRole": {
+   "enum": [
+    "codex"
+   ],
+   "description": "served roles published like a ServedRole but served only on the Codex MCP endpoint (x-mcp: hook_session and lesson_lookup), never through POST /served/fetch or /served/session; codex = the Codex methods variant"
   },
   "ServedPhase": {
    "enum": [
