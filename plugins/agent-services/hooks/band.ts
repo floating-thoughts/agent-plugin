@@ -267,9 +267,11 @@ export function installBand(on: any): void {
       return Box({ flexDirection: 'column', children: [topRow(isOnline), Text({ key: 'line', dimColor: true, children: line })] })
     }
     // the band leaves out the disclosure (panel.method): the status command and the board still show it
-    // plain lines too where the body is narrower than the four boxes, which neither shrink nor wrap
+    // plain lines too where the body is narrower than the four boxes, which neither shrink nor wrap. Terminal only:
+    // the desktop app lays the boxes out in pixels with a proportional font, so its bodyColumns (a count of
+    // monospace cells) says nothing about whether they fit, and there the boxes always fitted
     const cols = e.props?.bodyColumns
-    const narrow = typeof cols === 'number' && Number.isFinite(cols) && cols > 0 && cols < panelWidth(panel)
+    const narrow = e.surface !== 'desktop' && typeof cols === 'number' && Number.isFinite(cols) && cols > 0 && cols < panelWidth(panel)
     if (typeof Box !== 'function' || narrow) return Text({ dimColor: true, children: [`${pendingLine(pendingShown)}${SEP}${connLine(true)}`, ...(setupOpen ? [line] : []), ...panelLines(panel).slice(0, -1)].join('\n') })
     const column = (c: Panel['columns'][number], i: number) =>
       Box({
