@@ -43,16 +43,17 @@ export const HOOKS: readonly HookRow[] = [
   },
   {
     event: 'agent.spawn', matcher: '', file: 'register.ts', does: ['network', 'deny', 'rewrite', 'ui'],
-    what: 'While subagent routing is off (/agent-services routing off) it sends no request, changes no model and ' +
-      'adds nothing; only the weekly usage line below can still deny a subagent. Otherwise it asks the service for routing advice on each subagent (forks and ' +
+    what: 'While subagent routing is off (/agent-services routing off) it sends no request, changes no model, ' +
+      'adds nothing and denies nothing (neither the steps gate nor the weekly usage line below). Otherwise it asks the service for routing advice on each subagent (forks and ' +
       'teammates are skipped). The advice can ' +
       'deny the subagent with a reason, or set its model and effort. At routing suggest (the default) a subagent ' +
       'whose description has no task type word is never denied for it; at routing strict the request says so and ' +
       'the service refuses it. The request also carries the main session\'s ' +
-      'model id and whether your latest message asked for a review (yes or no; your text is not sent). Unless the ' +
+      'model id and whether your latest message asked for a review (yes or no; your text is not sent), and, once ' +
+      'you chose them with /agent-services models set, the models and efforts you allow for subagents. Unless the ' +
       'methods level is off, the service\'s speed-up suggestion is added once to the end of the subagent\'s prompt, ' +
       'labelled as an agent-services suggestion. ' +
-      'With the served rule tables (signed in): a subagent whose task names a step with [step:ID] is denied while that step\'s dependencies in .agent/steps.json are not done ([override: reason] lets it start; not while routing is off); the weekly usage line that stops new subagents applies only to accounts whose served rules include it; on accounts whose served rules turn it on (not product accounts), the main conversation\'s subagents are started in the background. These checks send nothing.',
+      'With the served rule tables (signed in): a subagent whose task names a step with [step:ID] is denied while that step\'s dependencies in .agent/steps.json are not done ([override: reason] lets it start; not while routing is off); the weekly usage line that stops new subagents applies only to accounts whose served rules include it, and not while routing is off; on accounts whose served rules turn it on (not product accounts), the main conversation\'s subagents are started in the background. These checks send nothing.',
     shown: 'A deny shows its reason, which starts with "agent-services routing", "agent-services steps gate" or ' +
       '"agent-services usage line". A changed model is said each ' +
       'time in a dim line naming the model. The added suggestion is in the subagent\'s prompt.',
@@ -168,7 +169,7 @@ export const HOOKS: readonly HookRow[] = [
   },
   {
     event: 'ui.render', matcher: 'component: AbovePrompt', file: 'band.ts', does: ['ui'],
-    what: 'Draws above the prompt: a top row with the decisions waiting for you (.agent/pending.md) and the ' +
+    what: 'Draws above the prompt: a top row with the actions waiting for you (.agent/pending.md) and the ' +
       'connection state, one dim line (sign-in state, savings) and, while figures show, a usage panel (tokens, quota ' +
       'and context, time saved). While setup questions are open the line says how many and ' +
       'names /agent-services setup instead (at most once every 7 days after that command ran); the questions are ' +

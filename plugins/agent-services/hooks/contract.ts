@@ -6,7 +6,7 @@ export type ToolSpec = {
   input_schema: Record<string, unknown>
 }
 
-export const CONTRACT_SHA256 = "87789d15b92e9a9f091ae5f38bb463169a1a10fe518bafc9b3d8c1e4c16ab211"
+export const CONTRACT_SHA256 = "94f4cab4e7d47fe0002e5595901f3b833da73da44167e49aaf69c5f75c6c8f50"
 
 export const API = "svc/1" as const
 export const PREFIX = "/svc/v1" as const
@@ -27,7 +27,7 @@ export const TOOL_NAMES = ["router_advice", "lesson_lookup", "savings", "checkpo
 export const TOOLS: readonly ToolSpec[] = [
   {
     "name": "router_advice",
-    "description": "Ask the routing service which model and effort a subagent dispatch should use. Sends the service only the first word of the description (at most 32 characters) and its length, the subagent type, the requested model and effort, the harness name, a random session ref, the dispatch count in this session and a salted project hash, and, when known, the main model name, whether the user asked for a review, whether strict routing is on and the optional scope; the description text stays on this machine. The 100,000 limit is the local input limit. Returns the decision (route, pass or deny), the model, the effort, a hint, and brief_rule, a speed-up suggestion the plugin itself adds, labelled, to each dispatched subagent brief (do not copy it); pass_through when the service cannot be reached. On a plan, replan or acceptance dispatch, pass scope (the planned work's shape as counts and flags, no text) to get a project size in hint.",
+    "description": "Ask the routing service which model and effort a subagent dispatch should use. Sends the service only the first word of the description (at most 32 characters) and its length, the subagent type, the requested model and effort, the harness name, a random session ref, the dispatch count in this session and a salted project hash, and, when known, the main model name, whether the user asked for a review, whether strict routing is on, the models and efforts the user allowed for subagents and the optional scope; the description text stays on this machine. The 100,000 limit is the local input limit. Returns the decision (route, pass or deny), the model, the effort, a hint, and brief_rule, a speed-up suggestion the plugin itself adds, labelled, to each dispatched subagent brief (do not copy it); pass_through when the service cannot be reached. On a plan, replan or acceptance dispatch, pass scope (the planned work's shape as counts and flags, no text) to get a project size in hint.",
     "input_schema": {
       "type": "object",
       "properties": {
@@ -588,7 +588,7 @@ export const CONTRACT = {
  "x-tools": [
   {
    "name": "router_advice",
-   "description": "Ask the routing service which model and effort a subagent dispatch should use. Sends the service only the first word of the description (at most 32 characters) and its length, the subagent type, the requested model and effort, the harness name, a random session ref, the dispatch count in this session and a salted project hash, and, when known, the main model name, whether the user asked for a review, whether strict routing is on and the optional scope; the description text stays on this machine. The 100,000 limit is the local input limit. Returns the decision (route, pass or deny), the model, the effort, a hint, and brief_rule, a speed-up suggestion the plugin itself adds, labelled, to each dispatched subagent brief (do not copy it); pass_through when the service cannot be reached. On a plan, replan or acceptance dispatch, pass scope (the planned work's shape as counts and flags, no text) to get a project size in hint.",
+   "description": "Ask the routing service which model and effort a subagent dispatch should use. Sends the service only the first word of the description (at most 32 characters) and its length, the subagent type, the requested model and effort, the harness name, a random session ref, the dispatch count in this session and a salted project hash, and, when known, the main model name, whether the user asked for a review, whether strict routing is on, the models and efforts the user allowed for subagents and the optional scope; the description text stays on this machine. The 100,000 limit is the local input limit. Returns the decision (route, pass or deny), the model, the effort, a hint, and brief_rule, a speed-up suggestion the plugin itself adds, labelled, to each dispatched subagent brief (do not copy it); pass_through when the service cannot be reached. On a plan, replan or acceptance dispatch, pass scope (the planned work's shape as counts and flags, no text) to get a project size in hint.",
    "input_schema": {
     "type": "object",
     "properties": {
@@ -3559,7 +3559,7 @@ export const CONTRACT = {
        "route": {
         "type": "array",
         "maxItems": 100,
-        "description": "routed subagent turns, one row per (model, long) per day",
+        "description": "routed subagent turns, one row per (model, long, main_model) per day",
         "items": {
          "type": "object",
          "properties": {
@@ -3571,6 +3571,12 @@ export const CONTRACT = {
           "long": {
            "type": "boolean",
            "description": "this turn's prompt is over long_prompt.over in the public price list for this model"
+          },
+          "main_model": {
+           "type": "string",
+           "pattern": "^[0-9A-Za-z.:/_-]+$",
+           "maxLength": 80,
+           "description": "optional (plugin after 0.10.2): the main conversation's model when the subagent ran; the saving is measured against the cheaper of Opus and this model. Absent: Opus"
           },
           "turns": {
            "type": "integer",
@@ -3785,6 +3791,10 @@ export const CONTRACT = {
            "minimum": 0,
            "maximum": 1000000,
            "description": "compactions whose re-attached rows were rewritten"
+          },
+          "net": {
+           "type": "boolean",
+           "description": "optional (plugin after 0.10.2): true when the runs leave out those after a checkpoint compaction whose after-size the server takes from the next request (the compaction saving already counts them). Absent: the server leaves out one run's share per such compaction of this model on this day"
           }
          },
          "required": [
@@ -4395,6 +4405,73 @@ export const CONTRACT = {
      "strict": {
       "type": "boolean",
       "description": "true when the person turned on strict routing (a dispatch without a task type word is refused); absent or false: advice only, never refused for a missing word (0.6.2; absent from older clients)"
+     },
+     "allowed": {
+      "type": "object",
+      "properties": {
+       "models": {
+        "type": "array",
+        "minItems": 1,
+        "maxItems": 4,
+        "uniqueItems": true,
+        "items": {
+         "enum": [
+          "fable",
+          "opus",
+          "sonnet",
+          "haiku"
+         ]
+        }
+       },
+       "efforts": {
+        "type": "array",
+        "minItems": 1,
+        "maxItems": 5,
+        "uniqueItems": true,
+        "items": {
+         "enum": [
+          "low",
+          "medium",
+          "high",
+          "xhigh",
+          "max"
+         ]
+        }
+       },
+       "top": {
+        "type": "object",
+        "properties": {
+         "model": {
+          "enum": [
+           "fable",
+           "opus",
+           "sonnet",
+           "haiku"
+          ]
+         },
+         "effort": {
+          "enum": [
+           "low",
+           "medium",
+           "high",
+           "xhigh",
+           "max"
+          ]
+         }
+        },
+        "required": [
+         "model",
+         "effort"
+        ],
+        "additionalProperties": false
+       }
+      },
+      "required": [
+       "models",
+       "efforts"
+      ],
+      "additionalProperties": false,
+      "description": "optional (owner 2026-11-12): the models and efforts the person allows for subagents and their pick for the top tier (plan, replan, acceptance, an asked-for deep review), chosen with /agent-services models set; the router then routes only inside this set (the closest allowed pick, never above the main model unless the person allowed nothing at or below it; the top-tier pick as chosen). Absent: the service's default tiers"
      },
      "scope": {
       "type": "object",

@@ -8,9 +8,10 @@
 // The table (served, in memory only, rules.ts): {"drop": [attachment types], "keep_files": [regex sources, matched
 // without case against the file path], "burst_ms": ms}. No table (signed out), no usable burst_ms, or the switch off (`/agent-services trim off`, per
 // user, default on): every row passes. Nothing is sent anywhere: the day counters (counters.ts addTrim) keep only the
-// token estimate removed and the number of runs per model, which the daily upload carries as savings.trim.
+// token estimate removed and the number of runs per model, which the daily upload carries as savings.trim. A run after
+// a checkpoint compaction without a reported after-size is not counted there (counters.ts openMeasured).
 import type { EngineInterface } from 'claude-code'
-import { addTrim, estimateTokens, localDay, readDay } from './counters'
+import { addTrim, estimateTokens, localDay, openMeasured, readDay } from './counters'
 import { riskyPattern, rulesTable, servedNumber } from './rules'
 import { engineStore } from './store'
 
@@ -99,7 +100,10 @@ async function closeRun($: EngineInterface): Promise<void> {
     const now = await $.clock.now()
     const id = String((await $.session.id().catch(() => '')) || 'session')
     const model = String((await $.session.model().catch(() => '')) || 'other')
-    await addTrim(engineStore($), id, model, done.tokens, now)
+    const store = engineStore($)
+    // a checkpoint compaction whose after-size comes from the next request already counts these tokens
+    if (await openMeasured(store, id, [localDay(now), localDay(now - 86_400_000)])) return
+    await addTrim(store, id, model, done.tokens, now)
   } catch {
     // the figure is lost; the rows were trimmed anyway
   }

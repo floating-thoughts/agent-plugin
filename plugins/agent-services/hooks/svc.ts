@@ -58,6 +58,7 @@ import {
 import type { KV } from './store'
 import {
   b64url,
+  bindingKept,
   checkSchema,
   Deadline,
   dec,
@@ -330,9 +331,11 @@ export class Svc {
         const tok = await getText(this.kv, KEYS.token)
         if (!tok) return
         const bound = await getText(this.kv, KEYS.endpoint)
-        if (bound === null) {
-          await safeSet(this.kv, KEYS.endpoint, this.cfg.fingerprint)
-        } else if (bound !== this.cfg.fingerprint) {
+        if (bound === null || (bound !== this.cfg.binding && bindingKept(bound, this.cfg))) {
+          // server key ring: a rotated key list that overlaps the bound one keeps the sign-in and
+          // moves the binding along
+          await safeSet(this.kv, KEYS.endpoint, this.cfg.binding)
+        } else if (bound !== this.cfg.binding) {
           for (const k of SIGN_OUT_KEYS) await safeDelete(this.kv, k)
           for (const k of await tokenNextKeys(this.kv)) await safeDelete(this.kv, k)
           this.authCache = null
@@ -1385,7 +1388,7 @@ export class Svc {
     if (res.ok && isObj(res.body)) {
       const b = res.body
       if (!(await safeSet(this.kv, KEYS.token, token))) return R(false, { error: 'store_unavailable' })
-      await safeSet(this.kv, KEYS.endpoint, this.cfg.fingerprint)
+      await safeSet(this.kv, KEYS.endpoint, this.cfg.binding)
       for (const k of await tokenNextKeys(this.kv)) await safeDelete(this.kv, k)
       for (const k of [KEYS.tokenPrev, KEYS.rotatedAt, KEYS.block, KEYS.loginPending]) await safeDelete(this.kv, k)
       for (const [k, n] of [[KEYS.accountId, 'account_id'], [KEYS.plan, 'plan'], [KEYS.expiresAt, 'expires_at']] as const) {

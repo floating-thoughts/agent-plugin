@@ -319,6 +319,7 @@ class Session {
   todosDone = 0
   commits = 0
   todosLast = 0
+  tasksDone = new Set<string>() // task tool (TaskCreate / TaskUpdate) ids counted as completed; kept over a reset like todosLast
   base: number
   pendingContext: string[] | null = null
   advised = false // checkpoint advice delivered since the last reset: not sent again
@@ -778,6 +779,15 @@ export class Core {
         s.todosDone += Math.max(0, n - s.todosLast)
         s.todosLast = n
       }
+      // the newer task tool: a task counts once, when it is first seen completed (2026-11-12)
+      if ((tool === 'TaskUpdate' || tool === 'TaskCreate') && inp.status === 'completed') {
+        const id = inp.taskId
+        if (tool === 'TaskCreate') s.todosDone += 1 // created already completed: it has no id yet, so it counts here once
+        else if ((typeof id === 'string' || typeof id === 'number') && !s.tasksDone.has(String(id))) {
+          s.tasksDone.add(String(id))
+          s.todosDone += 1
+        }
+      }
       const model = (e.agent !== null ? s.models.get(e.agent as string) : undefined) || s.mainModel
       const cwd = s.cwd
       this.spawn(() => this.indexRead(e, cwd, model ?? null))
@@ -818,7 +828,8 @@ export class Core {
     if (agent !== null && s.routed.has(agent)) {
       if (typeof e.model === 'string' && u !== null) {
         const model = e.model
-        this.spawn(() => this.counters.route(sid, model, { input: u.input!, output: u.output!, cache_read: u.cache_read!, cache_write: u.cache_write! }))
+        const main = s.mainModel // the server's routing baseline when cheaper than Opus
+        this.spawn(() => this.counters.route(sid, model, { input: u.input!, output: u.output!, cache_read: u.cache_read!, cache_write: u.cache_write! }, main))
       }
       return answer()
     }

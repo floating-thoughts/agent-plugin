@@ -155,6 +155,7 @@ let previewed: string | null = null // the text "methods preview" showed in this
 let levelStore: Store | null = null
 let readClaude: (() => Promise<string | null>) | null = null
 let shownBody: string | null = null // the text the user's own "methods diff" or "methods preview" showed in this session (methods accept takes only it)
+let modelShownBody: string | null = null // the text the model's setup tool "methods diff" got (a confirmed accept may take it, 2026-11-12)
 let versioned: (() => Promise<{ text: string | null; version: string }>) | null = null // the served text and its version
 
 /** Whether methodsStart wired the level's reader (levelNow reads "suggest" before that). */
@@ -282,24 +283,27 @@ export async function approveMethods(): Promise<{ text: string | null; shown: bo
 
 /** "methods diff": the differences between the approved text and the candidate; null when there is no candidate.
  * `shown`: the answer goes to the user, so `methods accept` may take this candidate in this session. */
-export async function methodsDiff(diff: (a: string, b: string) => string, shown = false): Promise<string | null> {
+export async function methodsDiff(diff: (a: string, b: string) => string, shown = false, toModel = false): Promise<string | null> {
   if (!files) return null
   const pending = await files.read(PENDING_FILE)
   if (blank(pending)) return null
   const out = diff(bodyOf(await approved()), bodyOf(pending))
   if (shown) shownBody = flatBody(pending!)
+  if (toModel) modelShownBody = flatBody(pending!)
   return out
 }
 
-// The candidate was shown in this session: by "methods diff", or it is the text "methods preview" showed.
+// The candidate was shown in this session: by "methods diff", or it is the text "methods preview" showed. `byModel`:
+// a diff the model's setup tool got counts too (an accept the user confirmed in the model's question tool).
 const flatBody = (text: string): string => bodyOf(text).replace(/\s+/g, ' ')
-const wasShown = (pending: string): boolean => shownBody !== null && shownBody === flatBody(pending)
+const wasShown = (pending: string, byModel = false): boolean => (shownBody !== null && shownBody === flatBody(pending)) ||
+  (byModel && modelShownBody !== null && modelShownBody === flatBody(pending))
 
 /** A candidate waits that this session did not show (or that changed since): `methods accept` refuses it. */
-export async function pendingUnseen(): Promise<boolean> {
+export async function pendingUnseen(byModel = false): Promise<boolean> {
   try {
     const pending = files ? await files.read(PENDING_FILE) : null
-    return !blank(pending) && !wasShown(pending!)
+    return !blank(pending) && !wasShown(pending!, byModel)
   } catch {
     return false
   }
@@ -307,11 +311,11 @@ export async function pendingUnseen(): Promise<boolean> {
 
 /** "methods accept" (take the candidate) or "methods keep" (keep the approved text, stop asking about this candidate).
  * False when there is no candidate, or (accept) when this session did not show that exact candidate (pendingUnseen). */
-export async function settlePending(accept: boolean): Promise<boolean> {
+export async function settlePending(accept: boolean, byModel = false): Promise<boolean> {
   if (!files || !kept) return false
   const pending = await files.read(PENDING_FILE)
   if (blank(pending)) return false
-  if (accept && !wasShown(pending!)) return false
+  if (accept && !wasShown(pending!, byModel)) return false
   if (accept) await files.write(APPROVED_FILE, pending!)
   else await kept.set(methodsHash(pending!))
   await files.write(PENDING_FILE, '')

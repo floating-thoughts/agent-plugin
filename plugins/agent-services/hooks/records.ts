@@ -9,7 +9,7 @@
 import { sha256 } from './noble.js'
 import type { KV, Random, Transport } from './engine_types'
 import { noteBrief } from './flow_state'
-import { routingLevel } from './routing_level'
+import { routingLevel, routingModels } from './routing_level'
 import { scrub } from './redact'
 
 /** Two more routing facts (0.6.0): the main session's model id (for the cap) and whether the person's latest message
@@ -256,6 +256,9 @@ export class Records {
       body.user_asked_review = flags.user_asked_review === true
       // 0.6.2: only at routing strict; at suggest the field is not sent and the service never refuses a missing word
       if ((await routingLevel(this.store)) === 'strict') body.strict = true
+      // 2026-11-12: the models and efforts the person allows (`models set`); none saved: not sent
+      const allowed = await routingModels(this.store)
+      if (allowed) body.allowed = allowed
       // K6: the planned work's shape (counts and flags, checked by core.ts checkArgs); an empty one is not sent
       const sc = flags.scope
       if (sc && typeof sc === 'object' && !Array.isArray(sc) && Object.keys(sc).length) body.scope = { ...sc }
@@ -272,6 +275,7 @@ export class Records {
         delete body.user_asked_review
         delete body.strict
         delete body.scope // older than K6 (2026-11-05)
+        delete body.allowed // older than 2026-11-12
         errors.length = 0
         ans = await this.post('/router/decide', body, 'router', deadlineMs, errors)
       }

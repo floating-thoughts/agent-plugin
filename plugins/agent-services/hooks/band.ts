@@ -204,8 +204,8 @@ export function setBandPending(n: unknown): void {
   }
 }
 
-/** The band's top line over the panel: "1 decision waiting for you", "3 decisions waiting for you". */
-export const pendingLine = (n: number): string => `${n} decision${n === 1 ? '' : 's'} waiting for you`
+/** The band's top line over the panel: "1 action waiting for you", "3 actions waiting for you". */
+export const pendingLine = (n: number): string => `${n} action${n === 1 ? '' : 's'} waiting for you`
 
 // The band's top-right word per state: online while figures show (signed in and reaching the service); offline only
 // for offline mode and a server that cannot be reached; otherwise the state's own word, as the line under it says.

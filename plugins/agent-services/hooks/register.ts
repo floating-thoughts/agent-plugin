@@ -283,7 +283,7 @@ export const register: Register = (on) => {
   }).catch(($, e, next) => next(e))
 
   on('agent.spawn', async ($, e: Ev, next) => {
-    const off = await routingOff($); const gate = await spawnGate($, e, ready($), off); if (gate) return { deny: gate } // subagents.ts: usage line always, steps gate unless routing is off
+    const off = await routingOff($); const gate = off ? null : await spawnGate($, e, ready($)); if (gate) return { deny: gate } // subagents.ts: usage line and steps gate; routing off: neither (2026-11-12)
     if (off) return next(e); const agent = e.parentAgentId ?? null // routing off: nothing else (command.ts)
     const call = e.tool_use_id ?? null
     const a = await send($, 'dispatch', agent, {

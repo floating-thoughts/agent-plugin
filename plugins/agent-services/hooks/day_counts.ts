@@ -20,9 +20,10 @@ export function normalizeDay(dc: DayCounters): DayCounters {
   const route = new Map<string, DayCounters['route'][number]>()
   for (const r of dc.route) {
     const model = normModel(r.model)
-    const k = JSON.stringify([model, r.long])
+    const main = typeof r.main_model === 'string' && r.main_model ? normModel(r.main_model) : null
+    const k = JSON.stringify([model, r.long, main])
     const have = route.get(k)
-    if (!have) route.set(k, { ...r, model })
+    if (!have) route.set(k, main ? { ...r, model, main_model: main } : { ...r, model })
     else {
       have.turns += r.turns
       have.input_tokens += r.input_tokens
@@ -55,7 +56,9 @@ export function normalizeDay(dc: DayCounters): DayCounters {
     return { ref: row.ref, start, models, steps }
   })
   const out: DayCounters = {
-    route: [...route.values()].sort((a, b) => cmp(a.model, b.model) || Number(a.long) - Number(b.long)).slice(0, MAX_ROUTE_ROWS),
+    route: [...route.values()]
+      .sort((a, b) => cmp(a.model, b.model) || Number(a.long) - Number(b.long) || cmp(a.main_model ?? '', b.main_model ?? ''))
+      .slice(0, MAX_ROUTE_ROWS),
     index: [...index.values()].sort((a, b) => cmp(a.model, b.model) || a.file_tokens - b.file_tokens).slice(0, MAX_INDEX_ROWS),
     compact: compact.slice(0, MAX_COMPACT_ROWS),
   }
@@ -75,7 +78,16 @@ export function normalizeDay(dc: DayCounters): DayCounters {
   return out
 }
 
-export const dayEmpty = (dc: DayCounters): boolean => !dc.route.length && !dc.index.length && !dc.compact.length && !dc.trim?.length
+/** The day counters as the daily upload sends them: normalized, and each trim row marked `net` (2026-11-12): its runs
+ * leave out those after a checkpoint compaction measured from the next request (trim.ts), which the server's
+ * compaction lever already counts. Rows without the mark (older plugins) get that share left out on the server. */
+export function uploadDay(dc: DayCounters): DayCounters {
+  const out = normalizeDay(dc)
+  if (out.trim) out.trim = out.trim.map((r) => ({ ...r, net: true }))
+  return out
+}
+
+export const dayEmpty =(dc: DayCounters): boolean => !dc.route.length && !dc.index.length && !dc.compact.length && !dc.trim?.length
 
 /** The status line's and the dashboard's event counts of one day: route turns, compactions and indexed reads. */
 export function countsOf(dc: DayCounters): Record<string, number> {

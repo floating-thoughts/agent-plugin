@@ -32,3 +32,53 @@ export async function routingLevel(store: { get(key: string): Promise<unknown> }
     return 'suggest'
   }
 }
+
+// Since 2026-11-12: the models and efforts the person allows for subagents, and their pick for the top tier (plan,
+// replan, acceptance, an asked-for deep review). Set with `models set` (the slash command, or the setup tool after the
+// model asked the user with its question tool), stored here only, and sent with each routing request as `allowed`; the
+// service then routes only inside this set. No record: the service's default tiers, as before.
+export const MODELS_KEY = 'routing_models' // { models: string[], efforts: string[], top: { model, effort }, at }
+export const ROUTER_MODELS: readonly string[] = ['fable', 'opus', 'sonnet', 'haiku'] // every model the router knows
+export const ROUTER_EFFORTS: readonly string[] = ['low', 'medium', 'high', 'xhigh', 'max']
+export type Allowed = { models: string[]; efforts: string[]; top: { model: string; effort: string } }
+
+const listOf = (v: unknown, known: readonly string[]): string[] | null => {
+  if (!Array.isArray(v) || !v.length) return null
+  const out = known.filter((k) => v.includes(k)) // in the router's order, no repeats
+  return out.length === v.length && v.every((x) => typeof x === 'string') ? out : null
+}
+
+/** A checked choice, or null when it is not a valid one (the top pick must be among the allowed). Pure. */
+export function allowedOf(v: unknown): Allowed | null {
+  if (!v || typeof v !== 'object' || Array.isArray(v)) return null
+  const r = v as { models?: unknown; efforts?: unknown; top?: unknown }
+  const models = listOf(r.models, ROUTER_MODELS)
+  const efforts = listOf(r.efforts, ROUTER_EFFORTS)
+  const t = r.top as { model?: unknown; effort?: unknown } | null | undefined
+  if (!models || !efforts || !t || typeof t !== 'object') return null
+  if (!models.includes(t.model as string) || !efforts.includes(t.effort as string)) return null
+  return { models, efforts, top: { model: t.model as string, effort: t.effort as string } }
+}
+
+/** The stored choice, checked; null when none is saved or on any error. Reads only. */
+export async function routingModels(store: { get(key: string): Promise<unknown> }): Promise<Allowed | null> {
+  try {
+    return allowedOf(await store.get(MODELS_KEY))
+  } catch {
+    return null
+  }
+}
+
+/** `models=a,b efforts=c,d top=model:effort` (any order) as a choice, or null. Pure. */
+export function parseModels(words: string[]): Allowed | null {
+  const kv: Record<string, string> = {}
+  for (const w of words) {
+    const m = /^(models|efforts|top)=(\S+)$/i.exec(w)
+    if (!m || kv[m[1]!.toLowerCase()] !== undefined) return null
+    kv[m[1]!.toLowerCase()] = m[2]!.toLowerCase()
+  }
+  if (!kv.models || !kv.efforts || !kv.top) return null
+  const [model, effort, ...more] = kv.top.split(':')
+  if (more.length) return null
+  return allowedOf({ models: kv.models.split(','), efforts: kv.efforts.split(','), top: { model, effort } })
+}

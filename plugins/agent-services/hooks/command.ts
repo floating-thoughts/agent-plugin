@@ -31,8 +31,8 @@
 //   only days after the day of the choice) and "Don't upload" (`sharing off`). A company's "on" asks its members the
 //   same question, saying the admin recommends it; nothing of a member is uploaded before they answer.
 // - Subagent routing has three levels (routing_level.ts, default suggest): `routing off` makes the agent.spawn hook do
-//   no routing work (routingOff): no request, no routing deny, no model change, nothing added to the subagent's prompt
-//   (the weekly usage line of the served rules still holds, subagents.ts spawnGate);
+//   no routing work (routingOff): no request, no routing deny, no model change, nothing added to the subagent's prompt,
+//   and since 2026-11-12 no weekly usage line either (register.ts skips subagents.ts spawnGate);
 //   `routing suggest` asks for advice only; `routing strict` lets the service refuse a dispatch without a task type
 //   word. `routing on` is the 0.6.1 spelling of `routing suggest` (RENAMED).
 // - 0.6.3: the setup tool the model calls can never turn the upload on (no sharing on_backfill, on_from_now or on):
@@ -72,7 +72,8 @@ import { durationText, methodLine, timeOf, USAGE_DAYS_KEY, type TimeFigures } fr
 import { ORG_PAUSED_LINE, ORG_SAVINGS_TEXT, ORG_SET_TEXT, orgChoice, orgNotice, readOrg, sharingQuestion } from './org'
 import { hooksText } from './hooks_list'
 import { removeAll, removedMarker, resetRemoved, type RemoveDeps } from './remove'
-import { levelOf as routingLevelOf, ROUTING_KEY, ROUTING_LEVELS, routingLevel, routingRecord, type RoutingLevel } from './routing_level'
+import { levelOf as routingLevelOf, MODELS_KEY, parseModels, ROUTER_EFFORTS, ROUTER_MODELS, ROUTING_KEY, ROUTING_LEVELS,
+  routingLevel, routingModels, routingRecord, type RoutingLevel } from './routing_level'
 import { engineCommand } from './engines'
 import { clearRules } from './rules'
 
@@ -92,17 +93,17 @@ export const COMMAND_SPEC = {
     '[status | login [<email>] | logout | setup | sharing [on_backfill | on_from_now | off | not_now | preview | ' +
     'page on|off | mail on|off] | ' +
     'savings | methods [off | suggest | on | preview | diff | accept | keep] | routing [off | suggest | strict] | ' +
-    'autonomy [auto | ask | clear] | update | offline on|off | estimate [preview | send] | info [data | hooks | log [<day>]] | remove | company [mail on|off] | ' +
+    'models [set models=<list> efforts=<list> top=<model>:<effort> | clear] | autonomy [auto | ask | clear] | update | offline on|off | estimate [preview | send] | info [data | hooks | log [<day>]] | remove | company [mail on|off] | ' +
     'secrets [forget] | trim [on | off] | check]',
 } as const
 
-// Every word the command answers: the eighteen of USAGE, then the hidden `code` (sign-in fallback) and `served`.
-export const KNOWN_COMMANDS = ['status', 'login', 'logout', 'setup', 'sharing', 'savings', 'methods', 'routing',
+// Every word the command answers: the nineteen of USAGE, then the hidden `code` (sign-in fallback) and `served`.
+export const KNOWN_COMMANDS = ['status', 'login', 'logout', 'setup', 'sharing', 'savings', 'methods', 'routing', 'models',
   'autonomy', 'update', 'offline', 'estimate', 'info', 'remove', 'company', 'secrets', 'trim', 'check', 'code', 'served']
 /** The subcommands that work while signed out (`methods` alone and `methods off` too, see dispatch). */
 export const AUTH_FAIL_COMMANDS = ['status', 'login', 'code', 'logout', 'update', 'info', 'remove', 'secrets', 'check']
 export const ASK_HEADER = 'Sign-in'
-export const EMAIL_QUESTION = 'Which email address is your agent-services account under?'
+export const EMAIL_QUESTION = "What's the email address of your agent-services account? We'll email a sign-in code to it."
 export const EMAIL_CANCEL = ['Cancel sign-in', 'Not now'] // the engine's dialog needs 2-4 options
 export const CODE_CANCEL = ['Enter it later', 'Cancel sign-in']
 export const ESTIMATE_PREVIEW_MS = 30 * 60000 // a preview stays sendable this long, in this session only
@@ -115,13 +116,13 @@ export { ROUTING_KEY } from './routing_level'
 // The one savings record: the private page, the weekly email and the daily numbers-only upload together (choice.ts).
 // One answer sets all three; the page and the email keep their own subcommands (sharing page|mail on|off).
 export const SHARING_QUESTION =
-  'Keep a record of what agent-services saves you? It shows your savings on a private page in your claude.ai ' +
-  'account (only you can see it), emails you a weekly total, and uploads a small daily usage summary (token ' +
-  'counts and costs per model, counts per task type and hashed project, savings; never your prompts, file ' +
-  'contents, paths or code). Nothing is uploaded before you choose. "Upload, including the past 30 days": the ' +
-  'first upload also sends the summaries of up to 30 earlier days. "Upload from now on only": only the days after ' +
-  'today are sent, nothing from before. "Don\'t upload": nothing is uploaded and there is no page or email; you are ' +
-  'not asked again.'
+  'Would you like to keep track of what agent-services saves you? You get a private savings page in your ' +
+  'claude.ai account (only you can see it) and a weekly email with your total. For this, the plugin uploads one ' +
+  'small usage summary a day: token counts and costs per model, counts per task type and per hashed project, and ' +
+  'your savings. Your prompts, file contents, paths and code are never sent. Nothing is uploaded before you ' +
+  'choose. "Upload, including the past 30 days" also sends the summaries of up to 30 earlier days with the first ' +
+  'upload. "Upload from now on only" sends only the days after today, nothing from before. "Don\'t upload" means ' +
+  'no uploads, no page and no email, and you won\'t be asked again.'
 // The three answers (0.6.2), then the preview; the engine's dialog takes 2-4 options.
 export const SHARING_OPTIONS = ['Upload, including the past 30 days', 'Upload from now on only', "Don't upload",
   'Show me what is sent']
@@ -173,15 +174,19 @@ export const SETUP_COMMANDS = [
   'routing off',
   'routing suggest',
   'routing strict',
+  'models set',
+  'models clear',
   'update',
   'info data',
   'info hooks',
 ]
+// Since 2026-11-12: these apply only with user_confirmed true, i.e. after the model asked the user with its own
+// question tool and the user said yes (methods keep without it still asks in the plugin's dialog).
+export const CONFIRMED_WORDS = ['methods on', 'methods accept', 'models set', 'models clear']
 // The routing level as status shows it, and the answer once it is set (routing_level.ts).
 export const ROUTING_STATUS: Readonly<Record<RoutingLevel, string>> = {
-  off: 'Subagent routing: off. Subagents start as dispatched and nothing is asked of the service; only the weekly ' +
-    `usage line, where your served rules include it, still stops new subagents. ${COMMAND} routing suggest turns it ` +
-    'back on.',
+  off: 'Subagent routing: off. Subagents start as dispatched, nothing is asked of the service, and the weekly usage ' +
+    `line does not stop new subagents either. ${COMMAND} routing suggest turns it back on.`,
   suggest: 'Subagent routing: suggest (the default). Each subagent dispatch asks the service for advice on its model ' +
     `and effort, and a dispatch without a task type word still runs; ${COMMAND} routing strict refuses those, ` +
     `${COMMAND} routing off turns routing off.`,
@@ -190,8 +195,8 @@ export const ROUTING_STATUS: Readonly<Record<RoutingLevel, string>> = {
     `suggest or ${COMMAND} routing off changes it.`,
 }
 export const ROUTING_SET: Readonly<Record<RoutingLevel, string>> = {
-  off: 'Subagent routing is off: agent-services sends no routing request, changes no model and adds nothing to ' +
-    'subagent prompts; only the weekly usage line, where your served rules include it, still stops new subagents. ' +
+  off: 'Subagent routing is off: agent-services sends no routing request, changes no model, adds nothing to ' +
+    'subagent prompts and no longer stops new subagents at the weekly usage line. ' +
     `${COMMAND} routing suggest turns it back on.`,
   suggest: 'Subagent routing is set to suggest (the default): each subagent dispatch asks the service for advice on ' +
     `its model and effort, and a dispatch without a task type word runs as written. ${COMMAND} routing strict ` +
@@ -220,20 +225,35 @@ export const SETUP_SPEC = {
     'suggestions; "methods on" makes them the user\'s own instructions through one marked section in the user\'s ' +
     'CLAUDE.md and lets the planning gate hold larger file edits until there is a plan (read "methods preview" with ' +
     'the user first); "methods off" turns them off. "methods diff" shows how changed methods differ from the approved ' +
-    'ones; "methods accept" takes the new text, "methods keep" keeps the approved one. "methods on" and "methods ' +
-    'accept" change nothing until the user confirms them in a dialog of the plugin. "routing off" stops the ' +
-    'subagent routing advice (no request, no model change, nothing added to subagent prompts; only the weekly usage ' +
-    'line, where the served rules include it, still stops new subagents); "routing ' +
-    'suggest" (the default) asks for advice on each subagent and never refuses one for a missing task type word; ' +
-    '"routing strict" lets the service refuse a dispatch whose description does not start with a task type word. ' +
-    '"update" updates the plugin to ' +
+    'ones; "methods accept" takes the new text, "methods keep" keeps the approved one. Before "methods on" or ' +
+    '"methods accept", show the user the text ("methods preview") or the change ("methods diff"), ask them with your ' +
+    'question tool (AskUserQuestion in Claude Code) whether to apply it, and call with user_confirmed true only when ' +
+    'they answered yes in that question; without it nothing changes. "routing off" stops the subagent routing ' +
+    'advice and the weekly usage line (no request, no refusal, no model change, nothing added to subagent prompts); ' +
+    '"routing suggest" (the default) asks for advice on each subagent and never refuses one for a missing task type ' +
+    'word; "routing strict" lets the service refuse a dispatch whose description does not start with a task type ' +
+    'word. "models set" limits which models and efforts subagents may use: first ask the user with your question ' +
+    'tool in two calls. First call, three multi-select questions: which models (Fable, Opus, Sonnet, Haiku), which ' +
+    'lower efforts (low, medium, high) and which higher efforts (xhigh, max); at least one model and one effort in ' +
+    'all. Second call: which model and effort the top tier (plan, replan, acceptance, an asked-for deep review) uses, ' +
+    'with up to 4 combinations of the allowed ones as options. Then call "models set" with models, efforts, ' +
+    'top_model, top_effort and user_confirmed true. The service then routes only inside that set and never above ' +
+    'the main conversation\'s model unless the user allowed nothing at or below it (the top-tier pick applies as ' +
+    'chosen). "models clear" (also with user_confirmed true) goes back to the default tiers. "update" updates the plugin to ' +
     'the newest listed version. "info data" returns the plugin\'s data note (every request it sends and when, what ' +
     'the service keeps and for how long, what a company admin sees, the local files, and what can be turned off); ' +
     '"info hooks" lists every hook the plugin registers and what it does. Only call it with an answer the user gave, ' +
     'except "info data", "info hooks", "sharing preview", "methods preview" and "methods diff", which only read.',
   inputSchema: {
     type: 'object',
-    properties: { command: { type: 'string', enum: SETUP_COMMANDS } },
+    properties: {
+      command: { type: 'string', enum: SETUP_COMMANDS },
+      user_confirmed: { type: 'boolean', description: 'true only when the user answered yes in your question tool just before this call' },
+      models: { type: 'array', items: { type: 'string', enum: ROUTER_MODELS }, minItems: 1, maxItems: 4, uniqueItems: true },
+      efforts: { type: 'array', items: { type: 'string', enum: ROUTER_EFFORTS }, minItems: 1, maxItems: 5, uniqueItems: true },
+      top_model: { type: 'string', enum: ROUTER_MODELS },
+      top_effort: { type: 'string', enum: ROUTER_EFFORTS },
+    },
     required: ['command'],
     additionalProperties: false,
   },
@@ -308,7 +328,7 @@ export const ERROR_TEXT: Record<string, string> = {
 export const USAGE =
   `Usage: ${COMMAND} [status | login [<email>] | logout | setup | sharing [on_backfill | on_from_now | off | not_now | ` +
   'preview | page on|off | mail on|off] | savings | methods [off | suggest | on | preview | diff | accept | keep] | routing [off | suggest | ' +
-  'strict] | autonomy [auto | ask | clear] | update | offline on|off | estimate [preview | send] | info [data | hooks | log [<day>]] | remove | company [mail on|off] | ' +
+  'strict] | models [set models=<list> efforts=<list> top=<model>:<effort> | clear] | autonomy [auto | ask | clear] | update | offline on|off | estimate [preview | send] | info [data | hooks | log [<day>]] | remove | company [mail on|off] | ' +
   'secrets [forget] | trim [on | off] | check]'
 
 // The 0.5.0 spellings, kept for one version: [old words, new words] (a trailing '*' passes the rest on).
@@ -673,18 +693,21 @@ export class Command {
   // command's answer, or picked "As my own instructions" in the plugin's dialog.
   private userPreviewed = false
   private userChoseOn = false
+  private confirmed = false // this run: the setup tool call carried user_confirmed true (run)
 
   constructor(deps: CommandDeps) {
     this.d = deps
   }
 
   /** One run of /agent-services <args>; always answers a text, already redacted. `byTool`: the model's setup tool ran
-   * it, not the person's own command. */
-  async run(args: string, byTool = false): Promise<string> {
+   * it, not the person's own command. `confirmed`: the tool call carried user_confirmed true (the user said yes in
+   * the model's question tool just before; CONFIRMED_WORDS). */
+  async run(args: string, byTool = false, confirmed = false): Promise<string> {
     let text: string
     try {
       const words = String(args ?? '').trim().split(/\s+/).filter(Boolean)
       const renamed = renameOf(words)
+      this.confirmed = byTool && confirmed
       text = await this.dispatch(renamed ? renamed.words : words, byTool)
       if (renamed) text += `\n${renamed.line}`
     } catch {
@@ -698,7 +721,7 @@ export class Command {
     const rest = words.slice(1)
     const svc = this.d.svc
     if (!KNOWN_COMMANDS.includes(sub)) return `Unknown subcommand "${sub.slice(0, 40)}". ${USAGE}`
-    const signedOutOk = AUTH_FAIL_COMMANDS.includes(sub) || sub === 'routing' || (sub === 'methods' && (rest.length === 0 || (rest.length === 1 && rest[0]!.toLowerCase() === 'off')))
+    const signedOutOk = AUTH_FAIL_COMMANDS.includes(sub) || sub === 'routing' || sub === 'models' || (sub === 'methods' && (rest.length === 0 || (rest.length === 1 && rest[0]!.toLowerCase() === 'off')))
     if (!signedOutOk) {
       const st = await svc.authState(true)
       // nothing else works while signed out, and nothing is sent
@@ -724,6 +747,8 @@ export class Command {
         return this.methods(rest, byTool)
       case 'routing':
         return this.routing(rest)
+      case 'models':
+        return this.models(rest, byTool)
       case 'autonomy':
         return this.autonomy(rest)
       case 'update':
@@ -1085,23 +1110,24 @@ export class Command {
     if (sub === '') return this.methodsLine()
     const chosen = sub === 'on' && this.userChoseOn
     if (sub === 'on' || sub === 'off' || sub === 'suggest') this.userChoseOn = false // one answer applies one "on"
-    if (byTool && (sub === 'on' || sub === 'accept' || sub === 'keep') && !chosen) {
-      // the model asked: these decide which text is the person's own instructions, so only the person's answer applies
-      const yes = sub === 'on' ? 'Make them my own instructions' : sub === 'accept' ? 'Take the new text' : 'Keep the approved text'
+    if (byTool && (sub === 'on' || sub === 'accept') && !chosen && !this.confirmed) {
+      // 2026-11-12: the model may apply these, but only with the user's yes in its own question tool
+      return `Nothing was changed: "methods ${sub}" needs the user's yes. Show the user ` +
+        `${sub === 'on' ? 'the text ("methods preview")' : 'the change ("methods diff")'}, ask them with your question ` +
+        `tool (AskUserQuestion in Claude Code) whether to ${sub === 'on' ? 'make the working methods their own ' +
+        'instructions' : 'take the changed text'}, and call again with user_confirmed true only if they said yes. The ` +
+        `user can also type ${COMMAND} methods ${sub} themselves.`
+    }
+    if (byTool && sub === 'keep' && !this.confirmed) {
+      // without the user's yes from the model's question tool, keep still asks in the plugin's own dialog
+      const yes = 'Keep the approved text'
       const a = this.canAsk()
-        ? await this.dialog(sub === 'on'
-          ? 'Claude asks to make the agent-services working methods your own instructions: one line in your CLAUDE.md ' +
-            `loads them, and the planning gate then holds larger file edits until there is a plan. ${COMMAND} methods ` +
-            'preview shows the text. Make them your own instructions?'
-          : sub === 'accept'
-            ? 'Claude asks to take the changed agent-services working methods as your own instructions. ' +
-              `${COMMAND} methods diff shows the change. Take the new text?`
-            : 'Claude asks to keep the agent-services working methods you approved and not ask about this change ' +
-              `again. ${COMMAND} methods diff shows the change. Keep the approved text?`, [yes, 'Not now'], METHODS_HEADER)
+        ? await this.dialog('Claude asks to keep the agent-services working methods you approved and not ask about this ' +
+          `change again. ${COMMAND} methods diff shows the change. Keep the approved text?`, [yes, 'Not now'], METHODS_HEADER)
         : null
       if (a !== yes) {
-        return `Nothing was changed: "methods ${sub}" needs the user's own answer. The user can type ${COMMAND} ` +
-          `methods ${sub} themselves${sub === 'on' ? ` (after ${COMMAND} methods preview)` : ` (after ${COMMAND} methods diff)`}.`
+        return `Nothing was changed: "methods keep" needs the user's own answer. The user can type ${COMMAND} ` +
+          `methods keep themselves (after ${COMMAND} methods diff).`
       }
     }
     if (sub === 'preview') {
@@ -1116,7 +1142,9 @@ export class Command {
           : `The full text now:\n\n----- begin -----\n${full.trim()}\n----- end -----`)
     }
     if (sub === 'diff') {
-      const d = await methodsDiff(lineDiff, !byTool) // shown to the user (not a run by the model's tool): methods accept may take it
+      // shown to the user (not a run by the model's tool): methods accept may take it; a run by the model's tool lets
+      // a confirmed accept (user_confirmed true) take it
+      const d = await methodsDiff(lineDiff, !byTool, byTool)
       const seen = d === null && (await this.safe(() => this.level(), 'suggest' as Level)) !== 'on'
         ? await seenDiff(this.d.store, lineDiff) : null
       if (seen) {
@@ -1129,10 +1157,11 @@ export class Command {
             `${COMMAND} methods accept takes the new text; ${COMMAND} methods keep keeps the approved one.`
     }
     if (sub === 'accept' || sub === 'keep') {
-      if (sub === 'accept' && (await this.safe(() => pendingUnseen(), false))) {
+      const byModel = byTool && this.confirmed
+      if (sub === 'accept' && (await this.safe(() => pendingUnseen(byModel), false))) {
         return `The changed text was not shown in this session, or it changed since: run ${COMMAND} methods diff, then ${COMMAND} methods accept.`
       }
-      const done = await settlePending(sub === 'accept')
+      const done = await settlePending(sub === 'accept', byModel)
       if (!done) return 'There is no changed text to review; nothing was changed.'
       return sub === 'accept'
         ? 'The new working methods replace the approved ones; your CLAUDE.md loads them from the next session on.'
@@ -1385,8 +1414,8 @@ export class Command {
       // the service asks for a browser check first (only under signs of abuse); the token is kept by svc.loginStart
       const done = 'I passed the check'
       const a = this.d.ask
-        ? await this.dialog(`Before it mails a sign-in code, agent-services asks for a quick check in your browser: open ${cb.check_url} ` +
-          `and pass it, then choose "${done}".`, [done, 'Cancel'], 'Check')
+        ? await this.dialog(`Before we email your sign-in code, we need a quick check in your browser. Open ${cb.check_url}, ` +
+          `complete the check, then choose "${done}".`, [done, 'Cancel'], 'Check')
         : null
       if (a !== done) {
         return `No code was mailed yet. Open ${cb.check_url} in your browser, pass the check, then run ${COMMAND} login ` +
@@ -1403,8 +1432,9 @@ export class Command {
     if (typeof tb.terms_version === 'string' && typeof tb.terms_url === 'string' && tb.terms_version && tb.terms_url) {
       const yes = 'I accept'
       const a = this.canAsk()
-        ? await this.dialog('agent-services is for business use only. I use it for my work, I am 18 or older, and I ' +
-          `accept the customer terms (version ${tb.terms_version.slice(0, 32)}): ${tb.terms_url.slice(0, 200)}`, [yes, 'I do not accept'], 'Terms')
+        ? await this.dialog('agent-services is for business use only. Please confirm that you use it for your work, ' +
+          `that you're 18 or older, and that you accept the customer terms (version ${tb.terms_version.slice(0, 32)}): ` +
+          `${tb.terms_url.slice(0, 200)}`, [yes, 'I do not accept'], 'Terms')
         : null
       await this.d.svc.noteTerms(a === yes ? tb.terms_version : null)
       termsLine = a === yes ? '' : '\nThe terms were not accepted, so the service may refuse the sign-in; run ' +
@@ -1605,7 +1635,51 @@ export class Command {
   /** The subagent routing level, in one line. */
   private async routingLine(): Promise<string> {
     const level = await routingLevel(this.d.store)
-    return ROUTING_STATUS[level]
+    const chosen = await routingModels(this.d.store)
+    return ROUTING_STATUS[level] + (chosen ? ` ${await this.modelsLine()}` : '')
+  }
+
+  /** The person's model choice for subagents (routing_level.ts MODELS_KEY), in one line. */
+  private async modelsLine(): Promise<string> {
+    const a = await routingModels(this.d.store)
+    const cap = (w: string) => w[0]!.toUpperCase() + w.slice(1)
+    if (!a) {
+      return 'Subagent models: the default tiers (no choice saved). ' +
+        `${COMMAND} models set models=<list> efforts=<list> top=<model>:<effort> limits them, or ask Claude to set ` +
+        'them up with you.'
+    }
+    return `Subagent models: your choice. Subagents use only ${a.models.map(cap).join(', ')} at ${a.efforts.join(', ')} ` +
+      `effort; plan, replan and acceptance use ${cap(a.top.model)} ${a.top.effort}. A subagent never runs above your ` +
+      `main model unless you allowed nothing at or below it. ${COMMAND} models clear goes back to the default tiers.`
+  }
+
+  /** models [set models=<list> efforts=<list> top=<model>:<effort> | clear]: which models and efforts subagents may
+   * use (2026-11-12). Stored here only and sent with each routing request (records.ts). The setup tool applies a
+   * change only with user_confirmed true. Works signed out: nothing is sent. */
+  private async models(rest: string[], byTool = false): Promise<string> {
+    const w = (rest[0] ?? '').toLowerCase()
+    if (rest.length === 0) return this.modelsLine()
+    if (!(w === 'clear' && rest.length === 1) && !(w === 'set' && rest.length === 4)) return USAGE
+    if (byTool && !this.confirmed) {
+      return `Nothing was changed: "models ${w}" applies the user's own answer. Ask the user with your question tool ` +
+        `first, then call again with user_confirmed true; or the user types ${COMMAND} models ${w === 'set' ? 'set ...' : 'clear'} themselves.`
+    }
+    if (w === 'clear') {
+      try {
+        await this.d.store.delete(MODELS_KEY)
+      } catch {
+        return errorText('store_unavailable')
+      }
+      return 'Subagent models: back to the default tiers; no choice is saved or sent.'
+    }
+    const a = parseModels(rest.slice(1))
+    if (!a) {
+      return `That choice is not valid; nothing was changed. Write ${COMMAND} models set models=<list> efforts=<list> ` +
+        `top=<model>:<effort>, with models from ${ROUTER_MODELS.join(', ')}, efforts from ${ROUTER_EFFORTS.join(', ')}, ` +
+        'and a top pick among the allowed ones (for example models=opus,haiku efforts=medium,high top=opus:high).'
+    }
+    if (!(await safeSet(this.d.store, MODELS_KEY, { ...a, at: this.d.now() }))) return errorText('store_unavailable')
+    return `Saved. ${await this.modelsLine()}`
   }
 
   /** autonomy [auto | ask | clear]: the user's autonomy choice, kept for the signed-in account (autonomy.ts). */
@@ -1870,7 +1944,9 @@ export function serveCommand(
     ...(await next(e)),
     isDeferred: false,
   })).catch(($: EngineInterface, e: any, next: any) => next(e))
-  on('tool.call', { tool: `mcp__${COMMAND_NAME}__${SETUP_SPEC.name}` }, async ($: EngineInterface, e: { command?: unknown; agentId?: unknown }) => {
+  on('tool.call', { tool: `mcp__${COMMAND_NAME}__${SETUP_SPEC.name}` }, async ($: EngineInterface, e: {
+    command?: unknown; agentId?: unknown; user_confirmed?: unknown; models?: unknown; efforts?: unknown;
+    top_model?: unknown; top_effort?: unknown }) => {
     const c = String(e?.command ?? '')
     if (UPLOAD_ON_WORDS.includes(c.trim().toLowerCase())) {
       return { result: 'The setup tool cannot turn the savings upload or its page on: that is the user\'s own choice. The user ' +
@@ -1886,7 +1962,7 @@ export function serveCommand(
       return { result: `"${c}" applies the user's own answer, so it runs only in the main conversation of a session ` +
         `the user is at; nothing was changed. The user can type ${COMMAND} ${c} themselves.` }
     }
-    const text = await (await servedCommand($)).run(c, true)
+    const text = await (await servedCommand($)).run(setupArgs(c, e), true, e?.user_confirmed === true && CONFIRMED_WORDS.includes(c))
     void Promise.resolve(after?.(c.split(' ')[0]!)).catch(() => undefined)
     return { result: text }
   }).catch(($: EngineInterface, e: any, next: any) => ({
@@ -1923,6 +1999,16 @@ async function servedCommand($: EngineInterface): Promise<Command> {
   if (!servedOptions) throw new Error('the command is not served')
   if (!servedCmd) servedCmd = new Command(engineDeps($, await servedOptions()))
   return servedCmd
+}
+
+/** The setup tool's call as command words: "models set" gets its choice from the call's models, efforts, top_model and
+ * top_effort (anything but plain words is left out, so a bad choice is refused by the parser); other words as they
+ * are. Pure. */
+export function setupArgs(c: string, e: { models?: unknown; efforts?: unknown; top_model?: unknown; top_effort?: unknown }): string {
+  if (c !== 'models set') return c
+  const word = (v: unknown) => (typeof v === 'string' && /^[a-z]{1,16}$/i.test(v) ? v : '')
+  const list = (v: unknown) => (Array.isArray(v) ? v.map(word).join(',') : '')
+  return `models set models=${list(e?.models)} efforts=${list(e?.efforts)} top=${word(e?.top_model)}:${word(e?.top_effort)}`
 }
 
 /** register.ts agent.spawn: true when the user turned subagent routing off (`routing off`); then the hook does
