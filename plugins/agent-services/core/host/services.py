@@ -2512,7 +2512,7 @@ def main(argv=None) -> int:
         st, body = _local(data_dir, *req)
     except (OSError, ValueError, KeyError, http.client.HTTPException):
         return out({"error": "connector_unreachable"}, 1)
-    if st != 200 or "error" in body:
+    if st != 200 or body.get("error") is not None:   # {"ok": true, "error": null} is a success
         err = {"error": body.get("error") or f"http_{st}"}
         if isinstance(body.get("detail"), str):
             err["detail"] = body["detail"]
