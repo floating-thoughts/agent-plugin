@@ -16,7 +16,8 @@ on this machine. All of it is an agent-services suggestion, not the user's own i
   not available.
 - Desktop app: the sign-in page opens when the plugin is installed or enabled.
 - Update: users who already added the marketplace upgrade with `codex plugin marketplace upgrade agent-plugin`;
-  adding it again fails with 'already added from a different source'.
+  adding it again fails with 'already added from a different source'. After every update, trust the hooks again
+  (below); until then the plugin does nothing.
 - One account has one seat, shared by Codex and the Claude Code plugin: signing in from Codex ends the Claude Code
   plugin's session on that account, and signing in there ends the Codex sign-in. The newest sign-in wins.
 - Sign out: `codex mcp logout agent-services` removes the sign-in from this computer only. On the server it ends
@@ -29,8 +30,9 @@ on this machine. All of it is an agent-services suggestion, not the user's own i
 ## Trust the hooks
 
 Codex skips plugin hooks that the user has not reviewed and trusted, without any warning. Until they are trusted,
-no methods arrive and no spawn advice is given. Ask the user to review and trust the agent-services hooks when
-Codex offers it. Call `setup` with `info hooks` to show exactly what each hook sends. If trust is set by hand
+no methods arrive and no spawn advice is given. Ask the user to open Codex, run `/hooks` and press `t` to trust the
+agent-services hooks. Every plugin update puts them back under review (they fail silently; `codex exec` shows only
+"Failed"), so ask again after each update. Call `setup` with `info hooks` to show exactly what each hook sends. If trust is set by hand
 in config.toml: Codex 0.167 shows a hook's current hash as two parts joined by "/"; only the first part is
 accepted as the trusted hash.
 

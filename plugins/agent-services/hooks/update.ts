@@ -7,7 +7,9 @@
 // version, at its next prompt (takeUpdateNote; review.ts updateNoteText),
 // which asks the user; only the user's answer applies it (`/agent-services update` or the setup
 // tool's "update", applyUpdate). Skipped while the gate is closed (signed out; a gate closed for an upgrade still
-// checks), with CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC set, and in -p runs. Every failure is swallowed.
+// checks), with CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC set, and in -p runs (attended: neither interactive nor a
+// surface nor the desktop app; the desktop app runs its sessions through the SDK with isInteractive false, so the
+// session.start "can ask" answer alone kept every desktop session from checking). Every failure is swallowed.
 // Where the engine has no $.process (a surface without it), nothing is scheduled or run at all: the status line then
 // shows the one terminal command at most every 7 days instead (wiring.ts, status.ts updateCommand).
 import type { EngineInterface } from 'claude-code'
@@ -15,6 +17,7 @@ import { dataDir, engineDirs } from './engine_env'
 import { updateCommand } from './status'
 import type { ProcessRun } from './usage_tool'
 import { isRemoved, markRemoved, removedMarker } from './remove'
+import { attended } from './choice' // a surface or the desktop app; read at every check (a surface may attach later)
 
 export const START_DELAY_MS = 30_000 // the first check waits this long: nothing is spawned while a session starts
 export const CHECK_EVERY_MS = 600_000 // how often a session reads the shared state (one file read)
@@ -194,7 +197,7 @@ async function run($: EngineInterface, interactive: boolean): Promise<void> {
   if (await text(() => $.env.get('CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC'))) {
     return noted($, 'skipped (CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC is set)')
   }
-  if (!interactive) return // nobody can be asked here (choice.ts canAskNow, passed in by register.ts): a -p run
+  if (!interactive && !(await attended($))) return noted($, 'skipped (nobody to tell here: a -p run)')
   // another session ran /agent-services remove: nothing more here (its marker file)
   const marker = removedMarker(await dataDir($))
   if (String((await safe(() => $.fs.read(marker), '')) ?? '').trim()) return markRemoved()
