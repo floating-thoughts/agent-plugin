@@ -6,7 +6,7 @@
 // person types, subagent rows) passes untouched.
 //
 // The table (served, in memory only, rules.ts): {"drop": [attachment types], "keep_files": [regex sources, matched
-// without case against the file path], "burst_ms": ms}. No table (signed out) or the switch off (`/agent-services trim off`, per
+// without case against the file path], "burst_ms": ms}. No table (signed out), no usable burst_ms, or the switch off (`/agent-services trim off`, per
 // user, default on): every row passes. Nothing is sent anywhere: the day counters (counters.ts addTrim) keep only the
 // token estimate removed and the number of runs per model, which the daily upload carries as savings.trim.
 import type { EngineInterface } from 'claude-code'
@@ -21,12 +21,11 @@ type Run = { seq: number; tokens: number; rows: number; on: boolean | undefined;
 export const TRIM_OFF_KEY = 'trim_off' // true = the user switched trimming off (store, shared by every session)
 // The run ends at the next prompt (typed, queued or delivered), or once rows stop coming for this long: the turns a
 // compaction keeps come back as response and tool-result rows inside the run, so those do not end it.
-// The table's burst_ms sets it; BURST_MS is the built-in value.
-export const BURST_MS = 3_000
+// The table's burst_ms sets it; there is no built-in value (no usable burst_ms: trimming is off).
 
-/** How long a run waits for more rows: the table's burst_ms, else BURST_MS. */
-export function burstMs(): number {
-  return servedNumber('trim', 'burst_ms', BURST_MS, 100, 60_000)
+/** How long a run waits for more rows: the table's burst_ms, or null when it is missing or out of bounds. */
+export function burstMs(): number | null {
+  return servedNumber('trim', 'burst_ms', 0, 100, 60_000) || null
 }
 
 let compiled: { src: unknown; table: Table | null } = { src: undefined, table: null }
@@ -111,21 +110,22 @@ async function closeRun($: EngineInterface): Promise<void> {
 export async function trimAppend($: EngineInterface, e: Obj): Promise<Obj | null> {
   try {
     const t = table()
-    if (!t || !e || e.agentId) return null
+    const burst = burstMs()
+    if (!t || burst === null || !e || e.agentId) return null
     const m = e.message
     if (m?.type === 'system' && m.name === 'compact_boundary') {
       await closeRun($)
       const id = ++seq
       run = { seq: id, tokens: 0, rows: 0, on: undefined, lastAt: await $.clock.now() }
       // nothing else may follow before the session ends: count it anyway
-      $.clock.after(burstMs() * 2, () => {
+      $.clock.after(burst * 2, () => {
         if (run?.seq === id) closeRun($).catch(() => undefined)
       })
       return null
     }
     if (run) {
       const now = await $.clock.now()
-      if (['prompt', 'queue', 'delivery'].includes(e.door) || now - run.lastAt > burstMs()) await closeRun($)
+      if (['prompt', 'queue', 'delivery'].includes(e.door) || now - run.lastAt > burst) await closeRun($)
       else run.lastAt = now
     }
     if (!run || m?.type !== 'attachment' || typeof m.name !== 'string' || !t.drop.includes(m.name)) return null

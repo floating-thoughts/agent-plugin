@@ -10,9 +10,7 @@
 
 import { RX_INPUT_MAX, servedRegex } from './rules'
 
-// The review words: the served pattern (rules patterns.json, review) covers every language the service knows; the
-// built-in one, used only without the tables, keeps the English words.
-export const REVIEW_RX = /\b(code[- ]?)?review(s|ed|ing)?\b|\baudit(s|ed|ing)?\b/i
+// The review words: the served pattern only (rules patterns.json, review); without the tables the flag stays false.
 
 let askedReview = false
 let briefRule: string | null = null
@@ -22,7 +20,7 @@ let routeHintTaken = false
 
 /** A message the person wrote (not a plugin's or a notification): sets the review flag for this turn. */
 export function notePersonPrompt(text: unknown): void {
-  askedReview = typeof text === 'string' && servedRegex('patterns', 'review', REVIEW_RX).test(text.slice(0, RX_INPUT_MAX))
+  askedReview = typeof text === 'string' && servedRegex('patterns', 'review')?.test(text.slice(0, RX_INPUT_MAX)) === true
 }
 
 export const userAskedReview = (): boolean => askedReview

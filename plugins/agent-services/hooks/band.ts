@@ -34,7 +34,7 @@
 //   bandSetter($)                 -> (state) => void    (wiring.ts setBand: keeps it, redraws when changed)
 //   installBand(on)               -> the ui.render hook on { component: 'AbovePrompt' }
 import type { EngineInterface } from 'claude-code'
-import { money, type Timeline } from './board_facts'
+import { minUsd, money, type Timeline } from './board_facts'
 import { ORG_PAUSED_LINE } from './org'
 import { panelLines, type Panel } from './panel'
 import { COMMAND, NAME, SEP, shortDay, todayText } from './status'
@@ -76,7 +76,7 @@ const num = (v: unknown): number | null => (typeof v === 'number' && Number.isFi
 /** The parts of the board's timeline and weekly facts the band shows; null when none of them has anything. */
 export function bandFacts(timeline: Timeline | null | undefined, weekly: Obj | null | undefined): BandFacts | null {
   const usd = isObj(weekly) ? num(weekly.this_week_usd) : null
-  const saved = usd !== null && usd >= 0.005 ? usd : null
+  const saved = usd !== null && usd >= minUsd() ? usd : null
   const counts: Record<string, number> = {}
   if (isObj(timeline) && isObj(timeline.counts)) {
     for (const [k, v] of Object.entries(timeline.counts)) if ((num(v) ?? 0) > 0) counts[k] = v as number
@@ -111,9 +111,9 @@ export function bandLine(facts: unknown, columns?: unknown, timeZone?: string): 
   const all = t ? num(t.usd) : null
   const since = t ? shortDay(t.since) : null
   const head =
-    usd !== null && usd >= 0.005
+    usd !== null && usd >= minUsd()
       ? `${NAME} saved you ${money(usd)} in the last ${days} days`
-      : all !== null && all >= 0.005
+      : all !== null && all >= minUsd()
         ? `${NAME} saved you ${money(all)} ${since ? `since ${since}` : 'so far'}` // the status line's figure and words
         : null
   const today = isObj(facts.counts) ? todayText(facts.counts as Record<string, number>) : null

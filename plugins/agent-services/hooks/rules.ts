@@ -101,9 +101,9 @@ export function rulesTable<T = unknown>(name: string): T | null {
   return t === undefined ? null : (t as T)
 }
 
-// Served parameters for features that also work without the tables (time figures, review words, commit and
-// line-range patterns, trim timing, board wording): the caller passes its built-in value, used whenever the table
-// or the key is missing or not usable.
+// Served parameters: the caller passes its built-in value (time figures, the board's money floor), used whenever the
+// table or the key is missing or not usable; a feature with no built-in value (review words, commit and line-range
+// patterns, trim timing, board wording) is off while its served value is missing.
 
 /** Key `key` of table `name` as served (any JSON value), or undefined. */
 export function servedValue(name: string, key: string): unknown {
@@ -119,8 +119,8 @@ export function servedNumber(name: string, key: string, fallback: number, min = 
 }
 
 // Served patterns run synchronously on every prompt and every shell command: a pattern longer than RX_SOURCE_MAX or
-// one that may backtrack without end (riskyPattern) is not used (the built-in one is), and callers test at most the
-// first RX_INPUT_MAX characters of their input.
+// one that may backtrack without end (riskyPattern) is not used (the caller's fallback is, by default none), and
+// callers test at most the first RX_INPUT_MAX characters of their input.
 export const RX_SOURCE_MAX = 512
 export const RX_INPUT_MAX = 8192
 
@@ -153,8 +153,8 @@ export function riskyPattern(src: string): boolean {
 let rxCache = new Map<string, RegExp | null>() // "flags/source" -> compiled (null: does not compile, or risky)
 
 /** A served pattern {pattern, flags} compiled once (flags limited to i, m, s, u), else `fallback` (also for a risky
- * pattern, riskyPattern). Test at most RX_INPUT_MAX characters with it. */
-export function servedRegex(name: string, key: string, fallback: RegExp): RegExp {
+ * pattern, riskyPattern), null by default. Test at most RX_INPUT_MAX characters with it. */
+export function servedRegex(name: string, key: string, fallback: RegExp | null = null): RegExp | null {
   const v = servedValue(name, key) as Record<string, unknown> | undefined
   if (!v || typeof v !== 'object' || typeof v.pattern !== 'string' || riskyPattern(v.pattern)) return fallback
   const flags = typeof v.flags === 'string' ? [...new Set(v.flags.replace(/[^imsu]/g, ''))].join('') : ''
