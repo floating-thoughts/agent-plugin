@@ -6,7 +6,7 @@ export type ToolSpec = {
   input_schema: Record<string, unknown>
 }
 
-export const CONTRACT_SHA256 = "45df304dd97df0a047c79830005b456ba5b0f45a4e8ea22d30add3633d981721"
+export const CONTRACT_SHA256 = "b1f0d3cf40d75f71cfd86fb988e7bdd6b001fdef03cb1d81ab5c46fdfed3638b"
 
 export const API = "svc/1" as const
 export const PREFIX = "/svc/v1" as const
@@ -261,7 +261,7 @@ export const CONTRACT = {
   ]
  },
  "x-client-config": {
-  "path": "<data dir>/services/client.json (absent: the shipped host/client_defaults.json; written by the Python client's staging setup, from what the operator gives: endpoint, server keys and e2e keys; agent-svc-vps admin server-key prints them)",
+  "path": "<data dir>/services/client.json (absent: the shipped host/client_defaults.json; written by the Python client's staging setup, from what the operator gives: endpoint, server keys and e2e keys; the server's admin CLI prints them (server-key))",
   "schema": {
    "type": "object",
    "properties": {
