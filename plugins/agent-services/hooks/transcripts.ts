@@ -1,0 +1,699 @@
+import { utf8 } from './e2e'
+import { cmp, cmpTuple, isObj, localDay, localMonth, parseIso, pyLen, pyRound, pySum } from './pyfmt'
+import { servedNumber } from './rules'
+
+export const FIELDS = ['input', 'output', 'cacheRead', 'cacheWrite5m', 'cacheWrite1h'] as const
+export const DISPATCH_TOOLS = ['Agent', 'Task']
+export const SUBAGENT_TYPES = ['general-purpose', 'Explore', 'Plan', 'claude', 'fork', 'statusline-setup', 'claude-code-guide']
+export const MODEL_WORDS = ['haiku', 'sonnet', 'opus', 'fable', 'inherit']
+export const EFFORTS = ['low', 'medium', 'high', 'xhigh', 'max']
+export const TYPE_WORDS = [
+  '\u5ba1\u67e5', '\u8bc4\u5ba1', '\u590d\u5ba1', '\u5ba1\u9605', '\u91cd\u65b0\u89c4\u5212', '\u89c4\u5212',
+  '\u8ba1\u5212', '\u9a8c\u6536', '\u9ed8\u8ba4', '\u5b9e\u73b0', '\u4fee\u590d', '\u6d4b\u8bd5',
+  '\u8c03\u7814', '\u641c\u7d22', '\u67e5', '\u5199', '\u91cd\u6784', '\u8c03\u8bd5',
+  '\u6587\u6863', '\u6784\u5efa', '\u90e8\u7f72', '\u68c0\u67e5', '\u5206\u6790',
+  're-review', 'lookup',
+  'review', 'code-review', 'plan', 'replan', 'acceptance', 'default', 'implement', 'fix', 'test', 'research',
+  'search', 'explore', 'write', 'refactor', 'debug', 'docs', 'build', 'deploy', 'check', 'analyze', 'investigate',
+  'find', 'verify',
+  'deep-review', 'tests', 'merge',
+]
+const BY_LENGTH = [...TYPE_WORDS].sort((a, b) => b.length - a.length)
+const MODEL_ID = /^claude-[a-z0-9.-]{1,60}\n?$/
+
+type Obj = Record<string, any>
+export type Prices = Obj
+export type Counts = { input: number; output: number; cacheRead: number; cacheWrite5m: number; cacheWrite1h: number }
+export type TranscriptFile = { rel: string; size?: number; text: string | null; lines?: AsyncIterable<string> }
+export type Entry = { model: string; moment: number; isFast: boolean; counts: Counts; file: string }
+
+
+export const bare = (model: string): string => {
+  const at = model.indexOf('claude-')
+  const name = at >= 0 ? model.slice(at) : model
+  const cut = name.indexOf('[')
+  return cut >= 0 ? name.slice(0, cut) : name
+}
+
+export const matches = (name: string, prefix: string): boolean => {
+  if (name === prefix) return true
+  if (!name.startsWith(prefix)) return false
+  const rest = name.slice(prefix.length)
+  return !/^\p{Nd}/u.test(rest) && !/^-\p{Nd}{1,2}(?!\p{Nd})/u.test(rest)
+}
+
+export function familyRow(name: string, prices: Prices): Obj | null {
+  const m = /^claude-([a-z]+)-(\d{1,3}(?:-\d{1,2})?)(?![\d])/.exec(name)
+  if (!m) return null
+  const want = m[2].split('-').map(Number)
+  let best: Obj | null = null
+  let bestV: number[] = []
+  for (const row of prices.models ?? []) {
+    const r = typeof row?.prefix === 'string' ? /^claude-([a-z]+)-(\d{1,3}(?:-\d{1,2})?)$/.exec(row.prefix) : null
+    if (!r || r[1] !== m[1]) continue
+    const v = r[2].split('-').map(Number)
+    const newer = cmpTuple(v, want) <= 0 && (best === null || cmpTuple(v, bestV) > 0)
+    if (newer) {
+      best = row
+      bestV = v
+    }
+  }
+  return best
+}
+
+export function unpricedNote(models: readonly string[] | null | undefined): string | null {
+  const list = (models ?? []).filter((m) => typeof m === 'string' && m)
+  if (!list.length) return null
+  return `No price is known for ${list.join(', ')}: ${list.length === 1 ? 'its' : 'their'} usage counts as $0.`
+}
+
+export function priceOf(model: string, prompt: number, prices: Prices): Counts | null {
+  const name = bare(model || '')
+  const listed = (prices.models ?? []).find((row: Obj) => matches(name, row.prefix))
+  const row = listed ?? familyRow(name, prices)
+  if (!row) return null
+  let [inp, out, read] = [row.input, row.output, row.cache_read]
+  for (const tier of prices.long_prompt ?? []) {
+    if (matches(name, tier.prefix) && prompt > tier.over) {
+      ;[inp, out, read] = [tier.input, tier.output, tier.cache_read]
+    }
+  }
+  return {
+    input: inp,
+    output: out,
+    cacheRead: read,
+    cacheWrite5m: inp * (prices.cache_write_5m ?? 1.25),
+    cacheWrite1h: inp * (prices.cache_write_1h ?? 2.0),
+  }
+}
+
+export const promptOf = (c: Counts): number => c.input + c.cacheRead + c.cacheWrite5m + c.cacheWrite1h
+
+export function costOf(entry: { model: string; isFast?: boolean; counts: Counts }, prices: Prices): number | null {
+  const price = priceOf(entry.model, promptOf(entry.counts), prices)
+  if (price === null) return null
+  const rate = entry.isFast ? (prices.fast?.multiplier ?? 2.0) : 1.0
+  return pySum(FIELDS.map((f) => ((entry.counts[f] * price[f]) / 1e6) * rate))
+}
+
+export function usageOf(u: Obj): Counts {
+  const n = (v: unknown): number => (typeof v === 'number' && Number.isFinite(v) && v >= 0 ? v : 0)
+  const created = isObj(u.cache_creation) ? u.cache_creation : {}
+  const total = n(u.cache_creation_input_tokens)
+  const w1h = n(created.ephemeral_1h_input_tokens)
+  const w5m = created.ephemeral_5m_input_tokens === undefined || created.ephemeral_5m_input_tokens === null
+    ? Math.max(0, total - w1h) : n(created.ephemeral_5m_input_tokens)
+  return {
+    input: n(u.input_tokens),
+    output: n(u.output_tokens),
+    cacheRead: n(u.cache_read_input_tokens),
+    cacheWrite5m: w5m,
+    cacheWrite1h: w1h,
+  }
+}
+
+
+const lines = (text: string): string[] => text.split('\n')
+
+export async function* linesOf(chunks: AsyncIterable<string>, maxLine = 64 * 1024 * 1024): AsyncGenerator<string> {
+  let parts: string[] = []
+  let held = 0
+  let over = false
+  for await (const chunk of chunks) {
+    let from = 0
+    for (;;) {
+      const at = chunk.indexOf('\n', from)
+      const piece = at < 0 ? chunk.slice(from) : chunk.slice(from, at)
+      if (!over && held + piece.length > maxLine) {
+        over = true
+        parts = []
+      } else if (!over && piece) {
+        parts.push(piece)
+        held += piece.length
+      }
+      if (at < 0) break
+      yield over ? '' : parts.join('')
+      parts = []
+      held = 0
+      over = false
+      from = at + 1
+    }
+  }
+  yield over ? '' : parts.join('')
+}
+export const parseLine = (raw: string): unknown => {
+  try {
+    return JSON.parse(raw)
+  } catch {
+    return undefined
+  }
+}
+
+export function walkOrder<T extends { rel: string }>(files: T[]): T[] {
+  const key = (rel: string) => rel.split(/[\\/]/)
+  return [...files].sort((a, b) => {
+    const x = key(a.rel)
+    const y = key(b.rel)
+    for (let i = 0; ; i++) {
+      const xf = i === x.length - 1
+      const yf = i === y.length - 1
+      if (x[i] === y[i] && !xf && !yf) continue
+      if (xf !== yf) return xf ? -1 : 1
+      return cmp(x[i], y[i])
+    }
+  })
+}
+
+export function place(rel: string): [string, string, boolean] {
+  const parts = rel.split(/[\\/]/)
+  const project = parts.length > 1 ? parts[0] : ''
+  const at = parts.slice(0, -1).indexOf('subagents')
+  if (at >= 0) return [project, at >= 1 ? parts[at - 1] : '', true]
+  return [project, parts[parts.length - 1].slice(0, -'.jsonl'.length), false]
+}
+
+export function collect(files: TranscriptFile[]): Map<string, Entry> {
+  const seen = new Map<string, Entry>()
+  for (const file of files) collectInto(seen, file)
+  return seen
+}
+
+function collectInto(seen: Map<string, Entry>, file: TranscriptFile): void {
+  if (typeof file.text !== 'string') return
+  for (const raw of lines(file.text)) collectLine(seen, raw, file.rel)
+}
+
+function collectLine(seen: Map<string, Entry>, raw: string, rel: string): void {
+  if (!raw.includes('"usage"') || !raw.includes('"assistant"')) return
+  const row = parseLine(raw)
+  if (!isObj(row) || row.type !== 'assistant') return
+  const message = isObj(row.message) ? row.message : {}
+  const usage = message.usage
+  const model = typeof message.model === 'string' ? message.model : ''
+  const stamp = row.timestamp
+  if (!isObj(usage) || !stamp || model.startsWith('<')) return
+  const moment = parseIso(stamp, 'local')
+  if (moment === null) return
+  const key = message.id == null && row.requestId == null
+    ? JSON.stringify(['row', typeof row.uuid === 'string' && row.uuid ? row.uuid : `${rel}:${seen.size}`])
+    : JSON.stringify([message.id ?? null, row.requestId ?? null])
+  const counts = usageOf(usage)
+  const held = seen.get(key)
+  if (!held) {
+    seen.set(key, { model, moment, isFast: usage.speed === 'fast', counts, file: rel })
+  } else {
+    for (const f of FIELDS) held.counts[f] = Math.max(held.counts[f], counts[f])
+  }
+}
+
+export const normModel = (model: unknown): string => {
+  const name = typeof model === 'string' ? bare(model).replace(/@(\d{8})$/, '-$1').replace(/-v\d+:\d+$/, '') : ''
+  return MODEL_ID.test(name) ? name : 'other'
+}
+
+export function typeWord(description: unknown): string {
+  const text = typeof description === 'string' ? description.trim().toLowerCase() : ''
+  for (const word of BY_LENGTH) {
+    if (!text.startsWith(word)) continue
+    if (/^[\x00-\x7f]*$/.test(word)) {
+      const rest = text.slice(word.length)
+      if (rest && (/^[\p{L}\p{N}]/u.test(rest) || rest[0] === '-' || rest[0] === '_')) continue
+    }
+    return word
+  }
+  return 'other'
+}
+
+const subagentType = (v: unknown): string =>
+  v === undefined || v === null || v === '' ? 'general-purpose' : SUBAGENT_TYPES.includes(v as string) ? (v as string) : 'custom'
+
+const requestedModel = (v: unknown): string => {
+  if (v === undefined || v === null || v === '') return 'none'
+  if (MODEL_WORDS.includes(v as string)) return v as string
+  if (typeof v === 'string' && v.startsWith('claude-')) {
+    const name = normModel(v)
+    if (name !== 'other') return name
+  }
+  return 'other'
+}
+
+const effortOf = (v: unknown): string =>
+  v === undefined || v === null || v === '' ? 'none' : EFFORTS.includes(v as string) ? (v as string) : 'other'
+
+export type ModelBucket = {
+  input_tokens: number
+  output_tokens: number
+  cache_read_tokens: number
+  cache_write_tokens: number
+  tokens: number
+  api_usd: number
+  responses: number
+  main_responses: number
+  subagent_responses: number
+}
+export type DayFacts = {
+  by_model: Record<string, ModelBucket>
+  dispatches_by_type: Record<string, number>
+  dispatches_by_model: Record<string, number>
+  compactions: number
+  compactions_manual: number
+  compactions_auto: number
+}
+export type Dispatch = {
+  session_id: string
+  project: string
+  day: string
+  type_word: string
+  subagent_type: string
+  requested_model: string
+  requested_effort: string
+  desc_len: number
+  dispatch_no: number
+}
+export type SessionRow = { session_id: string; project: string; month: string | null; minutes: number; responses: number }
+export type UnreadFile = { rel: string; size: number; subagent: boolean }
+export type Facts = {
+  transcripts: number
+  first_day: string | null
+  last_day: string | null
+  by_day: Record<string, DayFacts>
+  compactions: { total: number; manual: number; auto: number }
+  sessions: { count: number; rows: SessionRow[] }
+  dispatches: Dispatch[]
+  main_days: Record<string, string[]>
+  unpriced: string[]
+  read: { files: number; bytes: number; main_bytes: number; subagent_bytes: number }
+  unread: UnreadFile[]
+  time_by_day: Record<string, TimeDay>
+  full_days?: Record<string, Record<string, number>>
+}
+export type TimeDay = { typed_bytes: number; agent_seconds: number; agent_sum_seconds: number; turns: number }
+export type Interval = [number, number]
+
+
+export const IDLE_GAP_MS = 10 * 60 * 1000
+
+export function idleGapMs(): number {
+  return servedNumber('timemodel', 'idle_gap_minutes', IDLE_GAP_MS / 60_000, 1, 240) * 60_000
+}
+
+function contentText(row: Obj): string | null {
+  const c = isObj(row.message) ? row.message.content : null
+  if (typeof c === 'string') return c
+  if (!Array.isArray(c)) return ''
+  if (c.some((b) => isObj(b) && b.type === 'tool_result')) return null
+  return c.filter((b) => isObj(b) && b.type === 'text' && typeof b.text === 'string').map((b) => b.text).join('\n')
+}
+
+const systemText = (s: string): boolean =>
+  /^(<local-command-|<bash-stdout>|<bash-stderr>|<task-notification>|\[Request interrupted|This session is being continued)/.test(s)
+
+export function typedBytes(text: string | null): number | null {
+  if (text === null) return null
+  let s = text.trim()
+  if (!s || systemText(s)) return null
+  const cmd = /<command-name>([\s\S]*?)<\/command-name>/.exec(s)
+  if (cmd) {
+    const args = /<command-args>([\s\S]*?)<\/command-args>/.exec(s)
+    s = `${cmd[1].trim()} ${args ? args[1].trim() : ''}`
+  } else {
+    s = s.replace(/<system-reminder>[\s\S]*?<\/system-reminder>/g, '').replace(/<pasted_content\b[^>]*>[\s\S]*?<\/pasted_content>/g, '')
+  }
+  s = s.trim()
+  return s ? utf8(s).length : null
+}
+
+const plainUser = (row: Obj): boolean =>
+  row.type === 'user' && row.isSidechain !== true && row.isMeta !== true && row.isCompactSummary !== true &&
+  row.isVisibleInTranscriptOnly !== true
+
+export function turnStart(row: Obj, marked: boolean): number | null {
+  if (!plainUser(row)) return null
+  if (marked) {
+    if (!isObj(row.turnPosition)) return null
+    const human = (isObj(row.origin) && row.origin.kind === 'human') || row.promptSource === 'typed'
+    return human ? typedBytes(contentText(row)) ?? 0 : 0
+  }
+  const text = contentText(row)
+  if (text !== null && text.trim().startsWith('<task-notification>')) return 0
+  return typedBytes(text)
+}
+
+type TurnRow = { moment: number; plain: number | null; marked: number | null; turnKey: string | null; rowKey: string; event: boolean }
+
+function turnRow(row: Obj, moment: number, rel: string, order: number): TurnRow {
+  const tp = isObj(row.turnPosition) ? row.turnPosition.turnIndex : undefined
+  return {
+    moment,
+    plain: turnStart(row, false),
+    marked: turnStart(row, true),
+    turnKey: tp !== undefined ? `${row.sessionId}:${tp}` : null,
+    rowKey: typeof row.uuid === 'string' ? row.uuid : `${rel}:${order}`,
+    event: turnEvent(row),
+  }
+}
+
+function turnEvent(row: Obj): boolean {
+  return row.isSidechain !== true && row.type !== 'queue-operation' && !(row.type === 'system' && row.subtype === 'away_summary')
+}
+
+export function intervalsOf(times: number[]): Interval[] {
+  const gap = idleGapMs()
+  const at = [...times].sort((a, b) => a - b)
+  const out: Interval[] = []
+  for (const v of at) {
+    const last = out[out.length - 1]
+    if (last && v - last[1] <= gap) last[1] = v
+    else out.push([v, v])
+  }
+  return out.filter(([s, e]) => e > s)
+}
+
+function byLocalDay(intervals: Interval[]): Record<string, Interval[]> {
+  const out: Record<string, Interval[]> = {}
+  for (const [s0, e] of intervals) {
+    let s = s0
+    while (s < e) {
+      const d = new Date(s)
+      const midnight = new Date(d.getFullYear(), d.getMonth(), d.getDate() + 1).getTime()
+      const end = Math.min(e, midnight)
+      ;(out[localDay(s * 1000)] ??= []).push([s, end])
+      s = end
+    }
+  }
+  return out
+}
+
+export function unionMs(intervals: Interval[]): number {
+  const sorted = [...intervals].sort((a, b) => a[0] - b[0])
+  let total = 0
+  let start = -Infinity
+  let end = -Infinity
+  for (const [s, e] of sorted) {
+    if (s > end) {
+      if (end > start) total += end - start
+      start = s
+      end = e
+    } else if (e > end) end = e
+  }
+  if (end > start) total += end - start
+  return total
+}
+
+export function timeDays(typed: Record<string, { bytes: number; turns: number }>, intervals: Interval[]): Record<string, TimeDay> {
+  const days = byLocalDay(intervals)
+  const out: Record<string, TimeDay> = {}
+  for (const day of [...new Set([...Object.keys(typed), ...Object.keys(days)])].sort()) {
+    const list = days[day] ?? []
+    out[day] = {
+      typed_bytes: typed[day]?.bytes ?? 0,
+      agent_seconds: Math.round(unionMs(list) / 1000),
+      agent_sum_seconds: Math.round(list.reduce((n, [s, e]) => n + (e - s), 0) / 1000),
+      turns: typed[day]?.turns ?? 0,
+    }
+  }
+  return out
+}
+
+const newDay = (): DayFacts => ({
+  by_model: {},
+  dispatches_by_type: {},
+  dispatches_by_model: {},
+  compactions: 0,
+  compactions_manual: 0,
+  compactions_auto: 0,
+})
+
+const sizeOf = (f: TranscriptFile): number =>
+  typeof f.size === 'number' && f.size >= 0 ? f.size : typeof f.text === 'string' ? utf8(f.text).length : 0
+
+export function scan(files: TranscriptFile[], prices: Prices): Facts {
+  const s = new Scanner(prices)
+  for (const f of files) s.add(f)
+  return s.finish()
+}
+
+type RawDispatch = { moment: number; rel: string; order: number; project: string; session: string; block: Obj }
+
+export class Scanner {
+  private readonly prices: Prices
+  private files = 0
+  private readonly unread: UnreadFile[] = []
+  private readonly seen = new Map<string, Entry>()
+  private readonly byDay: Record<string, DayFacts> = {}
+  private readonly compactions = { total: 0, manual: 0, auto: 0 }
+  private readonly sessionRows = new Map<string, SessionRow>()
+  private readonly raw: RawDispatch[] = []
+  private readonly seenBlocks = new Set<string>()
+  private readonly compactionsSeen = new Set<string>()
+  private readonly read = { files: 0, bytes: 0, main_bytes: 0, subagent_bytes: 0 }
+  private readonly turnsSeen = new Set<string>()
+  private readonly time: Record<string, { bytes: number; turns: number }> = {}
+  private readonly intervals: Interval[] = []
+
+  constructor(prices: Prices) {
+    this.prices = prices
+  }
+
+  private dayOf(day: string): DayFacts {
+    return (this.byDay[day] ??= newDay())
+  }
+
+  add(file: TranscriptFile): void {
+    this.files += 1
+    if (typeof file.text !== 'string') {
+      this.unread.push({ rel: file.rel, size: sizeOf(file), subagent: place(file.rel)[2] })
+      return
+    }
+    const f = this.begin(file.rel, sizeOf(file))
+    for (const line of lines(file.text)) f.line(line)
+    f.end()
+  }
+
+  async addLines(file: { rel: string; size?: number }, source: AsyncIterable<string>): Promise<boolean> {
+    this.files += 1
+    const size = typeof file.size === 'number' && file.size >= 0 ? file.size : 0
+    const f = this.begin(file.rel, size)
+    try {
+      for await (const line of source) f.line(line)
+    } catch {
+      this.unread.push({ rel: file.rel, size, subagent: place(file.rel)[2] })
+      return false
+    }
+    f.end()
+    return true
+  }
+
+  private begin(rel: string, size: number): { line: (raw: string) => void; end: () => void } {
+    const [project, session, isSub] = place(rel)
+    const local = new Map<string, Entry>()
+    const stamps: number[] = []
+    const moments: number[] = []
+    const rows: TurnRow[] = []
+    const comps: [number | null, unknown, string | null][] = []
+    const disp: [number | null, number, Obj][] = []
+    let marked = false
+    let order = 0
+    const line = (raw: string): void => {
+      const at = order++
+      collectLine(local, raw, rel)
+      if (isSub) {
+        for (const m of raw.matchAll(/"timestamp":\s*"([^"]+)"/g)) {
+          const v = parseIso(m[1], 'local')
+          if (v !== null) stamps.push(v / 1000)
+        }
+      } else if (!marked && raw.includes('"turnPosition"')) marked = true
+      if (isSub && !raw.includes('compact_boundary') && !raw.includes('tool_use')) return
+      const row = parseLine(raw)
+      if (!isObj(row)) return
+      const moment = typeof row.timestamp === 'string' && row.timestamp ? parseIso(row.timestamp, 'local') : null
+      if (moment !== null && !isSub) {
+        moments.push(moment)
+        rows.push(turnRow(row, moment, rel, at))
+      }
+      if (row.type === 'system' && row.subtype === 'compact_boundary') {
+        const meta = row.compactMetadata
+        comps.push([moment, isObj(meta) ? meta.trigger : null, typeof row.uuid === 'string' ? row.uuid : null])
+      }
+      if (row.type === 'assistant') {
+        const content = isObj(row.message) ? row.message.content : null
+        if (Array.isArray(content)) {
+          for (const block of content) {
+            if (isObj(block) && block.type === 'tool_use' && DISPATCH_TOOLS.includes(block.name)) disp.push([moment, at, block])
+          }
+        }
+      }
+    }
+    const end = (): void => {
+      for (const [key, e] of local) {
+        const held = this.seen.get(key)
+        if (!held) this.seen.set(key, e)
+        else for (const f of FIELDS) held.counts[f] = Math.max(held.counts[f], e.counts[f])
+      }
+      const key = JSON.stringify([project, session])
+      this.read.files += 1
+      this.read.bytes += size
+      if (isSub) this.read.subagent_bytes += size
+      else this.read.main_bytes += size
+      if (isSub) this.intervals.push(...intervalsOf(stamps))
+      let turn: { skip: boolean } | null = null
+      const active: number[] = []
+      for (const r of rows) {
+        const typed = marked ? r.marked : r.plain
+        if (typed !== null) {
+          const k = marked && r.turnKey !== null ? r.turnKey : r.rowKey
+          if (this.turnsSeen.has(k)) {
+            if (!turn || turn.skip) turn = { skip: true }
+          } else {
+            this.turnsSeen.add(k)
+            turn = { skip: false }
+            const d = (this.time[localDay(r.moment)] ??= { bytes: 0, turns: 0 })
+            d.bytes += typed
+            d.turns += 1
+            active.push(r.moment / 1000)
+          }
+        } else if (!turn?.skip && r.event) active.push(r.moment / 1000)
+      }
+      if (active.length) this.intervals.push(...intervalsOf(active))
+      if (!isSub) {
+        let first: number | null = null
+        let last: number | null = null
+        for (const m of moments) {
+          if (first === null || m < first) first = m
+          if (last === null || m > last) last = m
+        }
+        let minutes = 0
+        if (moments.length >= 2) minutes = pyRound(((last as number) - (first as number)) / 1e6 / 60, 1)
+        this.sessionRows.set(key, { session_id: session, project, month: first !== null ? localMonth(first) : null, minutes, responses: 0 })
+      }
+      for (const [moment, trigger, id] of comps) {
+        if (id !== null) {
+          if (this.compactionsSeen.has(id)) continue
+          this.compactionsSeen.add(id)
+        }
+        this.compactions.total += 1
+        const kind = trigger === 'manual' || trigger === 'auto' ? trigger : null
+        if (kind) this.compactions[kind] += 1
+        if (moment !== null) {
+          const daily = this.dayOf(localDay(moment))
+          daily.compactions += 1
+          if (kind === 'manual') daily.compactions_manual += 1
+          if (kind === 'auto') daily.compactions_auto += 1
+        }
+      }
+      for (const [moment, at, block] of disp) {
+        if (block.id !== undefined && block.id !== null) {
+          const id = JSON.stringify(block.id)
+          if (this.seenBlocks.has(id)) continue
+          this.seenBlocks.add(id)
+        }
+        if (moment === null) continue
+        this.raw.push({ moment, rel, order: at, project, session, block })
+      }
+    }
+    return { line, end }
+  }
+
+  addTime(days: Record<string, { typed_bytes?: number; turns?: number }>, intervals: Interval[]): void {
+    for (const [day, d] of Object.entries(days)) {
+      const held = (this.time[day] ??= { bytes: 0, turns: 0 })
+      held.bytes += d.typed_bytes ?? 0
+      held.turns += d.turns ?? 0
+    }
+    for (const iv of intervals) if (Array.isArray(iv) && iv[1] > iv[0]) this.intervals.push([iv[0], iv[1]])
+  }
+
+  finish(): Facts {
+    const unpriced = new Set<string>()
+    const days: string[] = []
+    const mainResponses = new Map<string, number>()
+    const mainDays: Record<string, Set<string>> = {}
+    for (const entry of this.seen.values()) {
+      const model = normModel(entry.model)
+      const c = entry.counts
+      const tokens = c.input + c.cacheWrite5m + c.cacheWrite1h + c.output
+      const cost = costOf(entry, this.prices)
+      if (cost === null) unpriced.add(model)
+      const usd = cost === null ? 0 : cost
+      const [project, session, isSub] = place(entry.file)
+      const day = localDay(entry.moment)
+      days.push(day)
+      const daily = (this.dayOf(day).by_model[model] ??= {
+        input_tokens: 0,
+        output_tokens: 0,
+        cache_read_tokens: 0,
+        cache_write_tokens: 0,
+        tokens: 0,
+        api_usd: 0,
+        responses: 0,
+        main_responses: 0,
+        subagent_responses: 0,
+      })
+      daily.input_tokens += c.input
+      daily.output_tokens += c.output
+      daily.cache_read_tokens += c.cacheRead
+      daily.cache_write_tokens += c.cacheWrite5m + c.cacheWrite1h
+      daily.tokens += tokens
+      daily.api_usd += usd
+      daily.responses += 1
+      if (isSub) {
+        daily.subagent_responses += 1
+      } else {
+        daily.main_responses += 1
+        const k = JSON.stringify([project, session])
+        mainResponses.set(k, (mainResponses.get(k) ?? 0) + 1)
+        ;(mainDays[day] ??= new Set()).add(session)
+      }
+    }
+    for (const [k, row] of this.sessionRows) row.responses = mainResponses.get(k) ?? 0
+
+    const rows = [...this.sessionRows.values()].sort((a, b) =>
+      cmpTuple([a.month ?? '', a.project, a.session_id], [b.month ?? '', b.project, b.session_id]),
+    )
+    const raw = this.raw
+    raw.sort((a, b) => cmpTuple([a.moment, a.rel, a.order], [b.moment, b.rel, b.order]))
+    const dispatches: Dispatch[] = []
+    const numbers = new Map<string, number>()
+    for (const d of raw) {
+      const data = isObj(d.block.input) ? d.block.input : {}
+      const desc = data.description
+      const k = JSON.stringify([d.project, d.session])
+      numbers.set(k, (numbers.get(k) ?? 0) + 1)
+      const row: Dispatch = {
+        session_id: d.session,
+        project: d.project,
+        day: localDay(d.moment),
+        type_word: typeWord(desc),
+        subagent_type: subagentType(data.subagent_type),
+        requested_model: requestedModel(data.model),
+        requested_effort: effortOf(data.effort),
+        desc_len: typeof desc === 'string' ? pyLen(desc) : 0,
+        dispatch_no: numbers.get(k) as number,
+      }
+      dispatches.push(row)
+      const daily = this.dayOf(row.day)
+      daily.dispatches_by_type[row.type_word] = (daily.dispatches_by_type[row.type_word] ?? 0) + 1
+      daily.dispatches_by_model[row.requested_model] = (daily.dispatches_by_model[row.requested_model] ?? 0) + 1
+    }
+
+    const sortedDays: Record<string, DayFacts> = {}
+    for (const day of Object.keys(this.byDay).sort()) sortedDays[day] = this.byDay[day]
+    const md: Record<string, string[]> = {}
+    for (const day of Object.keys(mainDays).sort()) md[day] = [...mainDays[day]].sort()
+    const sortedList = [...days].sort()
+    return {
+      transcripts: this.files,
+      first_day: sortedList.length ? sortedList[0] : null,
+      last_day: sortedList.length ? sortedList[sortedList.length - 1] : null,
+      by_day: sortedDays,
+      compactions: { ...this.compactions },
+      sessions: { count: rows.length, rows },
+      dispatches,
+      main_days: md,
+      unpriced: [...unpriced].sort(),
+      read: { ...this.read },
+      unread: [...this.unread],
+      time_by_day: timeDays(this.time, this.intervals),
+    }
+  }
+}
