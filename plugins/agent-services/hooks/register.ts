@@ -321,7 +321,7 @@ export const register: Register = (on) => {
   })
 
   on('tool.call', async ($, e: Ev, next) => {
-    const held = await holdWrite(ready($), e.tool, toolInput(e), () => $.session.cwd()) // phase.ts, signed in only
+    const held = await holdWrite(ready($), e.tool, toolInput(e), () => $.session.cwd(), e.agentId) // phase.ts: main agent
     if (held) return { deny: held }
     const fields = { tool: e.tool, input: toolInput(e), call: e.tool_use_id ?? null }
     const agent = e.agentId ?? null

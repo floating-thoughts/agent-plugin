@@ -8,7 +8,9 @@
 //   held (a Bash write is a known gap).
 // - lesson_lookup answers only phase `plan` until the document is running; any other phase gets an empty item list
 //   and a short reason, without asking the server.
-// - Subagents use the same document (the session's working directory); there is no per-subagent file.
+// - Subagents are never held: the gate is the main agent's startup phase, and a subagent is dispatched by a main
+//   session that has already planned (often in a git worktree with no agent-state.md). The engine's `agentId` on
+//   tool.call marks a subagent, the same signal prompt.submit uses (pushLessons).
 // - The caller runs this only while signed in (`active`): in auth fail the plugin stays inert.
 // Harness-neutral: nothing here touches `$`; reading the file, the working directory and the auth state are
 // injected (register.ts wires them).
@@ -139,10 +141,11 @@ export const lessonHold = (read: Read) => async (args: Obj, cwd: string | null):
 
 type Runtime = { svc: { authState(): Promise<string> }; readText: Read; sleep: (ms: number) => Promise<unknown> } | null
 
-/** register.ts tool.call: the deny reason for a file change while planning, or null. Other tools never wait for the
+/** register.ts tool.call: the deny reason for a main-agent file change while planning, or null (`agent` set: a
+ * subagent's call, never held). Other tools never wait for the
  * runtime; the check is capped at PHASE_WAIT_MS (late: the call goes on). Never throws. */
-export async function holdWrite(rt: Promise<Runtime>, tool: unknown, input: Obj, cwd: () => Promise<string>): Promise<string | null> {
-  if (typeof tool !== 'string' || !WRITE_TOOLS.includes(tool)) return null
+export async function holdWrite(rt: Promise<Runtime>, tool: unknown, input: Obj, cwd: () => Promise<string>, agent?: unknown): Promise<string | null> {
+  if (agent || typeof tool !== 'string' || !WRITE_TOOLS.includes(tool)) return null // a subagent: never held
   try {
     const r = await rt
     if (!r) return null
