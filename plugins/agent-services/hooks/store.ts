@@ -27,6 +27,7 @@ export const KEYS = {
   settings: 'settings',
   org: 'org',
   metricsState: 'metrics_state',
+  signoutLog: 'signout_log',
 } as const
 
 export const SIGN_OUT_KEYS = [
@@ -119,4 +120,30 @@ export async function tokenNextKeys(kv: KV): Promise<string[]> {
   } catch {
     return []
   }
+}
+
+export type SignoutRecord = {
+  at: string
+  cause: string
+  code?: string
+  hook: string
+  session: string
+  route?: string
+  version: string
+  claude?: 'present' | 'empty' | 'unreadable'
+}
+
+export async function appendSignout(kv: KV, rec: SignoutRecord): Promise<void> {
+  try {
+    const list = await signoutLog(kv)
+    list.push(rec)
+    await kv.set(KEYS.signoutLog, list.slice(-20))
+  } catch {
+  }
+}
+
+export async function signoutLog(kv: KV): Promise<SignoutRecord[]> {
+  const v = await safeGet(kv, KEYS.signoutLog)
+  if (!Array.isArray(v)) return []
+  return v.filter((r): r is SignoutRecord => !!r && typeof r === 'object' && typeof r.at === 'string' && typeof r.cause === 'string')
 }

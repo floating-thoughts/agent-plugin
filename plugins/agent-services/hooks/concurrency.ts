@@ -6,6 +6,7 @@ import { engineStore } from './store'
 import { rulesLive, servedValue } from './rules'
 import { asRows, holdsToolUse, recentRaw, transcriptRows } from './session_rows'
 import { toolInput } from './tools'
+import { TYPE_WORDS } from './transcripts'
 
 type Obj = Record<string, any>
 type Msg = { role?: unknown; text?: unknown; toolResults?: unknown }
@@ -27,17 +28,60 @@ export const CONCURRENCY_NOTE =
   'Step lines with (after: ...) and (owns: ...) in agent-state.md count too. Then dispatch the independent tasks as ' +
   'separate agents in one reply, with owned files that do not overlap; give a shared file to one owner, or use a ' +
   'separate git worktree and merge.\n' +
-  'To skip the check for a one-part task, start the Agent description or prompt with "single use: <reason>" (for a ' +
-  'SendMessage, start the message with it). The check denies a dispatch only once: sending the same call again goes ' +
-  'through.'
+  'The surest places are step lines in agent-state.md or the plan inside the dispatch prompt itself (the table, or a ' +
+  'line "Plan: Task ...; Depends on: ...; Owns: ...; How it runs: ..."; for a SendMessage, inside the message). An ' +
+  'earlier reply\'s text may also count if it was saved; a plan written only in thinking is never read.\n' +
+  'To skip the check for a one-part task, start the Agent description or prompt with "single use: <reason>", or put it ' +
+  'right after the leading task word ("implement single use: <reason>"); for a SendMessage, start the message with it. ' +
+  'The check denies a dispatch only once: an Agent call sent again with the same description and subagent type goes ' +
+  'through even if its prompt changed, and a SendMessage is stopped at most once per recipient, so sending it again ' +
+  'goes through. A SendMessage that replies to another session or to an agent that messaged you is not checked.'
 
 const denied: string[] = []
+const spawned: string[] = []
 const live = { text: '', block: -1 }
 
 const str = (v: unknown): string => (typeof v === 'string' ? v : '')
 
 export function singleUse(text: unknown): boolean {
-  return /^[\s>*_`"']*single[ -]use\s*:/i.test(str(text))
+  const t = str(text).replace(/^[\s>*_`"']+/, '')
+  if (/^single[ -]use\s*:/i.test(t)) return true
+  const word = /^([^\s:]+)\s*:?\s+([\s\S]*)$/.exec(t)
+  if (!word) return false
+  const w = word[1].toLowerCase()
+  return (w === 'final-review' || TYPE_WORDS.includes(w)) && /^single[ -]use\s*:/i.test(word[2])
+}
+
+const norm = (v: unknown): string => str(v).toLowerCase().replace(/\s+/g, ' ').trim()
+
+export function replySenders(messages: unknown): string[] {
+  const out: string[] = []
+  if (!Array.isArray(messages)) return out
+  for (const m of messages) {
+    let text = ''
+    try {
+      const parts = [(m as Obj)?.content, (m as Obj)?.message?.content, (m as Obj)?.text]
+      text = parts.map((c) => (typeof c === 'string' ? c : Array.isArray(c) ? c.map((b: Obj) => str(b?.text)).join('\n') : '')).join('\n')
+    } catch {}
+    for (const hit of text.matchAll(/<(?:cross-session-message|teammate-message)\b[^>]*?\b(?:from|teammate_id)="([^"]{1,300})"/g)) {
+      if (!out.includes(hit[1])) out.push(hit[1])
+    }
+  }
+  return out
+}
+
+export function inProcessTarget(to: unknown, senders: readonly string[]): boolean {
+  const t = str(to).trim()
+  if (!t || senders.some((s) => norm(s) === norm(t))) return false
+  if (/^a[0-9a-f]{16,}$/i.test(t) || spawned.includes(norm(t))) return true
+  return !(/^(?:uds|bridge|local|session|cloud)[:_]/i.test(t) || /\s\[[^\]]*\]$/.test(t) || /^main$/i.test(t) || /\s/.test(t))
+}
+
+export function noteSpawn(input: Obj): void {
+  const n = norm(input?.name)
+  if (!n || spawned.includes(n)) return
+  spawned.push(n)
+  if (spawned.length > 200) spawned.splice(0, spawned.length - 200)
 }
 
 export type PlanWords = { task: string[]; depends: string[]; owns: string[]; runs: string[]; separators: string[]; colons: string[] }
@@ -72,7 +116,14 @@ export function planInText(text: unknown): boolean {
   const NC = `[^\\n${colons}]`
   if (new RegExp(`^[ \\t>*_\`-]*${T}${NC}{0,20}${C}`, 'im').test(t) && new RegExp(`${D}\\s*${C}`, 'i').test(t) &&
     new RegExp(`${O}${NC}{0,30}${C}`, 'i').test(t) && new RegExp(`${R}${NC}{0,30}${C}`, 'i').test(t)) return true
+  const plan = /^[ \t>*_`-]*plan\s*:([^\n]*)$/im.exec(t)
+  if (plan && [T, D, O, R].every((f) => new RegExp(f, 'i').test(plan[1]))) return true
   return /^[ \t>*#_`-]*concurrency (plan|map)\b[^\n]{0,60}(:|$)/im.test(t)
+}
+
+export function dispatchText(tool: string, input: Obj): string {
+  if (tool === 'SendMessage') return str(input.message) || str(input.text) || str(input.content)
+  return tool === 'Agent' || tool === 'Task' ? str(input.prompt) : ''
 }
 
 export function planInFile(stateText: string | null): boolean {
@@ -108,28 +159,28 @@ export function exemptType(subagentType: unknown): boolean {
   return CONCURRENCY_EXEMPT_TYPES.includes(t) || /:explore$/i.test(t)
 }
 
-export type Facts = { tool: string; input: Obj; agentId?: unknown; recent?: unknown; stateText?: string | null; liveText?: unknown }
+export type Facts = { tool: string; input: Obj; agentId?: unknown; recent?: unknown; stateText?: string | null; liveText?: unknown; senders?: readonly string[] }
 
-export function dispatchKey(tool: string, input: Obj, agentId?: unknown): string | null {
+export function dispatchKey(tool: string, input: Obj, agentId?: unknown, senders: readonly string[] = []): string | null {
   if (agentId) return null
   if (tool === 'Agent' || tool === 'Task') {
     const description = str(input.description)
     const prompt = str(input.prompt)
     if (exemptType(input.subagent_type) || singleUse(description) || singleUse(prompt)) return null
-    return `${tool}\n${description}\n${prompt.slice(0, 4000)}`
+    return `Agent\n${norm(description) || norm(prompt.slice(0, 400)).slice(0, 200)}\n${str(input.subagent_type)}`
   }
   if (tool === 'SendMessage') {
     const text = str(input.message) || str(input.text) || str(input.content)
-    if (singleUse(text) || !addsWork(text)) return null
-    return `SendMessage\n${str(input.to)}\n${text.slice(0, 4000)}`
+    if (singleUse(text) || !addsWork(text) || !inProcessTarget(input.to, senders)) return null
+    return `SendMessage\n${norm(input.to)}`
   }
   return null
 }
 
 export function concurrencyVerdict(f: Facts): string | null {
-  const key = dispatchKey(f.tool, f.input, f.agentId)
+  const key = dispatchKey(f.tool, f.input, f.agentId, f.senders ?? [])
   if (key === null || denied.includes(key)) return null
-  if (planInText(`${recentAssistantText(f.recent)}\n${str(f.liveText)}`) || planInFile(f.stateText ?? null)) return null
+  if (planInText(dispatchText(f.tool, f.input)) || planInText(`${recentAssistantText(f.recent)}\n${str(f.liveText)}`) || planInFile(f.stateText ?? null)) return null
   denied.push(key)
   if (denied.length > 200) denied.splice(0, denied.length - 200)
   return CONCURRENCY_NOTE
@@ -137,6 +188,7 @@ export function concurrencyVerdict(f: Facts): string | null {
 
 export function resetConcurrency(): void {
   denied.length = 0
+  spawned.length = 0
   liveStep(undefined)
 }
 
@@ -244,26 +296,34 @@ export async function concurrencyCall($: EngineInterface, e: Obj, next: any, liv
   try {
     if (!e.agentId && (live ?? (await rulesLive())) && (await methodsLevel(engineStore($))) !== 'off') {
       const input = toolInput(e)
-      const key = dispatchKey(String(e.tool), input)
+      const got = String(e.tool) === 'SendMessage' ? await recentRaw($, 60) : null
+      const senders = got ? replySenders(got.messages) : []
+      const key = dispatchKey(String(e.tool), input, undefined, senders)
       if (key !== null && !denied.includes(key)) {
-        const got = await recentRaw($, 60)
-        const recent = asRows(got.messages)
+        const raw = got ?? (await recentRaw($, 60))
+        const recent = asRows(raw.messages)
         const liveText = liveStepText()
         const plan = await stateText($)
         let transcript: unknown[] | null = null
         let extra = ''
-        if (!planInText(`${recentAssistantText(recent)}\n${liveText}`) && !planInFile(plan)) {
+        if (!planInText(dispatchText(String(e.tool), input)) && !planInText(`${recentAssistantText(recent)}\n${liveText}`) && !planInFile(plan)) {
           transcript = await transcriptRows($, 60)
           extra = recentAssistantText(transcript)
         }
-        note = concurrencyVerdict({ tool: String(e.tool), input, recent, liveText: `${liveText}\n${extra}`, stateText: plan })
-        if (await traceOn($)) await traceWrite($, traceLine({ e, form: got.form, raw: got.messages, liveText, transcript, verdict: note }))
+        note = concurrencyVerdict({ tool: String(e.tool), input, recent, liveText: `${liveText}\n${extra}`, stateText: plan, senders })
+        if (await traceOn($)) await traceWrite($, traceLine({ e, form: raw.form, raw: raw.messages, liveText, transcript, verdict: note }))
       }
     }
   } catch {
     note = null
   }
-  return note ? { deny: note } : next(e)
+  if (note) return { deny: note }
+  if (e.tool === 'Agent' || e.tool === 'Task') {
+    try {
+      noteSpawn(toolInput(e))
+    } catch {}
+  }
+  return next(e)
 }
 
 export function installConcurrency(on: any): void {

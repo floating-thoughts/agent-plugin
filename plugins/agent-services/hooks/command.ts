@@ -6,7 +6,7 @@ import type { Outbox } from './outbox'
 import { redact } from './redact'
 import { updateCommand } from './status'
 import { applyUpdate, AUTO_UPDATE_KEY, autoSwitchOn, probeProcess, takeUpdateNote, updatesLine } from './update'
-import { safeSet } from './store'
+import { safeSet, signoutLog } from './store'
 import type { KV } from './store'
 import { gateNotice, LOCKED_LINE, NOTICE_TEXT, PAUSED_LINE, PLAN_NOTICE, SERVED_CHANNELS, SERVED_ROLES } from './svc'
 import type { Svc } from './svc'
@@ -645,7 +645,7 @@ export class Command {
     const auth = await svc.authState(true)
     if (auth === 'locked') return LOCKED_LINE
     if (auth === 'paused') return pausedOf(svc)
-    if (auth !== 'ok') return PAUSED_LINE
+    if (auth !== 'ok') return PAUSED_LINE + (await lastSignoutLine(this.d.store))
     return signedInLine(await svc.status())
   }
 
@@ -661,7 +661,7 @@ export class Command {
     }
     if (auth === 'locked') lines.push(LOCKED_LINE)
     else if (auth === 'paused') lines.push(pausedOf(svc))
-    else if (auth !== 'ok') lines.push(PAUSED_LINE)
+    else if (auth !== 'ok') lines.push(PAUSED_LINE + (await lastSignoutLine(this.d.store)))
     else {
       lines.push(signedInLine(st))
       const gate = st.gate as { open: boolean; reason: string | null; min_shell: string | null }
@@ -952,6 +952,7 @@ export class Command {
     if (w === 'hooks' && rest.length === 1) return hooksSummary(`${COMMAND} info hooks full`)
     if (w === 'hooks' && full) return hooksText()
     if (w === 'log' && rest.length <= 2) return this.outbox(rest.slice(1))
+    if (w === 'signouts' && rest.length === 1) return signoutsText(this.d.store)
     return `Usage: ${COMMAND} info data [full] | info hooks [full] | info log [<YYYY-MM-DD>]`
   }
 
@@ -1990,4 +1991,39 @@ export async function onboardingNote($: EngineInterface): Promise<string | null>
   } catch {
     return null
   }
+}
+
+function signoutCause(r: { cause: string; code?: string }): string {
+  if (r.cause === 'http_401') return `the server refused the sign-in (401 ${r.code ?? 'no code'})`
+  if (r.cause === 'login_expired') return 'the sign-in expired'
+  if (r.cause === 'logout') return 'signed out with logout'
+  if (r.cause === 'endpoint_changed') return 'the service address or keys changed'
+  return r.cause
+}
+
+function signoutTime(at: string, secs = false): string {
+  const m = /^(\d{4}-\d{2}-\d{2})T(\d{2}:\d{2})(:\d{2})?/.exec(at)
+  return m ? `${m[1]} ${m[2]}${secs && m[3] ? m[3] : ''} UTC` : at.slice(0, 40)
+}
+
+export async function lastSignoutLine(store: KV): Promise<string> {
+  const last = (await signoutLog(store).catch(() => [])).at(-1)
+  if (!last) return ''
+  return `\nLast sign-out: ${signoutTime(last.at)} - ${signoutCause(last)} (session ${String(last.session).slice(0, 8)}). ` +
+    `${COMMAND} info signouts lists the last 20.`
+}
+
+export async function signoutsText(store: KV): Promise<string> {
+  const list = (await signoutLog(store).catch(() => [])).slice().reverse()
+  if (!list.length) return 'No sign-out is recorded on this computer.'
+  const lines = list.map((r) => [
+    signoutTime(r.at, true),
+    signoutCause(r),
+    `hook ${r.hook}`,
+    `session ${String(r.session).slice(0, 8)}`,
+    ...(r.route ? [r.route] : []),
+    ...(r.claude ? [`Claude account hash ${r.claude}`] : []),
+    `plugin ${r.version}`,
+  ].join(' | '))
+  return `Sign-outs on this computer, newest first (the last 20 are kept here and never sent):\n${lines.join('\n')}`
 }

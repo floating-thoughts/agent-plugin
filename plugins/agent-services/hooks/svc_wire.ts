@@ -390,9 +390,11 @@ export class Deadline {
   private t0: number
   private now: () => number
   readonly total: number
-  constructor(now: () => number, total: number) {
+  readonly hook: string
+  constructor(now: () => number, total: number, hook = 'unknown') {
     this.now = now
     this.total = total
+    this.hook = hook
     this.t0 = now()
   }
   remaining(): number {

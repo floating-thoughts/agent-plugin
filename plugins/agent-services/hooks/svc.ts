@@ -18,6 +18,7 @@ import { keepOrg, ORG_PAUSED_LINE, validOrg } from './org'
 import { ORG_PAUSED_STATUS } from './status'
 import { devicePublicKey, newDeviceSeed, SIG_SKEW_SECONDS, signedHeaders, signedTs, verifyResponse } from './sig'
 import {
+  appendSignout,
   CREDENTIAL_KEYS,
   getText,
   KEYS,
@@ -297,7 +298,7 @@ export class Svc {
     return Math.trunc(this.d.now() / 1000)
   }
 
-  private init(): Promise<void> {
+  private init(hook = 'unknown'): Promise<void> {
     if (!this.ready) {
       this.ready = (async () => {
         const tok = await getText(this.kv, KEYS.token)
@@ -306,6 +307,7 @@ export class Svc {
         if (bound === null || (bound !== this.cfg.binding && bindingKept(bound, this.cfg))) {
           await safeSet(this.kv, KEYS.endpoint, this.cfg.binding)
         } else if (bound !== this.cfg.binding) {
+          await this.signoutRecord('endpoint_changed', hook)
           for (const k of SIGN_OUT_KEYS) await safeDelete(this.kv, k)
           for (const k of await tokenNextKeys(this.kv)) await safeDelete(this.kv, k)
           this.authCache = null
@@ -314,6 +316,22 @@ export class Svc {
       })().catch(() => undefined)
     }
     return this.ready
+  }
+
+  private async signoutRecord(cause: string, hook: string, o: { code?: string | null; route?: string } = {}): Promise<void> {
+    const code = o.code ? (/^[a-z0-9_]{1,40}$/.test(o.code) ? o.code : 'other') : null
+    await appendSignout(this.kv, {
+      at: new Date(this.d.now()).toISOString(),
+      cause,
+      ...(code ? { code } : {}),
+      hook,
+      session: this.session.slice(0, 64),
+      ...(o.route ? { route: o.route.slice(0, 120) } : {}),
+      version: String(this.d.shellVersion).slice(0, 40),
+      ...(cause === 'http_401'
+        ? { claude: this.claudeBadSince !== null ? ('unreadable' as const) : this.claudeSent ? ('present' as const) : ('empty' as const) }
+        : {}),
+    })
   }
 
   async settings(): Promise<Settings> {
@@ -910,16 +928,17 @@ export class Svc {
       }
       const held = await getText(this.kv, KEYS.token)
       if (held && !failed.has(held)) continue
-      await this.revoked(last.error ?? 'http_401', held)
+      await this.revoked(last.error ?? 'http_401', held, { hook: deadline.hook, route: `${method} ${wire.split('?', 1)[0]}` })
       return last
     }
     return last
   }
 
-  private async revoked(code: string, held: string | null): Promise<void> {
+  private async revoked(code: string, held: string | null, at: { hook: string; route: string }): Promise<void> {
     if (held) {
       const again = await getText(this.kv, KEYS.token)
       if (again === held || again === null) {
+        if (again === held) await this.signoutRecord('http_401', at.hook, { code, route: at.route })
         for (const k of CREDENTIAL_KEYS) await safeDelete(this.kv, k)
       }
     }
@@ -939,6 +958,7 @@ export class Svc {
     if (now >= exp) {
       const tok = await getText(this.kv, KEYS.token)
       if (tok && (await getText(this.kv, KEYS.token)) === tok) {
+        await this.signoutRecord('login_expired', deadline.hook)
         for (const k of CREDENTIAL_KEYS) await safeDelete(this.kv, k)
       }
       this.authCache = null
@@ -990,7 +1010,7 @@ export class Svc {
   }
 
   private deadline(kind: Kind, hook: Hook): Deadline {
-    return new Deadline(this.d.now, Math.min(TIMEOUTS_MS[kind], HOOK_BUDGET_MS[hook]))
+    return new Deadline(this.d.now, Math.min(TIMEOUTS_MS[kind], HOOK_BUDGET_MS[hook]), hook)
   }
 
   handshake(hook: Hook = 'background'): Promise<Result> {
@@ -1011,7 +1031,7 @@ export class Svc {
   }
 
   private async hello(d: Deadline, rotate: boolean): Promise<Result> {
-    await this.init()
+    await this.init(d.hook)
     if ((await this.settings()).offline) {
       this.setGate('offline')
       return R(false, { error: 'offline' })
@@ -1153,7 +1173,7 @@ export class Svc {
       const prep = this.prepare(method, path, body)
       if (typeof prep === 'string') return fail(prep)
       const { route, sub, wire, data } = prep
-      await this.init()
+      await this.init(hook)
       if ((await this.settings()).offline) {
         this.setGate('offline')
         return fail('offline')
@@ -1364,6 +1384,7 @@ export class Svc {
         }),
       )
     }
+    if (await getText(this.kv, KEYS.token)) await this.signoutRecord('logout', hook)
     let dropped = true
     for (const k of [...CREDENTIAL_KEYS, KEYS.block]) dropped = (await safeDelete(this.kv, k)) && dropped
     for (const k of await tokenNextKeys(this.kv)) dropped = (await safeDelete(this.kv, k)) && dropped
