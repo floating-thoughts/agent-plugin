@@ -1,4 +1,4 @@
-// The svc channel's stateless helpers (cleanup route R6, moved from svc.ts unchanged): the client config, the
+// The svc channel's stateless helpers (moved from svc.ts unchanged): the client config, the
 // contract's schema subset (check and filter), the route table, the served-answer summary and the field redaction,
 // error codes, Retry-After and the injected-clock Deadline. svc.ts keeps the constants, the types and the Svc class.
 import { CONTRACT } from './contract'
@@ -12,7 +12,7 @@ const HOST_RX =
 const KEY_RX = /^[A-Za-z0-9+/]{43}=$/
 const CODE_RX = /^[a-z][a-z0-9_]{0,63}$/
 
-// ------------------------------------------------------------------ helpers (ports of host/services.py)
+// ------------------------------------------------------------------ helpers (ports of the Python client)
 
 /** client.json -> the parsed config, or an Error. Only https hostname endpoints (CA trust by the engine's TLS);
  * server_keys and e2e_keys are always required; an IPv4 endpoint with a pinned certificate is refused. */
@@ -56,7 +56,7 @@ export function parseConfig(c: unknown): {
     pins: [] as string[],
     server_keys: [...sk].sort(),
   }
-  // host/services.py client_fingerprint: json.dumps(doc, sort_keys=True, separators=(",", ":"))
+  // the Python client's client_fingerprint: json.dumps(doc, sort_keys=True, separators=(",", ":"))
   const fingerprint = 'fp1:' + sha256Hex(utf8(JSON.stringify(doc)))
   return { origin: port === 443 ? `https://${m[1]}` : `https://${m[1]}:${port}`, host: m[1], port, keys, e2eSend, fingerprint }
 }
@@ -86,7 +86,7 @@ const TYPES: Record<string, (v: unknown) => boolean> = {
   null: (v) => v === null,
 }
 
-/** host/jsonschema_lite.py check_schema: the problems of `value` against the contract's schema subset. */
+/** the Python client's check_schema: the problems of `value` against the contract's schema subset. */
 export function checkSchema(value: unknown, schema: unknown, where = '$'): string[] {
   const s = resolve(schema)
   if (!isObj(s)) return []
@@ -129,7 +129,7 @@ export function checkSchema(value: unknown, schema: unknown, where = '$'): strin
   return out
 }
 
-/** host/services.py _filter: drop properties the schema does not have (objects with additionalProperties false). */
+/** the Python client's _filter: drop properties the schema does not have (objects with additionalProperties false). */
 export function filterBody(value: unknown, schema: unknown): unknown {
   const s = resolve(schema)
   if (!isObj(s)) return value

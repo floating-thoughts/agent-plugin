@@ -1,4 +1,4 @@
-// O5 boss board: the company admin's second private board.
+// The company board: the company admin's second private board.
 //
 // When the hello answer says the signed-in account is its company's admin (org.ts orgAdmin, shell 0.4.0 or later),
 // the wiring renders <data dir>/boss/index.html from GET /org/summary after a turn (with the person's own board,
@@ -105,7 +105,7 @@ export function bossHtml(s: Obj): string {
   const used = Number(s.seats_used) || 0
   const paid = typeof s.seats_paid === 'number' ? s.seats_paid : null
   const measured = people.filter((p) => typeof p.usd === 'number').length
-  // nobody has a figure and the total is zero: a new company, so say so instead of a big $0.00 (owner 2026-10-31)
+  // nobody has a figure and the total is zero: a new company, so say so instead of a big $0.00
   const noData = measured === 0 && Math.round(total * 100) === 0
   return `<!doctype html>
 <html lang="en">

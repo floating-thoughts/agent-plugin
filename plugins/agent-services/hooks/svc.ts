@@ -1,4 +1,4 @@
-// The svc channel, harness-neutral: a port of host/services.py Connector (plan 3.3, 3.4, 3.9).
+// The svc channel, harness-neutral: a port of the Python client's Connector.
 // Fetch-as-text, the store, the clock, sleep, random, the outbox and the Claude account hash are passed in; nothing
 // here touches the engine.
 //
@@ -19,13 +19,13 @@
 // - Several sessions share one store with no atomic read-modify-write: the credential is read on every request,
 //   rotation runs under a best-effort lease with per-session token_next keys, and a 401 deletes the token only after
 //   the re-read, token_prev grace and token_next steps, and only if the stored token is still one that got the 401.
-// - Auth fail (3.9): with no valid sign-in, or after a 401 or 423 that does not recover, nothing is sent but
+// - Auth fail: with no valid sign-in, or after a 401 or 423 that does not recover, nothing is sent but
 //   GET /health and the login routes, in every session (the state is derived from the store, re-read at most every
 //   5 s by hooks).
 // - Production ignores overrides: the endpoint and keys are DEFAULT_CONFIG unless the caller (a staging build)
 //   passes its own config; nothing is ever read from the store for them.
 // The stateless helpers (config parse, schema check and filter, route table, redaction, Deadline) are svc_wire.ts
-// (cleanup route R6); the ones exported before are re-exported here.
+// the ones exported before are re-exported here.
 import { API, BODY_LIMIT, CONTRACT, E2E_CONTENT_TYPE_B64, PREFIX } from './contract'
 import {
   answerEncoding,
@@ -82,7 +82,7 @@ export { checkSchema, Deadline, defaultKind, errorCode, filterBody, matchRoute, 
 
 // ------------------------------------------------------------------ constants
 
-/** The shipped client config (host/client_defaults.json; a test keeps them equal). */
+/** The shipped client config (a copy of the client defaults file; a test keeps them equal). */
 export const DEFAULT_CONFIG = {
   endpoint: 'https://svc.yzcanadianholdings.com',
   pin: { kind: 'ca' },
@@ -93,7 +93,7 @@ export const DEFAULT_CONFIG = {
 export type Kind = 'router' | 'checkpoint' | 'served' | 'run_limits' | 'daily' | 'auth' | 'health'
 export type Hook = 'tool' | 'spawn' | 'prompt' | 'background'
 
-/** Per-kind deadlines (host/services.py TIMEOUTS, in ms); dist_token is gone (A23). */
+/** Per-kind deadlines (the Python client's TIMEOUTS, in ms); dist_token is gone. */
 export const TIMEOUTS_MS: Record<Kind, number> = {
   router: 1000,
   checkpoint: 5000,
@@ -112,13 +112,13 @@ export const FALLBACKS: Record<Kind, string | null> = {
   auth: null,
   health: null,
 }
-/** The whole budget of one call, by the hook it runs in (plan 3.3 item 3); a call gets the smaller of this and its
+/** The whole budget of one call, by the hook it runs in; a call gets the smaller of this and its
  * kind's deadline. prompt.submit sends nothing. */
 export const HOOK_BUDGET_MS: Record<Hook, number> = { tool: 8000, spawn: 1000, prompt: 0, background: 25000 }
 
 export const ROTATE_MARGIN_S = 7 * 86400
 export const MAX_ATTEMPTS = 3
-export const BLOCK_SECONDS = { locked_out: 900, account_locked: 3600, org_paused: 60 } as const // org_paused: O2, short so an unpause is seen soon
+export const BLOCK_SECONDS = { locked_out: 900, account_locked: 3600, org_paused: 60 } as const // org_paused: short so an unpause is seen soon
 export const THROTTLE_MAX_SECONDS = 300 // the longest signed Retry-After honored
 export const THROTTLE_NOTICE_AFTER = 120
 export const NOTICE_EVERY_MS = 3600000
@@ -142,7 +142,7 @@ export const SERVICE_DEFAULTS: Record<string, boolean> = {
   health: true,
   updates: true,
   incidents: false,
-  metrics: true, // on by default since 2026-10-31; settings() keeps an explicit off (metricsDefault)
+  metrics: true, // the transport switch of the metrics routes; the savings record (choice.ts) decides the upload
   router: true,
   checkpoint: true,
   limits: true,
@@ -154,19 +154,19 @@ export const SERVED_CHANNELS = ['stable', 'beta']
 export const CONSENT_ROUTES = ['POST /diagnostic/estimate']
 export const PLAN_VALUES = ['diagnostic', 'guard', 'full']
 
-/** The one line every tool answers while auth has failed (3.9). */
-export const PAUSED_LINE = 'agent-services is paused: sign in with /agent-services login'
+/** The one line every tool answers while auth has failed. */
+export const PAUSED_LINE = 'agent-services is signed out: sign in with /agent-services login'
 export const LOCKED_LINE =
   'agent-services is paused: this account is locked; contact support, then sign in with /agent-services login'
 export const GATE_NOTICES: Record<string, string> = {
   login: PAUSED_LINE,
   locked: LOCKED_LINE,
   paused: ORG_PAUSED_LINE,
-  upgrade: 'agent-services is paused: this plugin version is no longer accepted; update the plugin (minimum {min_shell}).',
-  offline: 'agent-services is paused: offline mode is on.',
-  unavailable: 'agent-services is paused: the server could not be reached; it tries again at the next session.',
+  upgrade: 'agent-services needs an update: this plugin version is no longer accepted; update the plugin (minimum {min_shell}).',
+  offline: 'agent-services is offline: offline mode is on, so nothing is sent.',
+  unavailable: "agent-services can't reach its server; it tries again at the next session.",
   unverified:
-    "agent-services is paused: an answer claiming to come from the server was not signed by the server's key (a " +
+    "agent-services can't verify its server: an answer claiming to come from the server was not signed by the server's key (a " +
     'proxy or a fake server may be in the way); nothing it said was used. It tries again at the next session.',
 }
 export const NOTICE_TEXT: Record<string, string> = {
@@ -298,7 +298,7 @@ export class Svc {
     return Math.trunc(this.d.now() / 1000)
   }
 
-  // ---------------- binding (host/services.py _bind_endpoint), once per instance
+  // ---------------- binding (the Python client's _bind_endpoint), once per instance
   private init(): Promise<void> {
     if (!this.ready) {
       this.ready = (async () => {
@@ -344,20 +344,11 @@ export class Svc {
     }
     return s
   }
-  /**
-   * The daily metrics upload is on unless the user chose off. A choice made with the savings commands is kept as
-   * metrics_set; before that switch existed an explicit off was a stored metrics false after the upload had been on
-   * (an enabled_day), or a "Not now" to the savings question. A stored false without either was only the old default.
-   */
+  /** The metrics routes' transport switch: a value set through setService (metrics_set) holds, else on. Whether
+   * anything is uploaded is the savings record's (choice.ts uploadOn), not this switch's. */
   private async metricsDefault(d: Record<string, any>): Promise<boolean> {
     const stored = isObj(d.services) ? d.services.metrics : undefined
-    if (d.metrics_set === true && typeof stored === 'boolean') return stored
-    if (stored === true) return true
-    const prompt = await safeGet(this.kv, KEYS.savingsPrompt)
-    if (isObj(prompt) && prompt.answer === 'not_now') return false
-    const state = await safeGet(this.kv, KEYS.metricsState)
-    if (stored === false && isObj(state) && typeof state.enabled_day === 'string' && state.enabled_day) return false
-    return true
+    return d.metrics_set === true && typeof stored === 'boolean' ? stored : true
   }
   private async saveSettings(f: (s: Settings) => void, choseMetrics = false): Promise<boolean> {
     const s = await this.settings()
@@ -434,7 +425,7 @@ export class Svc {
     return b.code
   }
 
-  /** 3.9: "login" (no valid sign-in), "locked" (a 423 or locked_out block in force), else "ok". Read from the store,
+  /** The auth state: "login" (no valid sign-in), "locked" (a 423 or locked_out block in force), else "ok". Read from the store,
    * at most every AUTH_STATE_TTL_MS unless `fresh`. */
   async authState(fresh = false): Promise<AuthState> {
     const now = this.d.now()
@@ -455,7 +446,7 @@ export class Svc {
     return value
   }
 
-  /** The line tools answer in auth fail (3.9), or null while signed in. */
+  /** The line tools answer in auth fail, or null while signed in. */
   async authLine(): Promise<string | null> {
     const st = await this.authState()
     return st === 'ok' ? null : st === 'locked' ? LOCKED_LINE : st === 'paused' ? ORG_PAUSED_LINE : PAUSED_LINE
@@ -716,9 +707,9 @@ export class Svc {
         }
         break
       }
-      if (ist === 401 && o.signed) break // recovered (or not) by the caller: 3.3 item 4
+      if (ist === 401 && o.signed) break // recovered (or not) by the caller
       if (ist === 423) {
-        const paused = code === 'org_paused' // O2: the org's admin paused it; the sign-in stays
+        const paused = code === 'org_paused' // the org's admin paused it; the sign-in stays
         await this.setBlock(code, paused ? BLOCK_SECONDS.org_paused : BLOCK_SECONDS.account_locked, o.token ?? null)
         this.notice(code)
         if (o.signed) this.setGate(paused ? 'paused' : 'locked')
@@ -750,7 +741,7 @@ export class Svc {
     return last
   }
 
-  // ---------------- signed exchange with the 401 rules of 3.3 item 4
+  // ---------------- signed exchange with the 401 rules
   private async exchange(method: string, wire: string, body: string | null, service: string, deadline: Deadline, o: Omit<XOpts, 'token'> & { token?: string }): Promise<Res> {
     if (!o.signed) return this.attempt(method, wire, body, service, deadline, o)
     const tok = o.token ?? (await getText(this.kv, KEYS.token))
@@ -858,7 +849,7 @@ export class Svc {
     return this.rotate(deadline)
   }
 
-  /** Rotation under a best-effort lease (3.3 item 4). The new token waits under token_next:<session> until the
+  /** Rotation under a best-effort lease. The new token waits under token_next:<session> until the
    * server confirms it, so two sessions rotating at once never overwrite each other's unconfirmed token. */
   private async rotate(deadline: Deadline): Promise<string | null> {
     const lease = await safeGet(this.kv, KEYS.rotateLease)
@@ -959,7 +950,7 @@ export class Svc {
         b.routes.every((r) => typeof r === 'string' && ROUTE_KEY_RX.test(r))
       ) {
         await safeSet(this.kv, KEYS.plan, b.plan)
-        await keepOrg(this.kv, b.org, this.d.now(), (on) => this.setService('metrics', on)) // O3
+        await keepOrg(this.kv, b.org, this.d.now(), (on) => this.setService('metrics', on)) // the company's choice
         this.planRoutes = new Set(b.routes as string[])
         this.refused.clear()
         this.setGate(null)
@@ -1076,7 +1067,7 @@ export class Svc {
       const signed = sub !== '/health'
       const key = `${route.method} ${route.path}`
       if (signed) {
-        if ((await this.authState()) !== 'ok') return fail('auth_failed') // 3.9: nothing is sent
+        if ((await this.authState()) !== 'ok') return fail('auth_failed') // nothing is sent
         if (await this.cooling()) return fail('rate_limited') // shared: every session backs off together
         if (!(await this.ensureOpen(d, hook))) return fail('inactive')
       }
@@ -1144,7 +1135,7 @@ export class Svc {
     for (const k of [...this.servedBind.keys()]) if (k.startsWith(sessionRef + '\n')) this.servedBind.delete(k)
   }
 
-  // ---------------- sign-in (3.4): the login routes, the only signed-out traffic besides /health
+  // ---------------- sign-in: the login routes, the only signed-out traffic besides /health
   private async loginGate(): Promise<Result | null> {
     if ((await this.settings()).offline) return R(false, { error: 'offline' })
     const b = await this.block()

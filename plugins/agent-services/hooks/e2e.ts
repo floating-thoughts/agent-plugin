@@ -1,8 +1,8 @@
-// End-to-end request envelope, client side: a port of host/e2e.py (seal_request, open_response) for the hooks
+// End-to-end request envelope, client side: a port of the Python client (seal_request, open_response) for the hooks
 // module, so a TLS-terminating edge (the Cloudflare Tunnel) sees only ciphertext. Harness-neutral: it never touches
 // the engine; the clock (ts), the challenge and the random source are passed in.
 //
-// Wire format (contract: host/service_api.json x-transport "e2e"; byte for byte the same as host/e2e.py):
+// Wire format (the contract's x-transport "e2e"; byte for byte the same as the Python client):
 //   outer request  POST /svc/v1/x, or /svc/v1/auth/login/x for login start and finish
 //                  X-Agent-E2E: v=1; kid=<16 hex>; epk=<base64 X25519 public key>; ts=<unix seconds>
 //                  X-Agent-Challenge: <32 hex>
@@ -167,7 +167,7 @@ export type SealOptions = {
   random?: Random // the ephemeral key (32 bytes) is drawn first, then the nonce (12)
 }
 
-/** host/e2e.py seal_request: -> outer path, outer headers, outer body, context for the answer. */
+/** the Python client's seal_request: -> outer path, outer headers, outer body, context for the answer. */
 export function sealRequest(
   serverPub: Uint8Array,
   method: string,
@@ -218,7 +218,7 @@ export function sealRequest(
 
 export type Opened = { status: number; headers: Record<string, string>; body: Uint8Array }
 
-/** host/e2e.py open_response: the sealed answer (bytes, or the base64 text) -> inner status, headers and body. */
+/** the Python client's open_response: the sealed answer (bytes, or the base64 text) -> inner status, headers and body. */
 export function openResponse(ctx: Context, data: Uint8Array | string): Opened {
   const raw = typeof data === 'string' ? b64Decode(data) : data
   const plain = ctx.open(raw)
@@ -259,6 +259,6 @@ export function headerValue(headers: unknown, name: string): string | null {
  * a plain JSON error from before the envelope opened). */
 export function answerEncoding(status: number, headers: unknown): Encoding | null {
   if (status !== 200) return null
-  const media = (headerValue(headers, 'Content-Type') ?? '').split(';')[0].trim() // exact, as host/services.py
+  const media = (headerValue(headers, 'Content-Type') ?? '').split(';')[0].trim() // exact, as the Python client
   return media === CONTENT_TYPE ? 'binary' : media === CONTENT_TYPE_B64 ? 'base64' : null
 }

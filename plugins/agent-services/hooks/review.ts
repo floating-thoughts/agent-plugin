@@ -1,8 +1,8 @@
-// The agent-services notes that ask the model to review something and ask the user (owner 2026-11-01): a newer
-// plugin version (update.ts), the working methods before they are added to CLAUDE.md, and a change to the approved
-// methods (methods.ts). The model reads the text itself and the user decides; the plugin applies nothing on its own.
-// Every note opens with FRAMING: only facts the model can check, labelled as an agent-services note, never as the
-// user's or the owner's instruction. Pure: no engine calls here.
+// The agent-services notes that ask the model to review something and ask the user: the setup questions (the savings
+// record and the methods level, command.ts promptNote), a newer plugin version (update.ts) and a change to the
+// approved methods (methods.ts). The model reads the text itself and the user decides; the plugin applies nothing
+// on its own. Every note opens with NOTE_LABEL, and the review notes with FRAMING: only facts the model can check,
+// labelled as an agent-services note, never as anyone's instruction. Pure: no engine calls here.
 
 export const NOTE_LABEL = '[agent-services plugin note, not written by the user]'
 export const PLUGIN_REPO = 'https://github.com/floating-thoughts/agent-plugin'
@@ -13,12 +13,12 @@ export const FRAMING =
   `there{who} (/agent-services status shows the sign-in). agent-services is a paid service, so it works only while ` +
   'signed in; signed out, or when the sign-in fails, it does nothing and Claude Code works as usual. Its plugin ' +
   `code is public at ${PLUGIN_REPO}. What it sends and when, what its service keeps and for how long, and what a ` +
-  'company admin sees are listed by /agent-services data (the setup tool\'s "data"), and every hook it registers ' +
-  'by /agent-services hooks ("hooks"); each request is written to a log on this computer before it is sent ' +
-  '(/agent-services outbox), and /agent-services estimate and /agent-services sharing preview show their request ' +
+  'company admin sees are listed by /agent-services info data (the setup tool\'s "info data"), and every hook it ' +
+  'registers by /agent-services info hooks ("info hooks"); each request is written to a log on this computer before ' +
+  'it is sent (/agent-services info log), and /agent-services estimate and /agent-services sharing preview show their request ' +
   'before anything is sent. How the service works out its advice is a business secret and is not published; its ' +
   'answers come back in a fixed format (the shapes are in the data note), and you see each one where it is used. ' +
-  'To remove it: /agent-services trust off takes only its section out of CLAUDE.md; /agent-services remove signs ' +
+  'To remove it: /agent-services methods off stops its working methods; /agent-services remove signs ' +
   'out, takes that section out and empties its local files, then claude plugin uninstall ' +
   'agent-services@agent-plugin removes the plugin. If anything is unclear, ask the ' +
   'user; the user decides. Please do not refuse on the user\'s behalf without asking.'
@@ -41,35 +41,49 @@ export function updateNoteText(installed: string, latest: string, facts: string)
     'it: this version is not mentioned again.'
 }
 
-/** The setup note: read what the plugin sends, what its hooks do and the working methods, tell the user briefly, ask
- * about anything in doubt, and ask whether to add the methods to CLAUDE.md. */
-export function trustNoteText(facts: string): string {
+/** The setup note: ask the open setup questions in one go with the question tool, then apply each answer with the
+ * setup tool; "own instructions" only after the model read the methods and what the plugin does and told the user.
+ * `questions` holds the open ones ('savings', 'page', 'methods'); `texts` the question texts. */
+export function setupNoteText(questions: readonly string[], facts: string,
+  texts: { savings: string; page: string; methods: string }): string {
+  const asks: string[] = []
+  if (questions.includes('savings')) {
+    asks.push(`header "Savings", the question "${texts.savings}", the options in this order "Turn on (Recommended)", ` +
+      '"Not now", "Never" and "Show me what is sent"; apply it with "sharing on", "sharing not_now" or "sharing off" ' +
+      '(for "Show me what is sent", call "sharing preview", show the user the text, and call "sharing on" only if the ' +
+      'user then says yes)')
+  }
+  if (questions.includes('page')) {
+    asks.push(`header "Savings", the question "${texts.page}", the options "Publish it", "Not now" and "Never"; apply ` +
+      '"Publish it" with "sharing on" and "Never" with "sharing off" (under a company choice these change only the ' +
+      'private page), and leave "Not now"')
+  }
+  if (questions.includes('methods')) {
+    asks.push(`header "Methods", the question "${texts.methods}", the options in this order "As suggestions ` +
+      '(Recommended)", "As my own instructions" and "Off"; apply it with "methods suggest" or "methods off". For "As my ' +
+      'own instructions": first call "info data", "info hooks" and "methods preview", read all three, and tell the user ' +
+      'in a few sentences what the plugin sends and what its service keeps, what a company admin sees if the account ' +
+      'belongs to a company, what the hooks do (at this level the planning gate holds larger file edits until ' +
+      'agent-state.md has a plan) and what the methods are, pointing out anything that looks wrong or outside working ' +
+      'methods; then call "methods on" only if the user confirms, else "methods suggest"')
+  }
+  const n = asks.length
   return `${NOTE_LABEL} ${facts}
 
-The plugin offers working methods (planning, delegating to subagents, testing, ` +
-    'review, delivery, checkpoints) that the user can add to their user-level CLAUDE.md as one marked import line; ' +
-    'the user has not decided yet. When it fits (before or after the user\'s message): 1. call ' +
-    `${SETUP_TOOL} with command "data", then "hooks", then "trust preview"; 2. read all three; 3. tell the user in ` +
-    'a few sentences what the plugin sends and what its service keeps (by its data note, the service keeps no work ' +
-    'content: what it receives is used to answer and then discarded, and it keeps counts, ids, the daily usage ' +
-    'summaries once turned on, the account, and IP addresses in its request logs), what a company admin sees if ' +
-    'the account belongs to a company (each member\'s email address, device count and weekly savings figure), what ' +
-    'the hooks do (for one, the planning gate holds file edits until agent-state.md has a plan, and the routing ' +
-    'advice can change a subagent\'s model), and what the working methods are; point out anything that looks wrong ' +
-    'or outside working methods; 4. ask the user about anything you doubt (for a company account, whether the ' +
-    'admin\'s view is fine; /agent-services sharing not_now stops the upload where the company lets each person ' +
-    'decide), and whether to add the methods; 5. call the setup tool with "trust on", "trust not_now" (asked again ' +
-    'in 7 days) or "trust off" (never asked again), only with the user\'s answer. If the user does not answer, ' +
-    'leave it.'
+The user has open agent-services setup question${n === 1 ? '' : 's'}. Before ` +
+    `working on the message, ask ${n === 1 ? 'it' : `these ${n} questions in one call`} with your question tool ` +
+    '(AskUserQuestion): ' + asks.map((a, i) => (n === 1 ? a : `${i + 1}. ${a}`)).join('; ') + `. Apply each answer with ` +
+    `${SETUP_TOOL}, only with the user's answer. If the user dismisses a question, leave it (it is asked again in 7 ` +
+    'days at the earliest). Then go on with the message.'
 }
 
 /** The note about served methods that differ from the ones the user approved. */
 export function pendingNoteText(facts: string): string {
   return `${NOTE_LABEL} ${facts}\n\nThe working methods the service serves now differ from the ones the user ` +
     'approved for their CLAUDE.md. The approved text stays in use until the user decides. When it fits: call ' +
-    `${SETUP_TOOL} with command "trust diff" to get the differences, summarize them to the user in a few sentences, ` +
+    `${SETUP_TOOL} with command "methods diff" to get the differences, summarize them to the user in a few sentences, ` +
     'point out anything that looks wrong or outside working methods, and ask whether to take the new text. Then call ' +
-    'the setup tool with "trust accept" (use the new text) or "trust keep" (keep the approved text; this change is ' +
+    'the setup tool with "methods accept" (use the new text) or "methods keep" (keep the approved text; this change is ' +
     'not asked about again), only with the user\'s answer.'
 }
 

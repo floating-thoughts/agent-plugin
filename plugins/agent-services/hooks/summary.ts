@@ -1,5 +1,5 @@
 // Per-session summary line for the core's clear and session_end answers, ported one to one from
-// host/session_summary.py. It counts, in memory and per session id, the dispatches rewritten onto a cheaper
+// the Python client. It counts, in memory and per session id, the dispatches rewritten onto a cheaper
 // model, the main conversation's compactions and the denied pre_tool calls, and on clear or session_end hands back
 //
 //   agent-services this session: 3 subagents on cheaper models, 1 compaction, 2 risky commands blocked

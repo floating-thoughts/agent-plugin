@@ -1,30 +1,27 @@
-// Phase 2 wiring of modules P6 and P7 (plan 3.7, 3.8, 3.9): the status line (status.ts), the dashboard (render.ts),
+// The wiring of the status line (status.ts), the dashboard (render.ts),
 // the daily metrics (metrics.ts) and the estimate (estimate.ts), joined to the in-process core (core.ts,
 // counters.ts) and the svc channel (svc.ts, outbox.ts). Harness-neutral: nothing here touches `$`; the channel,
 // the store, the file access, the clock and the engine callbacks (status line, publish) are passed in.
 //
-// What register.ts (P8) does with it:
+// What register.ts does with it:
 //   const w = createWiring({ svc, store, fs, dataDir, outbox, prices, template, setStatus, projectsRoot, ... })
 //   const core = new Core({ transport: svcTransport(svc), store, ..., ...w.coreOptions() })
 //                                              // coreOptions: status, dashboard, metrics, counters.isLong
 //   after a main-agent turn:  await w.publish(() => publishDashboard($))     // dashboard.ts, guarded and logged
-//   the band above the prompt (R9):  createWiring({ ..., setBand: bandSetter($) }) and installBand(on) (band.ts);
+//   the band above the prompt:  createWiring({ ..., setBand: bandSetter($) }) and installBand(on) (band.ts);
 //                                    every refreshStatus hands it w.bandFacts() (cached reads only)
-//   session.start (background):  w.metricsTick()
-//   slash command (P3):  w.metricsPreview(), w.metricsOn(), w.metricsOff(), w.estimatePreview(),
-//                        w.estimateSend({ consent: true })
+//   session.start (background):  w.metricsTick(); after a turn, refreshStatus runs it again once a day
 //
 // Rules kept here (each one tested in tests/test_p67_wiring.py):
-// - Auth fail (3.9: svc.authState() is not 'ok'): the status line is only the sign-in (or locked) line; no render,
+// - Auth fail (svc.authState() is not 'ok'): the status line is only the sign-in (or locked) line; no render,
 //   no publish, no metrics or estimate request, no savings or report fetch.
 // - Every dashboard publish attempt is logged in the outbox (kind artifact_publish): the Artifact input fields as
-//   dashboard.ts passes them, the page's sha256 and size, and the outcome (3.7).
-// - The page's data slot is collect()'s output plus board_facts.ts timeline and weekly: exactly BOARD_FIELDS (3.8, R8).
+//   dashboard.ts passes them, the page's sha256 and size, and the outcome.
+// - The page's data slot is collect()'s output plus board_facts.ts timeline and weekly: exactly BOARD_FIELDS.
 // - The daily body is metrics.ts dailyBody with the savings part from the store day counters (counters.ts readDay,
-//   model ids normalized as host/metrics.py read_events does), so it equals host/metrics.py build_daily.
-// - A preview (metrics or estimate) is the channel's own preview text (svc.preview: the exact inner body a send
-//   carries, logged with preview true). The estimate is sent only with consent === true, once, and what is sent is
-//   the text of the preview the user saw.
+//   model ids normalized as the Python client's read_events does), so it equals the Python client's build_daily.
+// - Nothing is uploaded unless the savings record is on (choice.ts uploadOn), and never a day before its floor
+//   (choice.ts uploadFloor).
 import type { CoreOptions } from './core'
 import type { GateState, KV, SvcResult, Transport } from './engine_types'
 import type { Outbox } from './outbox'
@@ -33,21 +30,21 @@ import type { Facts, MetricsState, Prices, TranscriptFile } from './metrics'
 import type { DayCounters } from './counters'
 import { localDay, readDay } from './counters'
 import { hex, sha256Hex, utf8 } from './e2e'
-import { ESTIMATE_ROUTE, estimateRequest } from './estimate'
-import { BodyTooLarge, DAILY_ROUTE, dailyBody, isDay, isLong, normModel, optIn, plusDays, READ_LIMIT, scan, uploadDays, walkOrder } from './metrics'
+import { BodyTooLarge, DAILY_ROUTE, dailyBody, isDay, isLong, normModel, plusDays, READ_LIMIT, scan, uploadDays, walkOrder } from './metrics'
 import { SALT_KEY } from './records'
 import { collect, pageChanged, publishedUrlOk, render as renderPage, renderDue } from './render'
-import { DEFAULT_ON_NOTICE, savingsDue, statusText, updateCommand, updateHintDue, weeklyText } from './status'
+import { savingsDue, statusText, updateCommand, updateHintDue } from './status'
 import { counterDays, countsOf, dayCountsFromStore, dayEmpty, normalizeDay } from './day_counts'
 import { boardData, readOutboxDay, timelineOf, weeklyOf } from './board_facts'
 import { bandFacts, paused, type BandFacts, type BandKind, type BandState } from './band'
 import { readOrg } from './org'
-import { uploadAnswered, uploadFloor } from './consent'
+import { accountOf, accountSwitched, uploadFloor, uploadOn } from './choice'
 import { BossBoard } from './boss'
 import { MAIN_BOARD, type Board } from './dashboard'
 
 export { counterDays, countsOf, dayCountsFromStore, normalizeDay } from './day_counts'
 export { hookFor, svcTransport } from './transport'
+export { estimateFacts } from './estimate'
 export { bandSetter, installBand } from './band'
 
 // Store keys of this module (shared by every session; nothing secret: numbers and days only).
@@ -57,11 +54,8 @@ export const METRICS_STATE_KEY = 'metrics_state' // { previewed_day, enabled_day
 export const METRICS_LEASE_KEY = 'metrics_lease' // { holder, until }: best-effort, one uploading session
 export const ESTIMATE_KEY = 'estimate_answer' // { made_at, estimate }: the last estimate answer, for the dashboard
 export const UPDATE_HINT_KEY = 'update_hint_at' // ms of the last time the status line showed the update command
-export const SAVINGS_NOTICE_KEY = 'savings_notice_at' // ms of the one time DEFAULT_ON_NOTICE was shown
-export const WEEKLY_KEY = 'weekly_savings' // { week, start, usd }: the first cumulative savings figure of a week
 export const METRICS_LEASE_MS = 120_000
 export const REPORT_TTL_MS = 600_000
-export const ESTIMATE_PREVIEW_TTL_MS = 3_600_000 // an estimate preview older than this must be shown again
 export const PUBLISH_ATTEMPTS = ['published', 'denied', 'failed'] // dashboard.ts outcomes that made a tool call
 export const ARTIFACT_URL_RX = /https:\/\/claude\.ai\/(?:code\/)?artifact\/[A-Za-z0-9_-]+/ // as dashboard.ts URL_RX
 export const SALT_RX = /^[0-9a-f]{64}$/
@@ -80,10 +74,10 @@ export type WiringDeps = {
   store: KV
   fs: WiringFs
   dataDir: string // the same folder dashboard.ts publishes from (<data dir>)
-  prices: Prices // modules/usage/prices.json, parsed
+  prices: Prices // the shipped price table, parsed
   template: () => Promise<string | null> // <plugin>/dashboard/index.html text
   setStatus?: (text: string) => unknown // $.ui.status
-  setBand?: (state: BandState | null) => unknown // band.ts bandSetter: the band above the prompt (R9)
+  setBand?: (state: BandState | null) => unknown // band.ts bandSetter: the band above the prompt
   outbox?: Outbox | null
   clock?: () => number // ms since the epoch
   random?: (n: number) => Uint8Array
@@ -96,9 +90,6 @@ export type WiringDeps = {
 }
 
 export type TickResult = { sent: string[]; error: string | null } | { skipped: string }
-export type PreviewResult = { day: string; text: string } | { error: string }
-export type EstimatePreview = { text: string; note: string | null; estimated: Obj } | { error: string }
-export type EstimateSend = { sent: true; answer: unknown; note: string | null } | { sent: boolean; error: string }
 
 const isObj = (v: unknown): v is Obj => typeof v === 'object' && v !== null && !Array.isArray(v)
 const num = (v: unknown): number | null => (typeof v === 'number' && Number.isFinite(v) ? v : null)
@@ -130,7 +121,7 @@ const result = (r: { ok: boolean; status: number | null; body: unknown; error: s
 // ------------------------------------------------------------------ transcripts
 
 /**
- * The transcript files under the projects root (every *.jsonl at any depth, as tools/diagnostic/facts.py globs),
+ * The transcript files under the projects root (every *.jsonl at any depth, as the diagnostic tool's globs),
  * in os.walk order. A file over READ_LIMIT, or one the file access refuses, is listed with text null (metrics.ts
  * leaves it out of the facts; estimate.ts scales it by size).
  * `since` (ms): a file last changed before it is left out, as it holds no entry of a later moment (a listing without
@@ -182,28 +173,6 @@ export async function loadTranscripts(
   return walkOrder(out)
 }
 
-// ------------------------------------------------------------------ the estimate answer, for the dashboard
-
-/** The local estimate record the dashboard reads (render.ts estimatePart), from a DiagEstimate answer. */
-export function estimateFacts(answer: unknown, madeAt: string): Obj | null {
-  if (!isObj(answer)) return null
-  const total = isObj(answer.total) ? answer.total : {}
-  const usd = isObj(total.usd) ? total.usd : {}
-  const pct = isObj(answer.pct) ? answer.pct : {}
-  const window = isObj(answer.window) ? answer.window : {}
-  return {
-    made_at: madeAt,
-    estimate: {
-      low_usd: num(usd.low),
-      high_usd: num(usd.high),
-      pct_low: num(pct.low),
-      pct_high: num(pct.high),
-      period_days: 30, // the answer is per month (api_usd_month)
-      basis_days: num(window.days),
-    },
-  }
-}
-
 // ------------------------------------------------------------------ the wiring
 
 export class Wiring {
@@ -214,9 +183,9 @@ export class Wiring {
   private lastRender: number | null = null // unix seconds
   private rendering = false
   private fetching = new Set<string>()
-  private estimateHeld: { text: string; note: string | null; at: number } | null = null
+  private tickedDay: string | null = null // the local day the daily upload last ran in this session
 
-  /** O5: the company admin's board (boss.ts), rendered after the person's own board. */
+  /** the company admin's board (boss.ts), rendered after the person's own board. */
   readonly boss: BossBoard
 
   /** The plugin's version as the bodies carry it (metrics.ts releaseVersion), for the slash command's estimate. */
@@ -261,7 +230,7 @@ export class Wiring {
     while (this.pending.size) await Promise.all([...this.pending])
   }
 
-  /** 3.9: signed in and not blocked (re-read from the store at most every 5 s by the channel). */
+  /** Signed in and not blocked (re-read from the store at most every 5 s by the channel). */
   async authState(): Promise<'ok' | 'login' | 'locked' | 'paused'> {
     try {
       const st = await this.d.svc.authState()
@@ -283,8 +252,9 @@ export class Wiring {
     }
   }
 
+  /** The daily upload is on: the savings record (choice.ts uploadOn) and the metrics routes' transport switch. */
   private async metricsOnNow(): Promise<boolean> {
-    return (await this.settings()).services.metrics === true
+    return (await uploadOn(this.d.store)) && (await this.settings()).services.metrics === true
   }
 
   /** What the core takes: CoreOptions status, dashboard, metrics and the counters' long-prompt rule. */
@@ -301,7 +271,7 @@ export class Wiring {
     }
   }
 
-  /** The prices' long-prompt rule on the normalized model id, as host/metrics.py _long sees it. */
+  /** The prices' long-prompt rule on the normalized model id, as the Python client's _long sees it. */
   isLong(model: string, prompt: number): boolean {
     try {
       return isLong(normModel(model), prompt, this.d.prices ?? {})
@@ -342,7 +312,7 @@ export class Wiring {
     return this.cached(SAVINGS_CACHE_KEY, '/metrics/savings', 0, fetch && on && ttlDue)
   }
 
-  /** The savings tool's answer for the core (host/metrics.py Metrics.savings). */
+  /** The savings tool's answer for the core (the Python client's Metrics.savings). */
   async savings(): Promise<SvcResult> {
     if (!(await this.metricsOnNow())) return { ok: false, status: null, body: null, error: 'service_off' }
     const r = await this.d.svc.call('GET', '/metrics/savings', undefined, { kind: 'daily', hook: 'tool' })
@@ -350,7 +320,7 @@ export class Wiring {
     return result(r)
   }
 
-  // ---------------- the status line (3.8, 3.9)
+  // ---------------- the status line
 
   /** Today's counts from the store counters (local day). */
   async todayCounts(): Promise<Record<string, number>> {
@@ -390,6 +360,7 @@ export class Wiring {
    *  `first` runs right after the first line is shown, so a hanging fetch never delays it; when it shows a line
    *  of its own (answers true), the fetched figure does not overwrite that line in this refresh. */
   async refreshStatus(first?: () => Promise<boolean>): Promise<string> {
+    this.dailyTick()
     if (!(await this.authOk())) {
       const text = await this.line(null, null)
       this.show(text)
@@ -417,7 +388,7 @@ export class Wiring {
     return text
   }
 
-  // ---------------- the band above the prompt (R9, band.ts)
+  // ---------------- the band above the prompt (band.ts)
 
   /**
    * The band's facts: board_facts.ts timelineOf and weeklyOf over cached reads only (the savings figure as the
@@ -438,7 +409,7 @@ export class Wiring {
   }
 
   /**
-   * The band's state (owner decision 2026-11-01: the band always shows something): the sign-in, lock and company
+   * The band's state (the band always shows something): the sign-in, lock and company
    * pause as the status line takes them, then a closed gate, then the facts (bandFacts, plus the status line's
    * total figure for when there is no 7-day one), else 'wait' or, with the savings record off, 'off'.
    */
@@ -477,38 +448,16 @@ export class Wiring {
     }
   }
 
-  // ---------------- the one-time and weekly lines at session start (log line and toast)
-
-  /** The lines to show at session start: DEFAULT_ON_NOTICE once, then the weekly summary. Nothing while auth fails. */
-  async startNotices(): Promise<string[]> {
-    if (!(await this.authOk()) || !(await this.metricsOnNow()) || !(await uploadAnswered(this.d.store))) return []
-    const out: string[] = []
-    if (num(await get(this.d.store, SAVINGS_NOTICE_KEY)) === null && (await put(this.d.store, SAVINGS_NOTICE_KEY, this.now()))) {
-      out.push(DEFAULT_ON_NOTICE)
-    }
-    const weekly = await this.weeklySummary()
-    if (weekly) out.push(weekly)
-    return out
+  /** A session left open over midnight uploads the new day too: metricsTick at most once per local day here. */
+  private dailyTick(): void {
+    const day = this.today()
+    if (this.tickedDay === day) return
+    this.tickedDay = day
+    void this.track(this.metricsTick())
   }
 
-  /**
-   * The first session of an ISO week (UTC) with a savings figure: "Last week agent-services saved you $X." from the
-   * cumulative figure now less the one stored in an earlier week ("So far ..." the first time). Once per week; null
-   * when there is nothing to say, auth fails or the upload is off.
-   */
-  async weeklySummary(): Promise<string | null> {
-    if (!(await this.authOk()) || !(await this.metricsOnNow())) return null
-    const prev = await get(this.d.store, WEEKLY_KEY)
-    if (weeklyText(prev, this.now(), 0).mark === null) return null // already done this week
-    const r = await this.d.svc.call('GET', '/metrics/savings', undefined, { kind: 'daily', hook: 'background' })
-    if (!r.ok || !isObj(r.body)) return null
-    await put(this.d.store, SAVINGS_CACHE_KEY, { tried_at: this.now(), body: r.body })
-    const w = weeklyText(prev, this.now(), r.body.usd)
-    if (!w.mark || !(await put(this.d.store, WEEKLY_KEY, w.mark))) return null
-    return w.text
-  }
 
-  // ---------------- the dashboard (3.8)
+  // ---------------- the dashboard
 
   private async readState(path = this.statePath): Promise<Obj> {
     const out: Obj = { changed_at: null, url: null, published_at: null, denied: false }
@@ -549,6 +498,7 @@ export class Wiring {
     } catch {
       status = null
     }
+    settings.services = { ...settings.services, metrics: await this.metricsOnNow() } // the board says what the record says
     const est = await get(this.d.store, ESTIMATE_KEY)
     let served: Obj | null = null
     try {
@@ -568,7 +518,7 @@ export class Wiring {
       estimate: isObj(est) ? est : null,
       servedFetch: served,
     })
-    // O3: a person in an org (any savings choice, "each" included) is told on the board that the admin sees the figure
+    // a person in an org (any savings choice, "each" included) is told on the board that the admin sees the figure
     const org = await readOrg(this.d.store)
     return boardData(base, { outboxLines: await this.outboxToday(), todayCounts: await this.todayCounts(), savings, report, status: { ...(status ?? {}), org } })
   }
@@ -616,8 +566,8 @@ export class Wiring {
   }
 
   /**
-   * One guarded dashboard publish: `run` is dashboard.ts publishDashboard($). Not run at all in auth fail (3.9).
-   * Every attempt that reached the Artifact tool is logged in the outbox (3.7) with the input fields dashboard.ts
+   * One guarded dashboard publish: `run` is dashboard.ts publishDashboard($). Not run at all in auth fail.
+   * Every attempt that reached the Artifact tool is logged in the outbox with the input fields dashboard.ts
    * passed (file_path, and url or icon), the page's sha256 and size, the outcome, and a deny's reason. `run` gets
    * the `note` that takes that reason.
    */
@@ -651,7 +601,7 @@ export class Wiring {
     return outcome
   }
 
-  // ---------------- daily metrics (3.8, host/metrics.py Metrics)
+  // ---------------- daily metrics (the Python client's Metrics)
 
   private today(): string {
     return localDay(this.now())
@@ -666,7 +616,8 @@ export class Wiring {
   }
 
   private async saveState(changes: Partial<MetricsState>): Promise<void> {
-    await put(this.d.store, METRICS_STATE_KEY, { ...(await this.metricsState()), ...changes })
+    const account = await accountOf(this.d.store) // the account the upload state is for (choice.ts accountSwitched)
+    await put(this.d.store, METRICS_STATE_KEY, { ...(await this.metricsState()), ...changes, ...(account ? { account } : {}) })
   }
 
   /** The project-hash salt, shared with records.ts (store key salt, 64 hex). */
@@ -681,7 +632,7 @@ export class Wiring {
     return parse(await get(this.d.store, SALT_KEY)) ?? raw // two sessions making one at once: the stored one wins
   }
 
-  /** The transcript facts (tools/diagnostic/facts.py scan) of the projects root. */
+  /** The transcript facts (the diagnostic tool's scan) of the projects root. */
   async facts(bound: { since?: number; maxBytes?: number } = {}): Promise<Facts> {
     return scan(await loadTranscripts(this.d.fs, this.d.projectsRoot, 6, bound), this.d.prices ?? {})
   }
@@ -700,7 +651,7 @@ export class Wiring {
     return normalizeDay(await readDay(this.d.store, day))
   }
 
-  /** The POST /metrics/daily body of one local day (host/metrics.py build_daily); throws BodyTooLarge. */
+  /** The POST /metrics/daily body of one local day (the Python client's build_daily); throws BodyTooLarge. */
   async dailyBody(day: string, facts?: Facts): Promise<Obj> {
     let kinds: Record<string, string> | null = null
     try {
@@ -716,38 +667,6 @@ export class Wiring {
       kinds,
       clientVersion: this.d.clientVersion,
     })
-  }
-
-  /** Metrics.preview: the exact text an upload of `day` (default yesterday) carries, logged as a preview. */
-  async metricsPreview(day?: string | null): Promise<PreviewResult> {
-    if (!(await this.authOk())) return { error: 'auth_failed' }
-    const d = day ? String(day) : plusDays(this.today(), -1)
-    if (!isDay(d)) return { error: 'bad_day' }
-    let body: Obj
-    try {
-      body = await this.dailyBody(d)
-    } catch (e) {
-      return { error: e instanceof BodyTooLarge ? 'too_large' : 'failed' }
-    }
-    const text = this.d.svc.preview('POST', DAILY_ROUTE, body)
-    if (text === null) return { error: 'invalid_body' }
-    await this.saveState({ previewed_day: d })
-    return { day: d, text }
-  }
-
-  /** Metrics.opt_in: only after a preview. */
-  async metricsOn(): Promise<{ ok: boolean; error: string | null }> {
-    if (!(await this.authOk())) return { ok: false, error: 'auth_failed' }
-    const r = optIn(await this.metricsState(), this.today())
-    if (!r.ok) return { ok: false, error: r.error }
-    if (!(await this.d.svc.setService('metrics', true))) return { ok: false, error: 'store_failed' }
-    await this.saveState({ enabled_day: r.state.enabled_day })
-    return { ok: true, error: null }
-  }
-
-  async metricsOff(): Promise<{ ok: boolean; error: string | null }> {
-    const ok = await this.d.svc.setService('metrics', false)
-    return { ok, error: ok ? null : 'store_failed' }
   }
 
   private async lease(): Promise<boolean> {
@@ -770,8 +689,10 @@ export class Wiring {
     }
   }
 
-  /** Metrics.tick (background, at session start): upload every due active day up to yesterday, oldest first. */
+  /** Metrics.tick (background, at session start and once a day after): upload every due active day up to yesterday,
+   * oldest first. */
   async metricsTick(): Promise<TickResult> {
+    this.tickedDay = this.today()
     if (!(await this.authOk())) return { skipped: 'auth_failed' }
     try {
       const g = this.d.svc.gateState()
@@ -780,12 +701,13 @@ export class Wiring {
       return { skipped: 'inactive' }
     }
     const settings = await this.settings()
+    if (!(await uploadOn(this.d.store))) return { sent: [], error: 'not_answered' } // the record first: no upload, no back-fill
     if (settings.services.metrics !== true) return { sent: [], error: 'service_off' }
     if (settings.offline) return { sent: [], error: 'offline' }
-    if (!(await uploadAnswered(this.d.store))) return { sent: [], error: 'not_answered' } // consent first: no upload, no back-fill
     if (!(await this.lease())) return { skipped: 'busy' }
     try {
-      const saved = await this.metricsState()
+      // another account's upload state never decides what this account sends
+      const saved = (await accountSwitched(this.d.store)) ? { ...(await this.metricsState()), last_uploaded_day: null } : await this.metricsState()
       const today = this.today()
       const yesterday = plusDays(today, -1)
       const start = saved.last_uploaded_day ? plusDays(saved.last_uploaded_day, 1) : plusDays(saved.enabled_day || today, -30)
@@ -832,35 +754,6 @@ export class Wiring {
     }
   }
 
-  // ---------------- the estimate (3.8, host/diagnostic.py)
-
-  /** estimate preview: the exact text a send carries (logged as a preview), and what was scaled by size. */
-  async estimatePreview(): Promise<EstimatePreview> {
-    if (!(await this.authOk())) return { error: 'auth_failed' }
-    const prep = estimateRequest(await this.facts(), this.d.clientVersion)
-    if ('error' in prep) return { error: prep.error }
-    const text = this.d.svc.preview('POST', ESTIMATE_ROUTE, prep.body)
-    if (text === null) return { error: 'invalid_body' }
-    this.estimateHeld = { text, note: prep.note, at: this.now() }
-    return { text, note: prep.note, estimated: prep.estimated }
-  }
-
-  /**
-   * estimate send: only with consent === true, only after a preview (within ESTIMATE_PREVIEW_TTL_MS), and once per
-   * preview. What is sent is the previewed text itself.
-   */
-  async estimateSend(opts: { consent?: unknown } = {}): Promise<EstimateSend> {
-    if (opts?.consent !== true) return { sent: false, error: 'consent_required' }
-    if (!(await this.authOk())) return { sent: false, error: 'auth_failed' }
-    const held = this.estimateHeld
-    if (!held || this.now() - held.at > ESTIMATE_PREVIEW_TTL_MS) return { sent: false, error: 'preview_first' }
-    this.estimateHeld = null
-    const r = await this.d.svc.call('POST', ESTIMATE_ROUTE, JSON.parse(held.text), { kind: 'daily', consent: true, hook: 'tool' })
-    if (!r.ok) return { sent: true, error: r.error || 'failed' }
-    const rec = estimateFacts(r.body, new Date(this.now()).toISOString())
-    if (rec) await put(this.d.store, ESTIMATE_KEY, rec)
-    return { sent: true, answer: r.body, note: held.note }
-  }
 }
 
 export const createWiring = (deps: WiringDeps): Wiring => new Wiring(deps)

@@ -1,10 +1,10 @@
-// The savings day counters, the port of host/savings_events.py onto `$.store` (plan 1.1, 3.8 "Savings counters").
+// The savings day counters of the Python client's savings log, ported onto `$.store`.
 //
 // `$.store` has no atomic read-modify-write and is shared by every session, so no key is ever written by two
 // sessions: each session keeps its own record per local day under COUNTER_PREFIX + '<day>:<key>' (key = the first
 // 32 hex of sha256(session id), as savings_events._key) and rewrites it whole; readers merge every record of a day
 // (readDay). A record holds what the events log held for that session and day, already folded the way
-// host/metrics.py _counters folds the log: route rows per (model, long prompt), index rows per (model, file
+// the Python client's _counters folds the log: route rows per (model, long prompt), index rows per (model, file
 // tokens), and compaction rows per ref with their start and steps. The open compaction of a session (savings
 // sessions state) sits under OPEN_PREFIX + key. Only counts, model names and random refs are stored: never event
 // text, paths or session ids (the store is readable by other plugins). Records older than KEEP_DAYS are swept.
@@ -15,7 +15,7 @@ import type { Clock, KV, Random } from './engine_types'
 export const COUNTER_PREFIX = 'cnt:'
 export const OPEN_PREFIX = 'cnt_open:'
 export const KEEP_DAYS = 90
-// the contract's array caps (host/metrics.py): rows past them are left out rather than failing the day
+// the contract's array caps (the Python client): rows past them are left out rather than failing the day
 export const MAX_ROUTE_ROWS = 100
 export const MAX_INDEX_ROWS = 500
 export const MAX_COMPACT_ROWS = 50
@@ -102,8 +102,8 @@ function addStep(row: CompactRow, context: number, model: string): void {
 export type CountersOptions = {
   clock: Clock
   random: Random
-  dayOf?: (ms: number) => string // local day by default, as host/metrics.py read_events
-  isLong?: (model: string, prompt: number) => boolean // the prices' long_prompt rule (P7 passes it); none by default
+  dayOf?: (ms: number) => string // local day by default, as the Python client's read_events
+  isLong?: (model: string, prompt: number) => boolean // the prices' long_prompt rule (wiring.ts passes it); none by default
 }
 
 // One per core (one per process); every method writes only this session's own keys.
@@ -271,7 +271,7 @@ export class Counters {
 
 // ---------------------------------------------------------------- reading (any session, any process)
 
-// Every session's record of `day`, merged, in host/metrics.py _counters shape and order.
+// Every session's record of `day`, merged, in the Python client's _counters shape and order.
 export async function readDay(store: KV, day: string): Promise<DayCounters> {
   const prefix = COUNTER_PREFIX + day + ':'
   const route = new Map<string, RouteRow>()

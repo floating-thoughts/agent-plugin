@@ -1,32 +1,36 @@
-// The /agent-services slash command (plan 3.4, 3.6, 3.9): a port of the host/services.py CLI behind
-// plugin/commands/agent-services.md, answered by the hooks module itself.
+// The /agent-services slash command, answered by the hooks module itself.
 //
 // - $.command.register declares the command; a command.run hook answers it with { text } only: no model, no Bash,
 //   no Python and no `context` field, so neither the sign-in code nor an answer enters the model's context.
-// - The sign-in code is never taken from the command line: typed command arguments are written to prompt history
-//   (M0a). `login` asks for the email (unless given; an email is not a secret), mails the code, then asks for the
-//   code in the engine's own question dialog ($.ui.ask). `code` finishes a sign-in started in any session within
-//   10 minutes, again asking in the dialog; an argument that is not an email is refused, never used.
-// - While auth has failed (3.9) only status, login, code and logout work; every other subcommand answers the one
-//   sign-in line and sends nothing.
+// - Thirteen words: status, login, logout, setup, sharing, savings, methods, update, offline, estimate, info, remove,
+//   company (USAGE). `code` stays as a hidden sign-in fallback and `served` as a hidden owner tool. The 0.5.0
+//   spellings (data, hooks, outbox, trust, savings <part>, dashboard) still work for one version: they answer as the
+//   new word does, plus one line that names it (renameOf).
+// - The sign-in code is never taken from the command line: typed command arguments are written to prompt history.
+//   `login` asks for the email (unless given; an email is not a secret) and mails the code, which the person pastes
+//   as the next message (pastedCode) or types in the dialog of `code`; an argument that is not an email is refused,
+//   never used.
+// - While signed out only status, login, code, logout, update, info, remove and `methods off` work; every other
+//   subcommand answers the one sign-in line and sends nothing.
 // - The shipped build has no staging subcommand to set an endpoint: the endpoint and keys are the svc channel's
 //   built-in DEFAULT_CONFIG, and nothing here reads an endpoint or key from the store.
 // - Nothing is written to $.ui.log; every answer goes through redact() (redact.ts).
 // - estimate keeps preview-then-send: `estimate` (or `estimate preview`) shows the exact body and sends nothing;
-//   `estimate send` sends exactly the body previewed in this session (kept in memory for 30 minutes), once.
-// - status shows the auto-update setup state, read only (a port of host/auto_update.py; the plugin never writes the
-//   user's settings), and the terminal update line where the engine has no $.process (plan 3.8).
-// - One plain choice, the savings record (board, weekly email, daily upload together; SHARING_QUESTION), is asked at
-//   most once per session: by the model at the first prompt (onboarding note and the setup tool), or in the engine's
-//   dialog right after a sign-in or at status. "Not now" holds for 7 days. The board consent alone is asked only
-//   when the record is on but the board was snoozed on its own. status shows where it stands.
+//   `estimate send` sends exactly the body previewed in this session (kept in memory for 30 minutes), once, and keeps
+//   the answer for the savings page.
+// - status is read only: it never asks; it says how many setup questions wait. It also shows the auto-update setup
+//   state (the plugin never writes the user's settings) and the terminal update line where the engine has no
+//   $.process.
+// - The setup questions (the savings record, choice.ts; the methods level, methods.ts) are asked together: by
+//   `setup` in the engine's dialog (also right after a sign-in through the dialog), or by the model at a prompt
+//   (promptNote) where someone can answer (choice.ts canAsk). An unanswered question is asked at most once per 7 days
+//   across all sessions (the shared "last asked" time); `sharing off` is never asked again.
 //
 // The Command class is harness-neutral (its deps are injected); the functions at the end are the Claude Code
 // adapter over `$`.
 import type { EngineInterface } from 'claude-code'
-import { estimateRequest } from './estimate'
-import { BodyTooLarge, DAILY_ROUTE, optIn, READ_LIMIT } from './metrics'
-import type { MetricsState } from './metrics'
+import { estimateFacts, estimateRequest } from './estimate'
+import { BodyTooLarge, DAILY_ROUTE, READ_LIMIT } from './metrics'
 import { plusDays } from './pyfmt'
 import { Scanner, walkOrder } from './transcripts'
 import type { Facts, Prices, TranscriptFile } from './transcripts'
@@ -34,39 +38,25 @@ import type { Outbox } from './outbox'
 import { redact } from './redact'
 import { updateCommand } from './status'
 import { applyUpdate, probeProcess, takeUpdateNote, updatesLine } from './update'
-import { KEYS, safeGet, safeSet } from './store'
+import { safeSet } from './store'
 import type { KV } from './store'
 import { gateNotice, LOCKED_LINE, NOTICE_TEXT, PAUSED_LINE, PLAN_NOTICE, SERVED_CHANNELS, SERVED_ROLES } from './svc'
 import type { Result, Svc } from './svc'
-import { askConsent, claimAsk, CONSENT_KEY, CONSENT_SNOOZE_MS, consentState, dashboardUrl, readConsent, sharingState,
-  uploadAnswered } from './consent'
+import { ASKED_FILE, askDue, askedFrom, canAsk, dashboardUrl, pageOpen, recordState, savingsOpen, uploadOn,
+  writeEntry } from './choice'
 import { dataDir, engineDirs, envOf, readTextOf } from './engine_env'
 import { companyCommand } from './boss'
-import { hasTrust, TRUST_KEY, type TrustFile, trustDue, unbalancedTrust, withoutTrust, withTrust } from './trust'
-import { approveMethods, checkTrust, importLine, methodsDiff, methodsNoted, methodsNotes, previewMethods, settlePending,
-  syncMethodsNow } from './methods'
-import { framing, lineDiff, pendingNoteText, trustNoteText, updateNoteText } from './review'
+import { hasTrust, type TrustFile, unbalancedTrust, withoutTrust, withTrust } from './trust'
+import { approveMethods, importLine, LEVEL_KEY, type Level, levelOf, methodsDiff, methodsNoted, methodsNotes,
+  previewMethods, readLevel, settlePending, syncMethodsNow } from './methods'
+import { framing, lineDiff, NOTE_LABEL, pendingNoteText, setupNoteText, updateNoteText } from './review'
 import { ORG_PAUSED_LINE, ORG_SAVINGS_TEXT, ORG_SET_TEXT, orgChoice, orgNotice, sharingQuestion } from './org'
 import { hooksText } from './hooks_list'
 import { removeAll, removedMarker, resetRemoved, type RemoveDeps } from './remove'
 
 export { denyReason, spawnLine } from './hooks_list'
 export { isRemoved } from './remove'
-
-export {
-  askConsent,
-  CONSENT_HEADER,
-  CONSENT_KEY,
-  CONSENT_OPTIONS,
-  CONSENT_QUESTION,
-  CONSENT_SNOOZE_MS,
-  consentState,
-  dashboardUrl,
-  readConsent,
-  resetConsentAsk,
-  sharingState,
-} from './consent'
-export type { Consent, ConsentState } from './consent'
+export { dashboardUrl, recordState } from './choice'
 export { claudeHashOf, dataDir, engineClaudeHash, engineDirs } from './engine_env'
 
 // ------------------------------------------------------------------ constants
@@ -77,75 +67,96 @@ export const COMMAND_SPEC = {
   name: COMMAND_NAME,
   description: 'Sign in to agent-services, show its status, or sign out',
   argumentHint:
-    '[status | login [<email>] | code | logout | sharing [on | not_now | preview] | savings [preview | on | off | ' +
-    'status | mail on | mail off] | ' +
-    'estimate [preview | send] | served [pin <role> <version> | unpin <role> | channel <name>] | offline on|off | ' +
-    'setup | trust [on | off | not_now | preview | status | diff | accept | keep] | update | data | hooks | remove | ' +
-    'outbox [<day>]]',
+    '[status | login [<email>] | logout | setup | sharing [on | off | not_now | preview | page on|off | mail on|off] | ' +
+    'savings | methods [off | suggest | on | preview | diff | accept | keep] | update | offline on|off | ' +
+    'estimate [preview | send] | info [data | hooks | log [<day>]] | remove | company [mail on|off]]',
 } as const
 
-/** The subcommands that work while auth has failed (plan 3.9 item 4). */
-export const AUTH_FAIL_COMMANDS = ['status', 'login', 'code', 'logout']
+// Every word the command answers: the thirteen of USAGE, then the hidden `code` (sign-in fallback) and `served`.
+export const KNOWN_COMMANDS = ['status', 'login', 'logout', 'setup', 'sharing', 'savings', 'methods', 'update', 'offline',
+  'estimate', 'info', 'remove', 'company', 'code', 'served']
+/** The subcommands that work while signed out (`methods` alone and `methods off` too, see dispatch). */
+export const AUTH_FAIL_COMMANDS = ['status', 'login', 'code', 'logout', 'update', 'info', 'remove']
 export const ASK_HEADER = 'Sign-in'
 export const EMAIL_QUESTION = 'Which email address is your agent-services account under?'
-export const EMAIL_CANCEL = ['Cancel sign-in', 'Not now']
+export const EMAIL_CANCEL = ['Cancel sign-in', 'Not now'] // the engine's dialog needs 2-4 options
 export const CODE_CANCEL = ['Enter it later', 'Cancel sign-in']
 export const ESTIMATE_PREVIEW_MS = 30 * 60000 // a preview stays sendable this long, in this session only
 export const STATUS_HELLO_MS = 4000 // status waits this long at most for a hello
 export const OUTBOX_SHOW = 10 // outbox lines shown
 export const OUTBOX_LINE_CHARS = 300
-export const METRICS_STATE_KEY = 'metrics_state' // { previewed_day, enabled_day, last_uploaded_day } (host/metrics.py state)
+export const ESTIMATE_KEY = 'estimate_answer' // { made_at, estimate }: the last estimate answer (wiring.ts reads it)
 
-export const SAVINGS_PROMPT_KEY = 'savings_prompt' // { answer: 'not_now', at }: the savings question's "Not now"
-// The one plain choice (2026-10-31): the savings record is the board (a private Artifact),
-// the weekly email and the daily numbers-only upload together. One answer sets all three (store key KEYS.sharing);
-// each part keeps its own subcommand for finer control (savings off, savings mail off, dashboard not_now). "Not now"
-// is asked again after CONSENT_SNOOZE_MS.
+// The one savings record: the private page, the weekly email and the daily numbers-only upload together (choice.ts).
+// One answer sets all three; the page and the email keep their own subcommands (sharing page|mail on|off).
 export const SHARING_QUESTION =
   'Keep a record of what agent-services saves you? It shows your savings on a private page in your claude.ai ' +
   'account (only you can see it), emails you a weekly total, and uploads a small daily usage summary (token ' +
   'counts and costs per model, counts per task type and hashed project, savings; never your prompts, file ' +
   'contents, paths or code). Nothing of it is uploaded before you answer.'
-export const SHARING_OPTIONS = ['Turn on (Recommended)', 'Not now', 'Show me what is sent']
+export const SHARING_OPTIONS = ['Turn on (Recommended)', 'Not now', 'Never', 'Show me what is sent']
 export const SHARING_HEADER = 'Savings'
-// The tool the model calls with the user's answer to the first-prompt setup question (onboarding below); it runs the
-// same subcommands as the slash command, limited to these (the first three answer the one question).
+// Where a company turned the daily upload on for everyone: the private page stays the person's own question.
+export const PAGE_QUESTION = 'Your company turned the daily usage upload on. Show your savings on a private page in ' +
+  'your claude.ai account too (only you can see it)?'
+export const PAGE_OPTIONS = ['Publish it', 'Not now', 'Never']
+export const METHODS_QUESTION = 'agent-services serves working methods (planning, delegating to subagents, testing, ' +
+  'review, delivery, checkpoints). How should Claude use them?'
+export const METHODS_OPTIONS = ['As suggestions (Recommended)', 'As my own instructions', 'Off']
+export const METHODS_HEADER = 'Methods'
+export type Question = 'savings' | 'page' | 'methods'
+export const QUESTION_COMMANDS: Readonly<Record<Question, string>> = {
+  savings: `${COMMAND} sharing on, sharing not_now or sharing off`,
+  page: `${COMMAND} sharing page on or sharing page off`,
+  methods: `${COMMAND} methods suggest, methods on (after methods preview) or methods off`,
+}
+export const METHODS_LINE: Readonly<Record<string, string>> = {
+  suggest: 'Working methods: suggestions (the default). The served methods come with your prompts as agent-services ' +
+    `suggestions, and the planning gate only reminds. ${COMMAND} methods on makes them your own instructions (read ` +
+    `${COMMAND} methods preview first); ${COMMAND} methods off turns them off.`,
+  on: 'Working methods: your own instructions. Your CLAUDE.md loads the text you approved, and the planning gate holds ' +
+    `larger file edits until agent-state.md has a plan. ${COMMAND} methods suggest or ${COMMAND} methods off changes it.`,
+  off: `Working methods: off. Nothing of them reaches Claude and the planning gate does nothing. ${COMMAND} methods ` +
+    'suggest turns them back on.',
+}
+// The tool the model calls with the user's answers to the setup questions (promptNote); it runs the same subcommands
+// as the slash command, limited to these. The 0.5.0 setup words still work for one version (SETUP_ALIASES).
 export const SETUP_COMMANDS = [
   'sharing on',
   'sharing not_now',
+  'sharing off',
   'sharing preview',
-  'savings preview',
-  'savings on',
-  'savings not_now',
-  'dashboard allow',
-  'dashboard not_now',
-  'trust on',
-  'trust not_now',
-  'trust off',
-  'trust preview',
-  'trust diff',
-  'trust accept',
-  'trust keep',
+  'methods suggest',
+  'methods on',
+  'methods off',
+  'methods preview',
+  'methods diff',
+  'methods accept',
+  'methods keep',
   'update',
-  'data',
-  'hooks',
+  'info data',
+  'info hooks',
 ]
+export const SETUP_ALIASES = ['savings preview', 'savings on', 'savings not_now', 'dashboard allow', 'dashboard not_now',
+  'trust on', 'trust not_now', 'trust off', 'trust preview', 'trust diff', 'trust accept', 'trust keep', 'data', 'hooks']
 export const SETUP_SPEC = {
   name: 'setup',
   description:
-    "Apply the user's answer to the agent-services setup question. \"sharing on\" turns the savings record on: a " +
-    "private Artifact page on the user's own claude.ai account (only they see it unless they share it), a weekly " +
-    'savings email, and one small daily usage summary (token counts and costs per model, counts per task type and ' +
-    'hashed project, savings; no prompt text, file contents or paths). "sharing not_now" turns all three off; ' +
-    '"sharing preview" shows what one upload sends and changes nothing. "data" returns the plugin\'s data note: ' +
-    'every request it sends and when, what the service keeps and for how long, what a company admin sees, the ' +
-    'local files, and what can be turned off. "hooks" lists every hook the plugin registers and what it does. The ' +
-    'other commands change one part only. "trust preview" returns the full text of the working methods; "trust ' +
-    'on" adds one marked section to the user\'s CLAUDE.md that loads that text, "trust not_now" leaves it out for 7 ' +
-    'days, "trust off" leaves it out for good. "trust diff" shows how the served methods differ from the approved ' +
-    'ones; "trust accept" takes the new text, "trust keep" keeps the approved one. "update" updates the plugin to ' +
-    'the newest listed version. "data" and "hooks" change nothing. Only call it with an answer the user gave, ' +
-    'except "data", "hooks", "sharing preview" and "trust preview", which only read.',
+    "Apply the user's answer to an agent-services setup question, or read what the plugin does. \"sharing on\" turns " +
+    "the savings record on: a private Artifact page on the user's own claude.ai account (only they see it unless " +
+    'they share it), a weekly savings email, and one small daily usage summary (token counts and costs per model, ' +
+    'counts per task type and hashed project, savings; no prompt text, file contents or paths). "sharing not_now" ' +
+    'leaves it off and asks again in 7 days at the earliest; "sharing off" leaves it off for good; "sharing preview" ' +
+    'shows what one upload sends and changes nothing. "methods suggest" (the default) gives Claude the served working ' +
+    'methods (planning, delegating to subagents, testing, review, delivery, checkpoints) as agent-services ' +
+    'suggestions; "methods on" makes them the user\'s own instructions through one marked section in the user\'s ' +
+    'CLAUDE.md and lets the planning gate hold larger file edits until there is a plan (read "methods preview" with ' +
+    'the user first); "methods off" turns them off. "methods diff" shows how changed methods differ from the approved ' +
+    'ones; "methods accept" takes the new text, "methods keep" keeps the approved one. "update" updates the plugin to ' +
+    'the newest listed version. "info data" returns the plugin\'s data note (every request it sends and when, what ' +
+    'the service keeps and for how long, what a company admin sees, the local files, and what can be turned off); ' +
+    '"info hooks" lists every hook the plugin registers and what it does. Only call it with an answer the user gave, ' +
+    'except "info data", "info hooks", "sharing preview", "methods preview" and "methods diff", which only read.',
   inputSchema: {
     type: 'object',
     properties: { command: { type: 'string', enum: SETUP_COMMANDS } },
@@ -155,7 +166,7 @@ export const SETUP_SPEC = {
   isDeferred: false,
 } as const
 
-// host/auto_update.py
+// auto-update (read only)
 export const MARKETPLACE = 'agent-plugin'
 export const AUTO_UPDATE_OFF_VARS = ['DISABLE_UPDATES', 'DISABLE_AUTOUPDATER', 'CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC']
 export const AUTO_UPDATE_FORCE_VAR = 'FORCE_AUTOUPDATE_PLUGINS'
@@ -170,7 +181,7 @@ export const AUTO_UPDATE_SOURCES: readonly (readonly [string, string])[] = [
   ['user', 'user'],
 ]
 
-// host/services.py estimate_answer and ESTIMATE_DETAIL
+// the Python client's estimate_answer and ESTIMATE_DETAIL
 export const ESTIMATE_LEVERS = ['routing', 'compaction', 'index'] as const
 export const LEVER_TEXT: Record<string, string> = {
   routing: 'routing (sending lighter work to a cheaper model)',
@@ -217,10 +228,46 @@ export const ERROR_TEXT: Record<string, string> = {
 }
 
 export const USAGE =
-  `Usage: ${COMMAND} [status | login [<email>] | code | logout | savings [preview | on | off | not_now | status | ` +
-  'mail on | mail off] | sharing [on | not_now | preview] | dashboard [allow | not_now] | estimate [preview | send] | served [status | ' +
-  'pin <role> <version> | unpin <role> | channel <name>] | offline on|off | setup | trust [on | off | not_now | ' +
-  'preview | status | diff | accept | keep] | update | data | hooks | remove | outbox [<day>]]'
+  `Usage: ${COMMAND} [status | login [<email>] | logout | setup | sharing [on | off | not_now | preview | page on|off | ` +
+  'mail on|off] | savings | methods [off | suggest | on | preview | diff | accept | keep] | update | offline on|off | ' +
+  'estimate [preview | send] | info [data | hooks | log [<day>]] | remove | company [mail on|off]]'
+
+// The 0.5.0 spellings, kept for one version: [old words, new words] (a trailing '*' passes the rest on).
+export const RENAMED: readonly (readonly [string, string])[] = [
+  ['data', 'info data'],
+  ['hooks', 'info hooks'],
+  ['outbox *', 'info log *'],
+  ['trust', 'methods'],
+  ['trust status', 'methods'],
+  ['trust not_now', 'methods suggest'],
+  ['trust *', 'methods *'],
+  ['savings preview', 'sharing preview'],
+  ['savings on', 'sharing on'],
+  ['savings off', 'sharing off'],
+  ['savings not_now', 'sharing not_now'],
+  ['savings status', 'status'],
+  ['savings mail *', 'sharing mail *'],
+  ['dashboard', 'status'],
+  ['dashboard allow', 'sharing page on'],
+  ['dashboard not_now', 'sharing page off'],
+]
+
+/** An old spelling as its new words, with the one line that names the new spelling; null for anything else. Pure. */
+export function renameOf(words: string[]): { words: string[]; line: string } | null {
+  const low = words.map((w) => w.toLowerCase())
+  for (const [from, to] of RENAMED) {
+    const f = from.split(' ')
+    const star = f[f.length - 1] === '*'
+    const head = star ? f.slice(0, -1) : f
+    if (low.length < head.length || (!star && low.length !== head.length)) continue
+    if (!head.every((w, i) => low[i] === w)) continue
+    const rest = words.slice(head.length)
+    const next = [...to.split(' ').filter((w) => w !== '*'), ...(to.endsWith('*') ? rest : [])]
+    const shown = (ws: string[]) => [COMMAND, ...ws].join(' ')
+    return { words: next, line: `${shown(words)} was renamed to ${shown(next)}.` }
+  }
+  return null
+}
 
 // ------------------------------------------------------------------ types
 
@@ -250,8 +297,10 @@ export type CommandDeps = {
   outboxFs?: ReadFs | null
   sleep?: (ms: number) => Promise<unknown> // bounds the status hello (the command hook has about 10 s in all)
   dashboardUrl?: () => Promise<string | null> // the published dashboard's artifact URL, for status
-  bossUrl?: () => Promise<string | null> // O5: the published company board's artifact URL (company admins)
+  bossUrl?: () => Promise<string | null> // the published company board's artifact URL (company admins)
   trustFile?: TrustFile | null // the user-level CLAUDE.md (trust.ts)
+  canAsk?: () => boolean // choice.ts canAsk: someone can be asked in this session
+  asked?: { get(): Promise<number | null>; set(ms: number): Promise<void> } | null // the shared "last asked" time
   dataText?: () => Promise<string> // the plugin's DATA.md (may throw)
   removeDeps?: Pick<RemoveDeps, 'fs' | 'dirs' | 'stopLog'> | null // /agent-services remove (remove.ts)
 }
@@ -259,7 +308,7 @@ export type CommandDeps = {
 const isObj = (v: unknown): v is Record<string, any> => typeof v === 'object' && v !== null && !Array.isArray(v)
 const num = (v: unknown): number | null => (typeof v === 'number' && Number.isFinite(v) ? v : null)
 
-/** The local calendar day of a ms time, as host/metrics.py _today. */
+/** The local calendar day of a ms time, as the Python client's _today. */
 export function localDay(ms: number): string {
   const d = new Date(ms)
   const p = (n: number) => String(n).padStart(2, '0')
@@ -320,7 +369,7 @@ export const validEmail = (s: unknown): s is string =>
 
 /** The code as typed in the dialog: spaces and dashes people add between digits are dropped. */
 export const cleanCode = (s: string): string => s.replace(/[\s-]+/g, '')
-// The mailed sign-in code is 8 digits (6 to 8 taken). Owner 2026-11-01: after login the person pastes
+// The mailed sign-in code is 8 digits (6 to 8 taken). After login the person pastes
 // it as their next message (the dialog put typing last, under Other); prompt.submit catches it before the model.
 export const PASTED_CODE_RX = /^[0-9]{6,8}$/
 // prompt.submit has a time budget and forwards the message when a hook runs past it: the pasted path answers by then
@@ -333,7 +382,7 @@ export const PASTE_CODE_LINE =
   'Paste the 8-digit code from that email here as your next message. It goes to agent-services only, not to ' +
   `Claude, and works for 10 minutes. (Or run ${COMMAND} code.)`
 
-// ------------------------------------------------------------------ auto-update (host/auto_update.py, read only)
+// ------------------------------------------------------------------ auto-update (the Python client, read only)
 
 export type AutoUpdateSources = {
   env: (name: string) => Promise<string | undefined | null>
@@ -450,21 +499,11 @@ async function readTranscript(fs: ReadFs, base: string, f: { rel: string; size: 
   return { rel: f.rel, size: f.size, text }
 }
 
-/** Every *.jsonl under `root`, read, in os.walk order (see listTranscripts and readTranscript). */
-export async function collectTranscripts(fs: ReadFs, root: string): Promise<TranscriptFile[] | null> {
-  const listed = await listTranscripts(fs, root)
-  if (!listed) return null
-  const base = root.replace(/[\\/]+$/, '')
-  const out: TranscriptFile[] = []
-  for (const f of listed) out.push(await readTranscript(fs, base, f))
-  return out
-}
-
 export type ScanProgress = { progress: { done: number; total: number } } // bytes of readable transcripts
 
 /**
  * The estimate's scan of every transcript, spread over runs of the command. A hook has 10 s of its own time, where
- * the reads are free and the parse is not; a long history takes longer (measured 11.8 s for 2.1 GB on the owner's
+ * the reads are free and the parse is not; a long history takes longer (measured 11.8 s for 2.1 GB on a test
  * machine), so each step() parses for about `sliceMs` (5 s, leaving room for finish()) and answers its progress, and
  * the next run goes on where it stopped. The facts are scan() of the same files (transcripts.ts Scanner). A scan
  * left for more than `maxAgeMs` (30 minutes) starts again.
@@ -516,6 +555,7 @@ export class EstimateScan {
 export class Command {
   private d: CommandDeps
   private previewed: { body: Record<string, unknown>; text: string; at: number } | null = null
+  private askedMem: number | null = null // the "last asked" time where no shared file is wired (tests)
 
   constructor(deps: CommandDeps) {
     this.d = deps
@@ -525,24 +565,25 @@ export class Command {
   async run(args: string): Promise<string> {
     let text: string
     try {
-      text = await this.dispatch(String(args ?? '').trim())
+      const words = String(args ?? '').trim().split(/\s+/).filter(Boolean)
+      const renamed = renameOf(words)
+      text = await this.dispatch(renamed ? renamed.words : words)
+      if (renamed) text += `\n${renamed.line}`
     } catch {
       text = `agent-services: the command failed; try ${COMMAND} status.`
     }
     return redact(text)
   }
 
-  private async dispatch(args: string): Promise<string> {
-    const words = args ? args.split(/\s+/) : []
+  private async dispatch(words: string[]): Promise<string> {
     const sub = (words[0] ?? 'status').toLowerCase()
     const rest = words.slice(1)
     const svc = this.d.svc
-    const known = ['status', 'login', 'code', 'logout', 'sharing', 'savings', 'dashboard', 'estimate', 'served',
-      'offline', 'outbox', 'company', 'trust', 'setup', 'update', 'data', 'hooks', 'remove']
-    if (!known.includes(sub)) return `Unknown subcommand "${sub.slice(0, 40)}". ${USAGE}`
-    if (!AUTH_FAIL_COMMANDS.includes(sub) && !['update', 'data', 'hooks', 'remove'].includes(sub)) {
+    if (!KNOWN_COMMANDS.includes(sub)) return `Unknown subcommand "${sub.slice(0, 40)}". ${USAGE}`
+    const signedOutOk = AUTH_FAIL_COMMANDS.includes(sub) || (sub === 'methods' && (rest.length === 0 || (rest.length === 1 && rest[0]!.toLowerCase() === 'off')))
+    if (!signedOutOk) {
       const st = await svc.authState(true)
-      // 3.9: nothing else works, nothing is sent
+      // nothing else works while signed out, and nothing is sent
       if (st !== 'ok') return st === 'locked' ? LOCKED_LINE : st === 'paused' ? ORG_PAUSED_LINE : PAUSED_LINE
     }
     switch (sub) {
@@ -554,38 +595,32 @@ export class Command {
         return this.code(rest)
       case 'logout':
         return rest.length ? USAGE : this.logout()
+      case 'setup':
+        return rest.length ? USAGE : this.setup()
       case 'sharing':
         return this.sharing(rest)
       case 'savings':
-        return this.savings(rest)
-      case 'dashboard':
-        return this.dashboard(rest)
-      case 'estimate':
-        return this.estimate(rest)
-      case 'served':
-        return this.served(rest)
-      case 'offline':
-        return this.offline(rest)
-      case 'trust':
-        return this.trust(rest)
-      case 'setup':
-        return rest.length ? USAGE : this.setup()
+        return rest.length ? USAGE : this.savings()
+      case 'methods':
+        return this.methods(rest)
       case 'update':
         return rest.length ? USAGE : this.update()
-      case 'data':
-        return rest.length ? USAGE : this.data()
-      case 'hooks':
-        return rest.length ? USAGE : hooksText()
+      case 'offline':
+        return this.offline(rest)
+      case 'estimate':
+        return this.estimate(rest)
+      case 'info':
+        return this.info(rest)
       case 'remove':
         return rest.length ? USAGE : this.remove()
-      case 'company': // O5: the company admin's board and weekly summary email
+      case 'company': // the company admin's board and weekly summary email
         return companyCommand({ svc, store: this.d.store, url: () => this.d.bossUrl?.() ?? Promise.resolve(null) }, rest)
       default:
-        return this.outbox(rest)
+        return this.served(rest)
     }
   }
 
-  // ---------------- status
+  // ---------------- status (read only: it never asks a question)
   private async status(): Promise<string> {
     const svc = this.d.svc
     const auth = await svc.authState(true)
@@ -615,11 +650,8 @@ export class Command {
         if (n) lines.push(n)
       }
       if (st.plan === 'guard') lines.push(PLAN_NOTICE)
-      const org = await orgChoice(this.d.store) // O3: the company's choice, shown instead of the question
-      if (org) {
-        lines.push(ORG_SAVINGS_TEXT[org]!)
-        await orgNotice(this.d.store) // said here, so the one-time line is not said again
-      }
+      const org = await orgChoice(this.d.store)
+      if (org) lines.push(ORG_SAVINGS_TEXT[org]!) // shown, not counted as the one-time company line
     }
     if (st.offline) lines.push(`Offline mode is on: nothing is sent; ${COMMAND} offline off turns it off.`)
     const seen = new Set<string>(lines)
@@ -636,69 +668,151 @@ export class Command {
     if (up && !(a && !a.on && a.source === 'env')) lines.push(`To update the plugin, run this in a terminal: ${up}`)
     const ul = updatesLine()
     if (ul) lines.push(ul)
-    if (auth === 'ok') lines.push(await this.dashboardLine())
+    if (auth === 'ok') {
+      lines.push(await this.recordLine(), await this.methodsLine())
+      const n = (await this.safe(() => this.openQuestions(), [] as Question[])).length
+      if (n) lines.push(`${n} question${n === 1 ? '' : 's'} waiting: run ${COMMAND} setup.`)
+    }
     return lines.join('\n')
   }
 
-  private async dashboard(rest: string[]): Promise<string> {
-    const sub = (rest[0] ?? '').toLowerCase()
-    if (rest.length === 0) return this.dashboardLine()
-    if (rest.length !== 1 || (sub !== 'allow' && sub !== 'not_now')) return USAGE
-    if (await orgChoice(this.d.store)) return ORG_SET_TEXT
-    await safeSet(this.d.store, CONSENT_KEY, { answer: sub, at: this.d.now() })
-    return sub === 'allow'
-      ? 'The dashboard is allowed: it is published as a private Artifact when Claude finishes this reply, and kept ' +
-        'up to date.'
-      : 'The dashboard stays unpublished; you are asked again in 7 days.'
+  /** The savings record and its page, in one line. */
+  private async recordLine(): Promise<string> {
+    const s = await recordState(this.d.store)
+    const head = s.org
+      ? `Savings record: ${s.org}, set by your company for everyone.`
+      : s.own === 'on'
+        ? 'Savings record: on.'
+        : s.own === 'off'
+          ? `Savings record: off (not asked again; ${COMMAND} sharing on turns it on).`
+          : `Savings record: not answered yet (${COMMAND} sharing on turns it on).`
+    if (!s.page) return `${head} Private savings page: off.`
+    const url = await this.safe(() => this.d.dashboardUrl?.() ?? Promise.resolve(null), null)
+    return `${head} Private savings page: ` + (url ? `published at ${url}.` : 'on, published when Claude finishes its next reply.')
   }
 
-  /** Whether the one savings-record question is due: never answered (or its "Not now" has run out) and the board
-   * not allowed or snoozed on its own. An earlier board "allow" means the record is already set up. */
-  private async sharingDue(): Promise<boolean> {
+  // ---------------- the setup questions (the savings record, its page under a company, the methods level)
+
+  private canAsk(): boolean {
+    return !!this.d.ask && (this.d.canAsk ? this.d.canAsk() : false)
+  }
+
+  private async askedAt(): Promise<number | null> {
+    return this.d.asked ? this.safe(() => this.d.asked!.get(), null) : this.askedMem
+  }
+
+  private async stampAsked(): Promise<void> {
     const now = this.d.now()
-    if (await orgChoice(this.d.store)) return false // O3: the company chose for everyone
-    if ((await sharingState(this.d.store, now)) !== 'ask') return false
-    return consentState(await readConsent(this.d.store), now) === 'ask'
+    this.askedMem = now
+    if (this.d.asked) await this.safe(() => this.d.asked!.set(now), undefined)
   }
 
-  /** The note the model gets with the session's first prompt while the savings record is not set up: ask the user
-   * the one question (the question tool), then apply the answer with the setup tool. null: nothing to ask. */
-  async onboarding(): Promise<string | null> {
-    if ((await this.d.svc.authState()) !== 'ok') return null
-    const told = await orgNotice(this.d.store) // O3: the company's choice, said once
-    if (told) {
-      return (
-        '[agent-services plugin note, not written by the user] Before working on the message, tell the user this ' +
-        `one line from the agent-services plugin, in these words: "${told}" Then go on with the message.`
-      )
-    }
-    const tool = 'mcp__agent-services__setup'
-    if (!(await this.sharingDue())) return null
-    const question = await sharingQuestion(this.d.store, SHARING_QUESTION)
-    const [on, off, show] = SHARING_OPTIONS
-    return (
-      '[agent-services plugin note, not written by the user] The user has the agent-services plugin installed and ' +
-      'its savings record is not set up yet. Before working on the message, ask the user this one question with ' +
-      `your question tool (AskUserQuestion), header "${SHARING_HEADER}", in these words: "${question}" ` +
-      `with the options, in this order, "${on}", "${off}" and "${show}". Then call ${tool} with command ` +
-      `"sharing on", "sharing not_now" or "sharing preview" to match the answer; for "${show}" show the user the ` +
-      'text it returns, and call it with "sharing on" only if the user then says yes. If the user dismisses the ' +
-      'question, leave it. Then go on with the message.'
-    )
+  /** The questions not answered yet (whenever they were last asked). */
+  private async openQuestions(): Promise<Question[]> {
+    const out: Question[] = []
+    const s = await recordState(this.d.store)
+    if (savingsOpen(s)) out.push('savings')
+    else if (pageOpen(s)) out.push('page')
+    if ((await readLevel(this.d.store, this.d.now())) === null) out.push('methods')
+    return out
   }
 
-  // ---------------- the CLAUDE.md section (trust.ts)
-  /** Due while the section is not there, never answered, or its "Not now" has run out (trust.ts trustDue). */
-  private async trustDue(): Promise<boolean> {
-    const f = this.d.trustFile
-    return !!f && trustDue(await this.d.store.get(TRUST_KEY), this.d.now(), await f.read())
+  /** The open questions that may be asked now: someone can be asked, and none was asked in the last 7 days. */
+  async questionsDue(): Promise<Question[]> {
+    if (!(this.d.canAsk ? this.d.canAsk() : false)) return []
+    if (!askDue(await this.askedAt(), this.d.now())) return []
+    return this.safe(() => this.openQuestions(), [])
   }
 
-  /** No dialog: the model reads the text and asks the user (methods.ts trust note); this only says how. */
+  /** /agent-services setup: every open question in the dialog, one after the other; nothing else. */
   private async setup(): Promise<string> {
-    if (!(await this.safe(() => this.trustDue(), false))) return 'Nothing to set up right now.'
-    return `Run ${COMMAND} trust preview to read the working methods, then ${COMMAND} trust on to add them to your ` +
-      `CLAUDE.md (or ${COMMAND} trust not_now).`
+    const open = await this.openQuestions()
+    if (!open.length) {
+      return `Nothing to set up: every question is answered.\n${await this.recordLine()}\n${await this.methodsLine()}`
+    }
+    if (!this.canAsk()) {
+      return 'Nobody can be asked in a dialog here. Answer with ' +
+        open.map((q) => QUESTION_COMMANDS[q]).join('; ') + '.'
+    }
+    return this.setupRound(open)
+  }
+
+  /** Ask each question in the dialog and apply the answer; a dismissed dialog ends the round. */
+  private async setupRound(open: Question[]): Promise<string> {
+    await this.stampAsked()
+    const out: string[] = []
+    for (const q of open) {
+      const a = await this.askOne(q)
+      if (a === null) {
+        out.push(`Not answered. ${COMMAND} setup asks again, or answer with ${QUESTION_COMMANDS[q]}.`)
+        break
+      }
+      out.push(a)
+    }
+    return out.join('\n')
+  }
+
+  private async dialog(question: string, options: readonly string[], header: string): Promise<string | null> {
+    try {
+      const a = String(await this.d.ask!(question, { options: [...options], header })).trim()
+      return options.includes(a) ? a : null
+    } catch {
+      return null // dismissed, or nobody can be asked
+    }
+  }
+
+  private async askOne(q: Question): Promise<string | null> {
+    if (q === 'savings') {
+      const a = await this.dialog(await sharingQuestion(this.d.store, SHARING_QUESTION), SHARING_OPTIONS, SHARING_HEADER)
+      if (a === null) return null
+      const i = SHARING_OPTIONS.indexOf(a)
+      return i === 3 ? this.sharingPreview() : this.setRecord((['on', 'not_now', 'off'] as const)[i]!)
+    }
+    if (q === 'page') {
+      const a = await this.dialog(PAGE_QUESTION, PAGE_OPTIONS, SHARING_HEADER)
+      if (a === null) return null
+      if (a === PAGE_OPTIONS[1]) return `The private savings page stays off for now; ${COMMAND} sharing page on publishes it.`
+      return this.setPage(a === PAGE_OPTIONS[0])
+    }
+    const a = await this.dialog(METHODS_QUESTION, METHODS_OPTIONS, METHODS_HEADER)
+    if (a === null) return null
+    if (a === METHODS_OPTIONS[2]) return this.methods(['off'])
+    const kept = await this.methods(['suggest'])
+    if (a === METHODS_OPTIONS[0]) return kept
+    // "my own instructions": only after the user read the text, so it is shown here and confirmed with methods on
+    return `${kept}\nTo make them your own instructions, read them first:\n${await this.methods(['preview'])}\n` +
+      `Then run ${COMMAND} methods on.`
+  }
+
+  /** The note the model gets with a prompt (one at a time): the company's choice once; the open setup questions at
+   * most once per 7 days and only where someone can answer; from the second prompt of a session on, a newer plugin
+   * version or a changed methods text. null: nothing to say. */
+  async promptNote(first: boolean, update: () => Promise<{ installed: string; latest: string } | null>,
+    pending: () => Promise<boolean>): Promise<{ text: string; which: 'org' | 'setup' | 'update' | 'pending' } | null> {
+    if (!(await this.signedIn())) return null
+    const told = await orgNotice(this.d.store)
+    if (told) {
+      return {
+        text: `${NOTE_LABEL} Before working on the message, tell the user this one line from the agent-services ` +
+          `plugin, in these words: "${told}" Then go on with the message.`,
+        which: 'org',
+      }
+    }
+    const facts = async () => {
+      const st = await this.safe(() => this.d.svc.status(), {} as any)
+      return framing(st?.account_id, st?.plan)
+    }
+    const due = await this.questionsDue()
+    if (due.length) {
+      await this.stampAsked()
+      const q = due.includes('savings') || due.includes('page') ? await sharingQuestion(this.d.store, SHARING_QUESTION) : ''
+      return { text: setupNoteText(due, await facts(), { savings: q, page: PAGE_QUESTION, methods: METHODS_QUESTION }), which: 'setup' }
+    }
+    if (first) return null // the update notice waits until after the first turn of work
+    const u = (await this.autoUpdateOn()) ? null : await this.safe(update, null)
+    if (u) return { text: updateNoteText(u.installed, u.latest, await facts()), which: 'update' }
+    if (await this.safe(pending, false)) return { text: pendingNoteText(await facts()), which: 'pending' }
+    return null
   }
 
   /** The plugin's data note (DATA.md, shipped with the plugin), whole. */
@@ -708,6 +822,15 @@ export class Command {
       ? text.trim()
       : 'The data note (DATA.md in the plugin folder) could not be read here; it is also in the plugin\'s public ' +
           'repository. Nothing was changed.'
+  }
+
+  /** info data | hooks | log [<day>]: what the plugin sends, its hooks, and the request log. Read only. */
+  private async info(rest: string[]): Promise<string> {
+    const w = (rest[0] ?? '').toLowerCase()
+    if (w === 'data' && rest.length === 1) return this.data()
+    if (w === 'hooks' && rest.length === 1) return hooksText()
+    if (w === 'log' && rest.length <= 2) return this.outbox(rest.slice(1))
+    return `Usage: ${COMMAND} info data | info hooks | info log [<YYYY-MM-DD>]`
   }
 
   /** /agent-services remove (remove.ts): sign out, take the CLAUDE.md section out, empty the local files, delete the
@@ -721,7 +844,7 @@ export class Command {
         if (!f) return 'CLAUDE.md: it cannot be reached from here; nothing was changed.'
         const text = await f.read() // throws when it exists but cannot be read: said by removeAll
         if (!hasTrust(text) && !unbalancedTrust(text)) return 'CLAUDE.md: it has no agent-services section; nothing was changed.'
-        return 'CLAUDE.md: ' + (await this.trust(['off'])) // the same checks as trust off
+        return 'CLAUDE.md: ' + (await this.takeSectionOut(f)) // the same checks as methods off
       },
       store: this.d.store,
       fs: rd?.fs ?? null,
@@ -761,38 +884,63 @@ export class Command {
     return a?.on === true
   }
 
-  /** The review notes for the model's next prompt (review.ts), one at a time: a newer version, a changed methods
-   * text, or the methods question. Each is given at most once (per version, per session). */
-  async reviewNotes(due: { trust: boolean; pending: boolean }, update: { installed: string; latest: string } | null):
-    Promise<{ text: string; which: 'update' | 'trust' | 'pending' } | null> {
-    if (!update && !due.trust && !due.pending) return null
-    const st = await this.safe(() => this.d.svc.status(), {} as any)
-    const facts = framing(st?.account_id, st?.plan)
-    if (update) return { text: updateNoteText(update.installed, update.latest, facts), which: 'update' }
-    if (due.pending) return { text: pendingNoteText(facts), which: 'pending' }
-    return { text: trustNoteText(facts), which: 'trust' }
+  // ---------------- the working methods: one three-level switch (methods.ts)
+
+  private async level(): Promise<Level> {
+    const stored = await readLevel(this.d.store, this.d.now())
+    const f = this.d.trustFile
+    const there = stored?.level === 'on' && f ? await f.read().then(hasTrust, () => true) : false
+    return levelOf(stored, there)
   }
 
-  private async trust(rest: string[]): Promise<string> {
-    const sub = (rest[0] ?? 'status').toLowerCase()
+  private async methodsLine(): Promise<string> {
+    const level = await this.safe(() => this.level(), 'suggest' as Level)
+    const pending = level === 'on' && (await this.safe(() => methodsDiff(lineDiff), null)) !== null
+    return METHODS_LINE[level]! + (pending ? ` The served text changed since you approved it: ${COMMAND} methods diff.` : '')
+  }
+
+  /** Take the CLAUDE.md section out, with the checks every write of the user's file has. The answer says what
+   * happened (also when nothing was there). */
+  private async takeSectionOut(f: TrustFile): Promise<string> {
+    let text: string | null
+    try {
+      text = await f.read()
+    } catch {
+      return `Your CLAUDE.md (${f.path}) could not be read, so its agent-services section (if any) was not taken out.`
+    }
+    if (unbalancedTrust(text)) {
+      return `Your CLAUDE.md (${f.path}) has an agent-services marker line without its pair; nothing was changed in ` +
+        'it. Remove the leftover marker line, then run this again.'
+    }
+    if (!hasTrust(text)) return 'Your CLAUDE.md has no agent-services section.'
+    const next = withoutTrust(text!)
+    const again: unknown = await f.read().then((t) => t, () => Symbol('unreadable')) // read again just before
+    if (again !== text) return `Your CLAUDE.md (${f.path}) changed just now; nothing was changed in it. Run this again.`
+    await f.write(next)
+    return `Removed the agent-services section from ${f.path}.`
+  }
+
+  private async methods(rest: string[]): Promise<string> {
+    const sub = (rest[0] ?? '').toLowerCase()
     const f = this.d.trustFile
     if (rest.length > 1) return USAGE
-    if (!f) return 'Your CLAUDE.md cannot be reached from here; nothing was changed.'
+    if (sub === '') return this.methodsLine()
     if (sub === 'preview') {
       const full = await previewMethods()
-      return `This line would be added to the end of your CLAUDE.md (${f.path}):\n\n${await f.importLine()}\n\n` +
+      const line = f ? await f.importLine() : null
+      return (line ? `With ${COMMAND} methods on, this line is added to the end of your CLAUDE.md (${f!.path}):\n\n${line}\n\n` +
         'It loads a file this plugin keeps renewed while you are signed in; a later change to the text is shown ' +
-        `to you first (${COMMAND} trust diff). ` +
+        `to you first (${COMMAND} methods diff). ` : '') +
         (full === null
           ? 'The full text cannot be fetched right now (signed out or the service unreachable); try again later.'
-          : `The full text it would hold now:\n\n----- begin -----\n${full.trim()}\n----- end -----`)
+          : `The full text now:\n\n----- begin -----\n${full.trim()}\n----- end -----`)
     }
     if (sub === 'diff') {
       const d = await methodsDiff(lineDiff)
       return d === null
         ? 'The served working methods are the ones you approved; there is nothing to review.'
         : `The served working methods differ from the ones you approved ("- " approved, "+ " new):\n\n${d}\n\n` +
-            `${COMMAND} trust accept takes the new text; ${COMMAND} trust keep keeps the approved one.`
+            `${COMMAND} methods accept takes the new text; ${COMMAND} methods keep keeps the approved one.`
     }
     if (sub === 'accept' || sub === 'keep') {
       const done = await settlePending(sub === 'accept')
@@ -801,99 +949,132 @@ export class Command {
         ? 'The new working methods replace the approved ones; your CLAUDE.md loads them from the next session on.'
         : 'The approved working methods stay; this change is not asked about again.'
     }
+    if (sub !== 'on' && sub !== 'off' && sub !== 'suggest') return USAGE
     const now = this.d.now()
+    if (sub !== 'on') {
+      const out = f ? await this.takeSectionOut(f) : 'Your CLAUDE.md cannot be reached from here.'
+      if (!(await safeSet(this.d.store, LEVEL_KEY, { level: sub, at: now }))) return errorText('store_unavailable')
+      await syncMethodsNow()
+      return (out.startsWith('Removed') || out.startsWith('Your CLAUDE.md has no') ? '' : out + '\n') + METHODS_LINE[sub]!
+    }
+    if (!f) return 'Your CLAUDE.md cannot be reached from here; nothing was changed.'
     let text: string | null
     try {
       text = await f.read()
     } catch {
       return `Your CLAUDE.md (${f.path}) could not be read; nothing was changed.`
     }
-    if (sub === 'status') {
-      return hasTrust(text)
-        ? `Your CLAUDE.md (${f.path}) loads the working methods you approved. Remove it with ${COMMAND} trust off.`
-        : `Your CLAUDE.md has no agent-services section. Add it with ${COMMAND} trust on (${COMMAND} trust preview ` +
-            'shows the full text first).'
-    }
-    if (sub === 'not_now') {
-      await safeSet(this.d.store, TRUST_KEY, { answer: 'not_now', at: now })
-      return `Nothing was added to your CLAUDE.md. You are asked again in 7 days; add it any time with ${COMMAND} trust on.`
-    }
-    if (sub !== 'on' && sub !== 'off') return USAGE
     if (unbalancedTrust(text)) {
       return `Your CLAUDE.md (${f.path}) has an agent-services marker line without its pair; nothing was changed. ` +
         'Remove the leftover marker line, then run this again.'
     }
-    if (sub === 'on' && hasTrust(text)) {
+    if (hasTrust(text)) {
       // already there: the approved text stays; a changed text is reviewed with diff and accept, never approved here
+      await safeSet(this.d.store, LEVEL_KEY, { level: 'on', at: now })
       return `Your CLAUDE.md (${f.path}) already has the agent-services section; the approved working methods stay and ` +
-        `nothing was changed. If the text changed since you approved it, ${COMMAND} trust diff shows the change and ` +
-        `${COMMAND} trust accept takes it.`
+        `nothing was changed. If the text changed since you approved it, ${COMMAND} methods diff shows the change and ` +
+        `${COMMAND} methods accept takes it.`
     }
     const line = await f.importLine()
-    if (sub === 'on' && /\s/.test(line.slice(1))) {
+    if (/\s/.test(line.slice(1))) {
       return `The methods file path has a space in it (${line.slice(1)}), which a CLAUDE.md import cannot load; nothing ` +
         'was changed.'
     }
-    const next = sub === 'on' ? withTrust(text, line) : text === null ? null : withoutTrust(text)
-    if (next !== null && next !== text) {
-      const again: unknown = await f.read().then((t) => t, () => Symbol('unreadable')) // read again just before
-      if (again !== text) return `Your CLAUDE.md (${f.path}) changed just now; nothing was changed. Run this again.`
-      await f.write(next)
-    }
-    await safeSet(this.d.store, TRUST_KEY, { answer: sub, at: now })
-    const ok = sub === 'on' ? await approveMethods() : null // the text previewed, then the file the line loads
-    return ok
-      ? `Added the agent-services section to ${f.path}: from the next session on, the working methods you approved ` +
-          `count as your own instructions; a change to them is shown to you first. Remove it with ${COMMAND} trust off.` +
-          (ok.text !== null && !ok.shown
-            ? ` No preview was shown in this session, so this is the text approved:\n\n----- begin -----\n` +
-                `${ok.text.trim()}\n----- end -----`
-            : '')
-      : `Removed the agent-services section from ${f.path}; you are not asked again. Add it back with ${COMMAND} trust on.`
+    const next = withTrust(text, line)
+    const again: unknown = await f.read().then((t) => t, () => Symbol('unreadable')) // read again just before
+    if (again !== text) return `Your CLAUDE.md (${f.path}) changed just now; nothing was changed. Run this again.`
+    await f.write(next)
+    await safeSet(this.d.store, LEVEL_KEY, { level: 'on', at: now })
+    const ok = await approveMethods() // the text previewed, then the file the line loads
+    return `Added the agent-services section to ${f.path}: from the next session on, the working methods you approved ` +
+      `count as your own instructions, and the planning gate holds larger file edits until agent-state.md has a plan; ` +
+      `a change to the methods is shown to you first. ${COMMAND} methods suggest takes the section out again.` +
+      (ok.text !== null && !ok.shown
+        ? ` No preview was shown in this session, so this is the text approved:\n\n----- begin -----\n` +
+            `${ok.text.trim()}\n----- end -----`
+        : '')
   }
 
-  // ---------------- the one savings-record choice
+  // ---------------- the one savings record (choice.ts)
   private async sharing(rest: string[]): Promise<string> {
-    const sub = (rest[0] ?? '').toLowerCase()
-    if (rest.length !== 1) return USAGE
-    if (sub !== 'preview' && (await orgChoice(this.d.store))) return ORG_SET_TEXT
-    if (sub === 'on') return this.setSharing(true)
-    if (sub === 'not_now' || sub === 'off') return this.setSharing(false)
-    if (sub === 'preview') return this.sharingPreview()
+    const w = rest.map((x) => x.toLowerCase())
+    if (!w.length) return this.recordLine()
+    if (w.length === 1 && (w[0] === 'on' || w[0] === 'off' || w[0] === 'not_now')) return this.setRecord(w[0])
+    if (w.length === 1 && w[0] === 'preview') return this.sharingPreview()
+    if (w.length === 2 && w[0] === 'page' && (w[1] === 'on' || w[1] === 'off')) return this.setPage(w[1] === 'on')
+    if (w.length === 2 && w[0] === 'mail' && (w[1] === 'on' || w[1] === 'off')) return this.setMail(w[1] === 'on')
     return USAGE
   }
 
-  /** One answer for the board, the weekly email and the daily upload. The email is a server setting, changed while
-   * the upload is on (the route is a metrics route); a failed change is said, the other parts stand. */
-  private async setSharing(on: boolean): Promise<string> {
-    const svc = this.d.svc
-    const at = this.d.now()
-    const mail = async (): Promise<string | null> => {
-      const r = await svc.call('POST', '/metrics/weekly-mail', { on })
-      return r.ok ? null : errorText(r.error)
+  /** The weekly email (a server setting); null when it changed, else the reason. */
+  private async mail(on: boolean): Promise<string | null> {
+    const r = await this.d.svc.call('POST', '/metrics/weekly-mail', { on })
+    return r.ok ? null : errorText(r.error)
+  }
+
+  /** One answer for the upload, the page and the weekly email. Under a company's choice it sets the page only. */
+  private async setRecord(sub: 'on' | 'off' | 'not_now'): Promise<string> {
+    const s = await recordState(this.d.store)
+    if (s.org) {
+      if (sub === 'not_now') {
+        await this.stampAsked()
+        return `${ORG_SET_TEXT} Your private page stays as it is.`
+      }
+      return `Your company decides the daily upload for everyone; this changed only your private page.\n` +
+        (await this.setPage(sub === 'on'))
     }
+    const at = this.d.now()
     let mailError: string | null = null
-    if (!on) mailError = await mail()
-    const kept =
-      (await safeSet(this.d.store, KEYS.sharing, { on, at })) &&
-      (await svc.setService('metrics', on)) &&
-      (await safeSet(this.d.store, CONSENT_KEY, { answer: on ? 'allow' : 'not_now', at }))
+    if (sub !== 'on') mailError = await this.mail(false) // while the metrics routes are still open
+    const kept = sub === 'on'
+      ? (await this.d.svc.setService('metrics', true)) && (await writeEntry(this.d.store, { record: 'on', at, page: 'on', page_at: at }))
+      : sub === 'off'
+        ? await writeEntry(this.d.store, { record: 'off', at, page: 'off', page_at: at })
+        : await writeEntry(this.d.store, { record: undefined, at: undefined, page: undefined, page_at: undefined })
     if (!kept) return errorText('store_unavailable')
-    if (on) mailError = await mail()
+    if (sub === 'not_now') await this.stampAsked()
+    if (sub === 'on') mailError = await this.mail(true)
     const mailLine = mailError
-      ? `\nThe weekly email setting was not changed: ${mailError} Run ${COMMAND} savings mail ${on ? 'on' : 'off'} ` +
+      ? `\nThe weekly email setting was not changed: ${mailError} Run ${COMMAND} sharing mail ${sub === 'on' ? 'on' : 'off'} ` +
         'later to change it.'
       : ''
-    return on
-      ? 'Savings record is on: your private savings page is published to your claude.ai account when Claude ' +
-          'finishes this reply, a weekly email sums up the savings, and a small daily usage summary is uploaded ' +
-          '(the first upload also sends up to 30 earlier days). ' +
-          `To turn one part off: ${COMMAND} dashboard not_now (the page), ${COMMAND} savings mail off (the email), ` +
-          `${COMMAND} savings off (the upload).` +
-          mailLine
-      : 'Savings record is off: no page is published, no weekly email is sent and nothing more is uploaded. You are ' +
-          `asked again in 7 days; turn it on any time with ${COMMAND} sharing on.` +
-          mailLine
+    if (sub === 'on') {
+      return 'Savings record is on: your private savings page is published to your claude.ai account when Claude ' +
+        'finishes this reply, a weekly email sums up the savings, and a small daily usage summary is uploaded ' +
+        '(the first upload also sends up to 30 earlier days). ' +
+        `To turn one part off: ${COMMAND} sharing page off (the page), ${COMMAND} sharing mail off (the email); ` +
+        `${COMMAND} sharing off turns it all off.` + mailLine
+    }
+    if (sub === 'off') {
+      return 'Savings record is off: no page is published, no weekly email is sent and nothing more is uploaded. You ' +
+        `are not asked again; turn it on any time with ${COMMAND} sharing on.` + mailLine
+    }
+    return 'Savings record is not on: nothing is uploaded, no page is published and no weekly email is sent. You are ' +
+      `asked again in 7 days at the earliest; ${COMMAND} sharing on turns it on, ${COMMAND} sharing off stops the ` +
+      'question.' + mailLine
+  }
+
+  private async setPage(on: boolean): Promise<string> {
+    if (!(await writeEntry(this.d.store, { page: on ? 'on' : 'off', page_at: this.d.now() }))) return errorText('store_unavailable')
+    if (!on) {
+      return 'Your private savings page is off: it is not published or updated any more. (A page published earlier ' +
+        'stays in your claude.ai account until you delete it there.)'
+    }
+    return 'Your private savings page is on: it is published to your claude.ai account when Claude finishes this ' +
+      'reply, and kept up to date.' +
+      ((await uploadOn(this.d.store)) ? ''
+        : (await recordState(this.d.store)).org === 'off'
+          ? ' Your company turned the daily upload off, so the page shows no new savings until its admin turns it on.'
+          : ` It shows savings only while the daily upload is on (${COMMAND} sharing on).`)
+  }
+
+  private async setMail(on: boolean): Promise<string> {
+    const r = await this.d.svc.call('POST', '/metrics/weekly-mail', { on })
+    if (!r.ok) return `The weekly savings email setting was not changed: ${errorText(r.error)}`
+    const now = isObj(r.body) && typeof r.body.on === 'boolean' ? r.body.on : on
+    return now
+      ? 'The weekly savings email will be sent. (This changes only the email, not the usage upload.)'
+      : 'The weekly savings email is stopped. (This changes only the email, not the usage upload.)'
   }
 
   /** What the savings record sends and shows; changes nothing. */
@@ -908,8 +1089,8 @@ export class Command {
         const body = await this.d.dailyBody(day)
         const text = this.d.svc.preview('POST', DAILY_ROUTE, body)
         if (text !== null) upload = `Exactly what one daily upload sends (for ${day}): ${dailySummary(body)}\n${text}`
-      } catch {
-        // the description below stands
+      } catch (e) {
+        if (e instanceof BodyTooLarge) upload += ` (The summary for ${day} is too large to upload.)`
       }
     }
     return (
@@ -919,49 +1100,10 @@ export class Command {
       '- A weekly email to your account address with the week\'s savings.\n' +
       `- ${upload}\n` +
       `Nothing of it is uploaded before you turn it on; the first upload then also sends up to 30 earlier days. ` +
-      `Every other request the plugin sends (routing advice on subagents, for one) is listed by ${COMMAND} data.
-` +
-      `Turn it on with ${COMMAND} sharing on, or leave it off with ${COMMAND} sharing not_now.`
+      `Every other request the plugin sends (routing advice on subagents, for one) is listed by ${COMMAND} info data.\n` +
+      `Turn it on with ${COMMAND} sharing on, or leave it off with ${COMMAND} sharing not_now (asked again in 7 days) ` +
+      `or ${COMMAND} sharing off (never asked again).`
     )
-  }
-
-  /** Ask the one question in the engine's dialog (once per session, shared with askConsent); the answer is applied.
-   * null when not asked or not answered. */
-  private async askSharing(): Promise<string | null> {
-    if (!this.d.ask || !claimAsk()) return null
-    let a: string
-    try {
-      const q = await sharingQuestion(this.d.store, SHARING_QUESTION)
-      a = String(await this.d.ask(q, { options: SHARING_OPTIONS, header: SHARING_HEADER })).trim()
-    } catch {
-      return null
-    }
-    if (a === SHARING_OPTIONS[0]) return this.setSharing(true)
-    if (a === SHARING_OPTIONS[1]) return this.setSharing(false)
-    if (a === SHARING_OPTIONS[2]) return this.sharingPreview()
-    return null
-  }
-
-  private async dashboardLine(): Promise<string> {
-    if ((await orgChoice(this.d.store)) === 'off') return 'Dashboard: off, set by your company.' // O3
-    let state = consentState(await readConsent(this.d.store), this.d.now())
-    let asked: string | null = null
-    if (state === 'ask') {
-      // the person is here (a command runs): ask now, once per session; the one question while it is due
-      if (await this.sharingDue()) asked = await this.safe(() => this.askSharing(), null)
-      else await this.safe(() => askConsent(this.d.store, this.d.ask, this.d.now), null)
-      state = consentState(await readConsent(this.d.store), this.d.now())
-    }
-    const head = asked ? asked + '\n' : ''
-    return head + (await this.dashboardState(state))
-  }
-
-  private async dashboardState(state: ConsentState): Promise<string> {
-    if (state === 'not_now') return 'Dashboard: you chose Not now.'
-    if (state === 'ask') return 'Dashboard: not allowed yet (run /agent-services status to be asked).'
-    const url = await this.safe(() => this.d.dashboardUrl?.() ?? Promise.resolve(null), null)
-    if (url) return `Dashboard: published at ${url}.`
-    return 'Dashboard: allowed, not published yet (it is published when Claude finishes its next reply).'
   }
 
   private async safe<T>(f: () => Promise<T>, dflt: T): Promise<T> {
@@ -972,8 +1114,8 @@ export class Command {
     }
   }
 
-  // ---------------- sign-in (3.4)
-  /** Asks in the dialog; null when dismissed, unanswerable or one of the cancel labels was picked. */
+  // ---------------- sign-in
+  /** Asks in the dialog; null when dismissed, unanswerable or the cancel label was picked. */
   private async ask(question: string, cancel: string[]): Promise<string | null> {
     if (!this.d.ask) return null
     try {
@@ -1044,7 +1186,8 @@ export class Command {
     return slow ? Promise.race([done, slow]) : done
   }
 
-  /** Send the code and, once signed in, the after-sign-in lines and the one setup question. */
+  /** Send the code and, once signed in, the after-sign-in lines and one setup round (in the dialog, where there is
+   * one and it may ask now; else the line that says questions wait). */
   private async complete(email: string, code: string, head: string, ask = true): Promise<string> {
     const r = await this.d.svc.loginFinish(email, code)
     if (!r.ok) return head + `Sign-in failed: ${errorText(r.error)}`
@@ -1056,17 +1199,13 @@ export class Command {
       const up = au.source === 'env' ? await this.safe(() => this.d.updateLine?.() ?? Promise.resolve(null), null) : null
       lines.push(autoUpdateText(au, up)!)
     }
-    lines.push(`To see what this plugin can save you, run ${COMMAND} estimate (it shows what it would send first).`)
-    // the one savings-record question (or the board alone), while not answered yet (or "Not now" has run out)
-    if (!ask) {
-      if (await this.safe(() => this.sharingDue(), false)) lines.push(`Run ${COMMAND} status to answer the one setup question.`)
-    } else if (await this.sharingDue()) {
-      const asked = await this.safe(() => this.askSharing(), null)
-      if (asked) lines.push(asked)
-    } else if (consentState(await readConsent(this.d.store), this.d.now()) === 'ask') {
-      await this.safe(() => askConsent(this.d.store, this.d.ask, this.d.now), null)
+    const due = ask && this.canAsk() ? await this.questionsDue() : []
+    if (due.length) lines.push(await this.safe(() => this.setupRound(due), ''))
+    else {
+      const n = (await this.safe(() => this.openQuestions(), [] as Question[])).length
+      if (n) lines.push(`${n} setup question${n === 1 ? '' : 's'} waiting: run ${COMMAND} setup.`)
     }
-    return lines.join('\n')
+    return lines.filter(Boolean).join('\n')
   }
 
   private async logout(): Promise<string> {
@@ -1092,95 +1231,14 @@ export class Command {
     )
   }
 
-  // ---------------- savings (host/metrics.py local_route)
-  private async metricsState(): Promise<MetricsState> {
-    const s = await safeGet(this.d.store, METRICS_STATE_KEY)
-    const day = (v: unknown) => (typeof v === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(v) ? v : null)
-    return {
-      previewed_day: day(isObj(s) ? s.previewed_day : null),
-      enabled_day: day(isObj(s) ? s.enabled_day : null),
-      last_uploaded_day: day(isObj(s) ? s.last_uploaded_day : null),
+  // ---------------- savings: the figure only
+  private async savings(): Promise<string> {
+    if (!(await uploadOn(this.d.store))) {
+      return 'Savings are worked out by the service from the daily usage summary, and the savings record is not on ' +
+        `for this account. ${COMMAND} sharing preview shows exactly what it sends; ${COMMAND} sharing on turns it on.`
     }
-  }
-
-  private async saveMetrics(changes: Partial<MetricsState>): Promise<boolean> {
-    return safeSet(this.d.store, METRICS_STATE_KEY, { ...(await this.metricsState()), ...changes })
-  }
-
-  private async savings(rest: string[]): Promise<string> {
-    const svc = this.d.svc
-    const sub = (rest[0] ?? 'show').toLowerCase()
-    const on = Boolean((await svc.settings()).services.metrics)
-    if (['on', 'off', 'not_now', 'mail'].includes(sub) && (await orgChoice(this.d.store))) return ORG_SET_TEXT // O3
-    if (sub === 'show' && rest.length <= 1) {
-      if (!on) {
-        return (
-          'Savings are worked out by the service from a daily usage summary, and that upload is turned off on this ' +
-          `machine. Run ${COMMAND} savings preview to see exactly what one upload sends, then ${COMMAND} ` +
-          'savings on.'
-        )
-      }
-      const r = await svc.call('GET', '/metrics/savings')
-      return r.ok ? savingsText(r.body) : `Savings could not be read: ${errorText(r.error)}`
-    }
-    if (sub === 'status' && rest.length === 1) {
-      const s = await this.metricsState()
-      const waits = on && !(await uploadAnswered(this.d.store))
-      return (
-        `Daily usage upload: ${on ? 'on' : 'off'}.` +
-        (waits ? ` Nothing is uploaded until you turn it on yourself (${COMMAND} sharing on).` : '') +
-        (s.enabled_day ? ` Turned on ${s.enabled_day}.` : '') +
-        (s.last_uploaded_day ? ` Uploaded through ${s.last_uploaded_day}.` : '') +
-        (s.previewed_day ? ` Last preview: ${s.previewed_day}.` : ' No preview yet.')
-      )
-    }
-    if (sub === 'preview' && rest.length === 1) {
-      if (!this.d.dailyBody) return 'The daily usage summary is not available in this build.'
-      const day = plusDays(localDay(this.d.now()), -1)
-      let body: Record<string, unknown>
-      try {
-        body = await this.d.dailyBody(day)
-      } catch (e) {
-        return e instanceof BodyTooLarge
-          ? `The summary for ${day} is too large to upload.`
-          : 'The daily usage summary could not be built in time on this machine. It holds token counts and ' +
-              'costs per model, task types per hashed project, session counts and savings; never prompts, file ' +
-              `contents or paths. Other requests are listed by ${COMMAND} data.`
-      }
-      const text = svc.preview('POST', DAILY_ROUTE, body)
-      if (text === null) return 'The daily usage summary could not be built.'
-      await this.saveMetrics({ previewed_day: day })
-      return (
-        `This is exactly what one daily upload sends (for ${day}); nothing was sent: ${dailySummary(body)}\n${text}\n` +
-        `Turn the upload on with ${COMMAND} savings on.`
-      )
-    }
-    if (sub === 'on' && rest.length === 1) {
-      const r = optIn(await this.metricsState(), localDay(this.d.now()))
-      if (!r.ok) return `First see what would be uploaded: run ${COMMAND} savings preview, then ${COMMAND} savings on.`
-      if (!(await svc.setService('metrics', true))) return errorText('store_unavailable')
-      await this.saveMetrics({ enabled_day: r.state.enabled_day })
-      return 'The daily usage upload is on. Savings appear once a day or more has been uploaded.'
-    }
-    if (sub === 'not_now' && rest.length === 1) {
-      await safeSet(this.d.store, SAVINGS_PROMPT_KEY, { answer: 'not_now', at: this.d.now() })
-      if (!(await svc.setService('metrics', false))) return errorText('store_unavailable')
-      return `The daily usage upload is off: nothing more is uploaded. Turn it back on with ${COMMAND} savings on.`
-    }
-    if (sub === 'off' && rest.length === 1) {
-      if (!(await svc.setService('metrics', false))) return errorText('store_unavailable')
-      return `The daily usage upload is off: nothing more is uploaded. Turn it back on with ${COMMAND} savings on.`
-    }
-    if (sub === 'mail' && rest.length === 2 && ['on', 'off'].includes(rest[1]!.toLowerCase())) {
-      const want = rest[1]!.toLowerCase() === 'on'
-      const r = await svc.call('POST', '/metrics/weekly-mail', { on: want })
-      if (!r.ok) return `The weekly savings email setting was not changed: ${errorText(r.error)}`
-      const now = isObj(r.body) && typeof r.body.on === 'boolean' ? r.body.on : want
-      return now
-        ? 'The weekly savings email will be sent again. (This changes only the email, not the usage upload.)'
-        : 'The weekly savings email is stopped. (This changes only the email, not the usage upload.)'
-    }
-    return USAGE
+    const r = await this.d.svc.call('GET', '/metrics/savings')
+    return r.ok ? savingsText(r.body) : `Savings could not be read: ${errorText(r.error)}`
   }
 
   // ---------------- estimate (preview, then send only what was previewed)
@@ -1195,6 +1253,8 @@ export class Command {
       this.previewed = null // one send per preview
       const r: Result = await this.d.svc.call('POST', '/diagnostic/estimate', p.body, { consent: true })
       if (!r.ok) return estimateError(r.error)
+      const rec = estimateFacts(r.body, new Date(this.d.now()).toISOString())
+      if (rec) await safeSet(this.d.store, ESTIMATE_KEY, rec) // the savings page shows it
       return estimateText(r.body)
     }
     const facts = this.d.facts ? await this.safe(() => this.d.facts!(), null) : null
@@ -1221,7 +1281,7 @@ export class Command {
     )
   }
 
-  // ---------------- served, offline, outbox
+  // ---------------- served (hidden), offline, the request log
   private async served(rest: string[]): Promise<string> {
     const svc = this.d.svc
     const sub = (rest[0] ?? 'status').toLowerCase()
@@ -1258,7 +1318,7 @@ export class Command {
     const day = rest[0] ?? new Date(this.d.now()).toISOString().slice(0, 10)
     const noon = Date.parse(day + 'T12:00:00Z')
     if (rest.length > 1 || !/^\d{4}-\d{2}-\d{2}$/.test(day) || !Number.isFinite(noon) || new Date(noon).toISOString().slice(0, 10) !== day) {
-      return `Usage: ${COMMAND} outbox [<YYYY-MM-DD>]`
+      return `Usage: ${COMMAND} info log [<YYYY-MM-DD>]`
     }
     const lines: Record<string, unknown>[] = []
     const own = ob.path(noon)
@@ -1330,7 +1390,7 @@ export function estimateError(code: string | null): string {
   return `No estimate: ${ESTIMATE_DETAIL[c] ?? errorText(c)} A failed estimate never undoes the sign-in.`
 }
 
-/** The DiagEstimate answer in plain sentences (host/services.py estimate_answer: the server's figures, unchanged). */
+/** The DiagEstimate answer in plain sentences (the Python client's estimate_answer: the server's figures, unchanged). */
 export function estimateText(est: unknown): string {
   if (!isObj(est) || !isObj(est.total) || !isObj(est.total.usd)) return estimateError('bad_response')
   const t = est.total.usd
@@ -1366,7 +1426,7 @@ export async function declareCommand($: EngineInterface): Promise<void> {
 export type EngineOptions = {
   svc: Svc
   outbox?: Outbox | null
-  prices?: Prices | null // the shipped prices (modules/usage/prices.json); without them the estimate has no data
+  prices?: Prices | null // the shipped price table; without it the estimate has no data
   dailyBody?: (day: string) => Promise<Record<string, unknown>>
   clientVersion?: string
   marketplace?: string
@@ -1416,6 +1476,11 @@ export function engineDeps($: EngineInterface, o: EngineOptions): CommandDeps {
     outboxFs: fs,
     sleep: (ms) => Promise.resolve($.clock.sleep(ms)),
     dashboardUrl: async () => dashboardUrl(readText, await dataDir($)),
+    canAsk: () => canAsk(),
+    asked: {
+      get: async () => askedFrom(await readText(`${await dataDir($)}/services/${ASKED_FILE}`)),
+      set: async (ms) => void (await $.fs.write(`${await dataDir($)}/services/${ASKED_FILE}`, JSON.stringify({ at: ms }))),
+    },
     bossUrl: async () => dashboardUrl(readText, await dataDir($), 'boss.json'),
     trustFile: {
       path: '~/.claude/CLAUDE.md',
@@ -1462,14 +1527,23 @@ export function serveCommand(
   servedOptions = options
   servedAfter = after ?? null
   servedCmd = null // a new registration (a reload) builds its own
-  // the setup tool: the model applies the user's answers to the onboarding question (no other subcommand)
+  // the setup tool: the model applies the user's answers to the setup questions (no other subcommand)
   on('tool.describe', { tool: `mcp__${COMMAND_NAME}__${SETUP_SPEC.name}` }, async ($: EngineInterface, e: any, next: any) => ({
     ...(await next(e)),
     isDeferred: false,
   })).catch(($: EngineInterface, e: any, next: any) => next(e))
-  on('tool.call', { tool: `mcp__${COMMAND_NAME}__${SETUP_SPEC.name}` }, async ($: EngineInterface, e: { command?: unknown }) => {
+  on('tool.call', { tool: `mcp__${COMMAND_NAME}__${SETUP_SPEC.name}` }, async ($: EngineInterface, e: { command?: unknown; agentId?: unknown }) => {
     const c = String(e?.command ?? '')
-    if (!SETUP_COMMANDS.includes(c)) return { result: `Unknown setup command; use one of: ${SETUP_COMMANDS.join(', ')}.` }
+    if (!SETUP_COMMANDS.includes(c) && !SETUP_ALIASES.includes(c)) {
+      return { result: `Unknown setup command; use one of: ${SETUP_COMMANDS.join(', ')}.` }
+    }
+    // a change applies the user's own answer: only in the main conversation of a session someone can be asked in
+    if (!['sharing preview', 'methods preview', 'methods diff', 'info data', 'info hooks', 'savings preview',
+      'trust preview', 'trust diff', 'data', 'hooks'].includes(c) &&
+      (e?.agentId || !canAsk())) {
+      return { result: `"${c}" applies the user's own answer, so it runs only in the main conversation of a session ` +
+        `the user is at; nothing was changed. The user can type ${COMMAND} ${c} themselves.` }
+    }
     const text = await (await servedCommand($)).run(c)
     void Promise.resolve(after?.(c.split(' ')[0]!)).catch(() => undefined)
     return { result: text }
@@ -1487,8 +1561,8 @@ export function serveCommand(
     } catch {
       // the answer stands
     }
-    // a sign-in or a sign-out: the methods file follows it, and a sign-in re-checks whether the trust note is due
-    if (/^(login|code|logout)\b/i.test(args.trim())) void syncMethodsNow().then(() => checkTrust($, /Signed in/.test(text)))
+    // a sign-in or a sign-out: the methods file follows it
+    if (/^(login|code|logout)\b/i.test(args.trim())) void syncMethodsNow()
     // the engine already shows a hook's answer under the plugin's name: drop the answer's own leading label
     return { text: text.replace(/^agent-services: /, '') }
   }).catch(() => ({ text: `the command failed; try ${COMMAND} status.` }))
@@ -1499,7 +1573,7 @@ export function serveCommand(
 let servedOptions: (() => EngineOptions | Promise<EngineOptions>) | null = null
 let servedCmd: Command | null = null
 let servedAfter: ((sub: string) => unknown) | null = null
-let onboarded: string | null = null // the session the onboarding note went to
+let prompted: string | null = null // the session whose first prompt has been seen
 
 async function servedCommand($: EngineInterface): Promise<Command> {
   if (!servedOptions) throw new Error('the command is not served')
@@ -1531,7 +1605,7 @@ export async function pastedCode(
     if (answer === null) return null // no sign-in waits: an ordinary message
     if (answer.startsWith('Signed in')) {
       void Promise.resolve(servedAfter?.('login')).catch(() => undefined)
-      void syncMethodsNow().then(() => checkTrust($, true)) // the trust note, at a later prompt
+      void syncMethodsNow() // the setup questions come with a later prompt (promptNote)
     }
     tookCode($)
     return `${PASTED_TAKEN}
@@ -1543,23 +1617,17 @@ ${PASTED_FAILED}` // a code-shaped message is never forwarded once the sign-in p
   }
 }
 
-/** The first prompt's onboarding note (Command.onboarding), once per session; at a later prompt one review note
- * (Command.reviewNotes: a newer version, changed methods, the methods question); null when there is none. */
+/** The note for this prompt (Command.promptNote): the company's choice once, the setup questions, and from the
+ * session's second prompt on a newer version or changed methods; null when there is none. */
 export async function onboardingNote($: EngineInterface): Promise<string | null> {
   try {
     if (!servedOptions) return null
     const cmd = await servedCommand($)
     const session = String(await $.session.id())
-    if (onboarded !== session) {
-      onboarded = session
-      const first = await cmd.onboarding()
-      if (first) return first // one question per prompt: the review notes wait for the next one
-    }
-    if (!(await cmd.signedIn())) return null // signed out: no notes at all (DATA.md)
-    // Claude Code's own auto-update on: it updates the plugin without asking, so no note asks the user about a version
-    const update = (await cmd.autoUpdateOn()) ? null : await takeUpdateNote($)
-    const note = await cmd.reviewNotes(update ? { trust: false, pending: false } : await methodsNotes($), update)
-    if (note && note.which !== 'update') methodsNoted(note.which)
+    const first = prompted !== session
+    prompted = session
+    const note = await cmd.promptNote(first, () => takeUpdateNote($), async () => (await methodsNotes($)).pending)
+    if (note?.which === 'pending') methodsNoted()
     return note?.text ?? null
   } catch {
     return null

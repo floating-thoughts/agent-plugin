@@ -1,4 +1,4 @@
-// Python-compatible number and time helpers (cleanup route R6, moved from metrics.ts unchanged): tuple order,
+// Python-compatible number and time helpers (moved from metrics.ts unchanged): tuple order,
 // float formatting and rounding, math.fsum-style sums, ISO time parsing, local days, HMAC and the salted ref.
 // Used by metrics.ts, transcripts.ts, status.ts, render.ts, estimate.ts and migrate.ts. Nothing here touches
 // the engine.
@@ -78,7 +78,7 @@ const ISO_RX =
 
 /**
  * datetime.fromisoformat(text.replace("Z", "+00:00")) as epoch microseconds, or null when Python raises ValueError.
- * A naive time is taken as local (modules/usage parse_iso) or as UTC (host/dashboard.py _local_day).
+ * A naive time is taken as local (the usage parser's parse_iso) or as UTC (the Python client's _local_day).
  */
 export function parseIso(text: unknown, naive: 'local' | 'utc' = 'local'): number | null {
   if (typeof text !== 'string') return null
@@ -138,7 +138,7 @@ export function hmacSha256(key: Uint8Array, msg: Uint8Array): Uint8Array {
   return sha256(concat(opad, sha256(concat(ipad, msg))))
 }
 
-/** tools/diagnostic/payload.py ref(): a salted 16-hex reference. */
+/** the diagnostic tool's ref(): a salted 16-hex reference. */
 export const ref = (salt: Uint8Array, kind: string, value: string): string =>
   hex(hmacSha256(salt, utf8(`${kind}:${value}`))).slice(0, 16)
 

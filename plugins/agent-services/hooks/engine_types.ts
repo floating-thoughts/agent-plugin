@@ -1,8 +1,8 @@
 // The seams of the in-process core (core.ts, records.ts, counters.ts): what it needs from the svc channel
-// (svc.ts, P2), the store, the clock and the file system. Harness-neutral: nothing here touches `$`.
+// (svc.ts), the store, the clock and the file system. Harness-neutral: nothing here touches `$`.
 // Types only; Node's type stripping erases this file's imports.
 
-// One answer from the service, as host/services.py Result: `ok` with the opened inner body, or an error code.
+// One answer from the service, as the Python client's Result: `ok` with the opened inner body, or an error code.
 export type SvcResult = {
   ok: boolean
   status: number | null
@@ -10,16 +10,16 @@ export type SvcResult = {
   error: string | null
 }
 
-// Each call carries the deadline it must answer within (3.3 item 3: agent.spawn 1 s, tool.call 8 s in all,
+// Each call carries the deadline it must answer within (agent.spawn 1 s, tool.call 8 s in all,
 // background work longer). The channel never sleeps out a Retry-After inside it.
 export type CallOptions = { kind: string; deadlineMs: number }
 
-// The shell gate as host/services.py gate_state(). Reasons: null (open), 'unknown' (no hello yet), 'login'
+// The shell gate as the Python client's gate_state(). Reasons: null (open), 'unknown' (no hello yet), 'login'
 // (no valid sign-in, or a 401 that did not recover), 'locked' (a 423 that did not recover), 'upgrade',
-// 'offline', 'unavailable', 'unverified'. 'login' and 'locked' are the auth-fail state of plan 3.9.
+// 'offline', 'unavailable', 'unverified'. 'login' and 'locked' are the auth-fail state.
 export type GateState = { open: boolean; reason: string | null; minShell: string | null }
 
-// What the core needs from the svc channel. P2's svc.ts implements it; the tests use a fake.
+// What the core needs from the svc channel. svc.ts implements it; the tests use a fake.
 export interface Transport {
   // One sealed, signed request (`path` is the inner path, as '/router/decide'). Never throws.
   call(method: 'GET' | 'POST', path: string, body: Record<string, unknown> | null, opts: CallOptions): Promise<SvcResult>

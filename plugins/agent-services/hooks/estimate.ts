@@ -1,6 +1,6 @@
 // The usage estimate, harness-neutral: the POST /diagnostic/estimate body, its preview and the one consented send.
 //
-// A port of tools/diagnostic/estimate.py build_request() and host/diagnostic.py estimate(): the body is built from
+// A port of the diagnostic tool's build_request() and the Python client's estimate(): the body is built from
 // metrics.ts scan() facts of the transcripts under <HOME>/.claude/projects (or CLAUDE_CONFIG_DIR/projects). Nothing
 // here touches the engine; the facts and the send function are passed in.
 //
@@ -8,7 +8,7 @@
 //   estimateRequest(facts, clientVersion?)  facts: metrics.ts scan(files, prices), where files over READ_LIMIT (4 MiB)
 //                                           have text null. -> { request, estimated, note } or { error }.
 //   runEstimate(facts, { consent, send })   consent: the user's explicit yes for this one send (the slash command's
-//                                           `estimate send`); send(request): the svc channel (P2), called at most
+//                                           `estimate send`); send(request): the svc channel, called at most
 //                                           once and only with consent, with the very request the preview shows.
 //
 // Files over 4 MiB are not read. They are counted by size and scaled: each such file adds its bytes times the
@@ -245,7 +245,7 @@ export type EstimateRun<A> =
   | (Prepared & { sent: true; answer: A })
 
 /**
- * host/diagnostic.py estimate(): without consent nothing is sent and the result is the preview; with consent the
+ * the Python client's estimate(): without consent nothing is sent and the result is the preview; with consent the
  * same request is sent once. The metrics switch is not involved: the consent covers this one send only.
  */
 export async function runEstimate<A>(facts: Facts, opts: { consent: boolean; send: Send<A>; clientVersion?: string }): Promise<EstimateRun<A>> {
@@ -254,4 +254,28 @@ export async function runEstimate<A>(facts: Facts, opts: { consent: boolean; sen
   if (opts.consent !== true) return { ...prep, sent: false }
   const answer = await opts.send(prep.request)
   return { ...prep, sent: true, answer }
+}
+
+const isRec = (v: unknown): v is Obj => typeof v === 'object' && v !== null && !Array.isArray(v)
+const numOr = (v: unknown): number | null => (typeof v === 'number' && Number.isFinite(v) ? v : null)
+
+/** The local estimate record the dashboard reads (render.ts estimatePart), from a DiagEstimate answer; the slash
+ * command's `estimate send` keeps it (store estimate_answer). */
+export function estimateFacts(answer: unknown, madeAt: string): Obj | null {
+  if (!isRec(answer)) return null
+  const total = isRec(answer.total) ? answer.total : {}
+  const usd = isRec(total.usd) ? total.usd : {}
+  const pct = isRec(answer.pct) ? answer.pct : {}
+  const window = isRec(answer.window) ? answer.window : {}
+  return {
+    made_at: madeAt,
+    estimate: {
+      low_usd: numOr(usd.low),
+      high_usd: numOr(usd.high),
+      pct_low: numOr(pct.low),
+      pct_high: numOr(pct.high),
+      period_days: 30, // the answer is per month (api_usd_month)
+      basis_days: numOr(window.days),
+    },
+  }
 }

@@ -1,4 +1,4 @@
-// Per-action receipts, ported one to one from host/receipts.py: one short line in an answer's `notice` each time
+// Per-action receipts, ported one to one from the Python client: one short line in an answer's `notice` each time
 // the core applies a saving or safety action (a dispatch routed to a cheaper model, a recorded compaction saving,
 // a denied risky tool call). No dollar figure, no model name. At most one receipt per kind per session every
 // THROTTLE_SECONDS; a notice the answer already carries is never replaced. Memory only.

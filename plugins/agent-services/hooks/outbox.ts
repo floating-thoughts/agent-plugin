@@ -1,9 +1,9 @@
-// The local request log (A21 item 2; plan 3.7; contract x-outbox), harness-neutral: file
+// The local request log (contract x-outbox), harness-neutral: file
 // access and the clock are passed in.
 //
 // - Every request to the service is logged before it is sent (the line is filled in when the answer comes):
 //   body_text is the exact inner body sent (UTF-8), never the Authorization header, with REQUEST_SECRET fields
-//   redacted (as host/services.py _redact_request); plus method, route, status, error, preview, and the outer facts
+//   redacted (as the Python client's _redact_request); plus method, route, status, error, preview, and the outer facts
 //   (outer_path, outer_bytes: the outer path and the length of the sealed body as sent).
 // - Previews are logged with preview true; each tool call of the model (name and arguments) as kind "tool"; each
 //   dashboard publish attempt as kind "artifact_publish".
@@ -53,7 +53,7 @@ export type RequestLine = {
 type Line = Record<string, unknown>
 type FileBuf = { base: string | null; lines: Line[]; dropped: number }
 
-/** ISO time with milliseconds and Z, as host/services.py _iso. */
+/** ISO time with milliseconds and Z, as the Python client's _iso. */
 export const isoTime = (ms: number): string => new Date(ms).toISOString()
 
 /** The first 8 hex of the session id (a UUID); a session id without 8 hex digits is hashed first. */

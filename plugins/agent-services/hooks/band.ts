@@ -1,9 +1,9 @@
-// The band above the prompt (cleanup route R9): one short line of what agent-services did for this customer, in
+// The band above the prompt: one short line of what agent-services did for this customer, in
 // the board's and the status line's own facts and words, e.g.
 //   "agent-services saved you $3.10 in the last 7 days | today: 5 jobs on a cheaper model | latest: ... at 2:05 pm"
 //   (the parts joined by status.ts SEP, a middle dot, shown here as |)
 //
-// Owner decision 2026-11-01 (replaces R9's "hidden while signed out, paused or with nothing to show"): the band
+// Decision (it replaced "hidden while signed out, paused or with nothing to show"): the band
 // always shows something. wiring.ts bandState() says which state the session is in and hands the facts along;
 // bandText() turns it into the line, in plain words for readers who are not technical, saying in full what the
 // status line (status.ts statusText) says in short:
@@ -48,7 +48,7 @@ export type BandState = { state: BandKind; facts?: BandFacts | null }
 // LOCKED_LINE, ORG_PAUSED_STATUS, GATE_STATUS, HINT_WAIT, HINT_OFF).
 export const BAND_TEXT: Readonly<Record<string, string>> = {
   wait: `${NAME} is on. Your savings show here after your first full day of use.`,
-  off: `${NAME} is on. To see how much it saves you, type ${COMMAND} savings on.`,
+  off: `${NAME} is on. To see how much it saves you, type ${COMMAND} sharing on.`,
   signed_out: `${NAME}: signed out. Type ${COMMAND} login to sign in.`,
   locked: `${NAME}: this account is locked. Contact support, then type ${COMMAND} login.`,
   paused: ORG_PAUSED_LINE,
@@ -142,8 +142,6 @@ export function bandText(state: unknown, columns?: unknown, timeZone?: string): 
   return BAND_TEXT[st.state] ?? BAND_TEXT.starting
 }
 
-/** The state the band draws now (tests). */
-export const bandShown = (): BandState | null => shown
 
 /** wiring.ts setBand: the band's state (bare facts are the 'facts' state), and a redraw when it changed. Never throws. */
 export function bandSetter($: EngineInterface): (state: BandState | BandFacts | null) => void {

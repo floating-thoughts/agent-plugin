@@ -1,4 +1,4 @@
-// /agent-services remove (owner 2026-11-01): undo what this plugin set up on this computer, then print the one
+// /agent-services remove: undo what this plugin set up on this computer, then print the one
 // uninstall command. Only the slash command runs it (the setup tool cannot): the user must type it.
 //
 // Order: sign out (the server ends the sign-in), take the CLAUDE.md section out (the same checks as trust off),
@@ -137,7 +137,7 @@ export async function removeAll(d: RemoveDeps): Promise<string> {
   )
   lines.push(
     'Not changed by this: a private dashboard page this plugin published to your claude.ai account (delete it ' +
-      'there), and what the service keeps for your account (see DATA.md in the plugin, or /agent-services data).',
+      'there), and what the service keeps for your account (see DATA.md in the plugin, or /agent-services info data).',
   )
   lines.push('This session\'s agent-services hooks now do nothing more; other open Claude Code sessions stop within ' +
     'a few seconds (they see the REMOVED file this left in the data folder). Close them, then, as the last step, in a ' +

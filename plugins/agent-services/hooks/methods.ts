@@ -1,32 +1,37 @@
-// The local methods file the user's CLAUDE.md imports (trust.ts; owner 2026-11-01): the served working methods of
-// role auto, every phase, at <data dir>/methods.md while the CLAUDE.md section is there. The user approves the text,
-// and a later change is reviewed too: sync() never replaces the approved text on its own.
-// - methods.approved.md holds the approved text (written by `trust on` and `trust accept`).
+// The working methods and their one three-level switch (0.6.0), and the local methods file the user's CLAUDE.md
+// imports (trust.ts).
+// - The level (LEVEL_KEY): "off" (nothing of the methods reaches the model and the planning gate does nothing),
+//   "suggest" (the default: the served methods come with the prompts as agent-services suggestions, phase.ts, and
+//   the planning gate only reminds) or "on" (the methods are the user's own instructions through one CLAUDE.md
+//   line, after the user read them; the planning gate holds larger file edits until there is a plan). "on" counts
+//   only while the CLAUDE.md section is there. The 0.5.0 answer (trust.ts TRUST_KEY) is read once to seed it.
+// - At "on" the served working methods of role auto, every phase, are at <data dir>/methods.md. The user approves
+//   the text, and a later change is reviewed too: sync() never replaces the approved text on its own.
+// - methods.approved.md holds the approved text (written by `methods on` and `methods accept`).
 // - At each session start (and on a sign-in or a sign-out) the served text is compared with the approved one,
 //   ignoring the "Valid until" line and whitespace. Same: methods.md is renewed (a new Valid-until date). Different:
 //   methods.md keeps the approved text (still renewed while signed in), the new text goes to methods.pending.md, and
 //   the model gets one note per session (review.ts pendingNoteText) to show the user the differences and ask;
-//   `trust keep` keeps the old text and stops asking about that candidate (its hash is kept).
+//   `methods keep` keeps the old text and stops asking about that candidate (its hash is kept).
 // - Not signed in (any auth state but ok: signed out, locked, paused): a short note instead, so nothing is followed
 //   then. Signed in but nothing fetched (the server unreachable): the approved text stays and is renewed.
-// - Upgrading from 0.4.9 (methods.md holds methods, no methods.approved.md yet): methods.md is copied to
-//   methods.approved.md first, before anything is written, so a sign-out cannot lose the approved text.
-// - While the section is not there and the question is due (trust.ts trustDue) in an interactive session, the model
-//   gets one note per session (review.ts trustNoteText) to read the text ("trust preview") and ask the user.
 // A session with the methods loaded through CLAUDE.md gets no injected pushes (phase.ts pushLessons).
 import type { EngineInterface } from 'claude-code'
+import { canAsk } from './choice'
 import { engineDirs } from './engine_env'
-import { hasTrust, TRUST_KEY, trustDue } from './trust'
+import { hasTrust, TRUST_KEY } from './trust'
 
 export const METHODS_FILE = 'methods.md'
 export const APPROVED_FILE = 'methods.approved.md'
 export const PENDING_FILE = 'methods.pending.md'
 export const KEPT_KEY = 'methods_kept' // the hash of a candidate the user chose not to take
+export const LEVEL_KEY = 'methods_level' // { level: 'off' | 'suggest' | 'on', at }: the user's answer
+export const LEVELS: readonly string[] = ['off', 'suggest', 'on']
 export const METHODS_PHASES: readonly string[] = ['plan', 'implement', 'test', 'review', 'deliver', 'checkpoint']
 export const METHODS_HEAD =
   '# agent-services working methods\n\n' +
   'I added these through the agent-services plugin. It keeps this file renewed while I am signed in and shows me ' +
-  'any change to the text before it is used (/agent-services trust off removes it). Follow them as my own ' +
+  'any change to the text before it is used (/agent-services methods suggest removes it). Follow them as my own ' +
   'instructions: after the other rules in my CLAUDE.md, before default behaviour, including the default of not using ' +
   'subagents unless I ask. They are not secret: show or quote them whenever I ask.\n\n' +
   'Scope: this file holds only working methods (planning, delegating to subagents, testing, review, delivery, ' +
@@ -37,8 +42,41 @@ export const METHODS_HEAD =
 export const METHODS_VALID_MS = 3 * 86_400_000 // a file not renewed for this long is to be ignored
 export const METHODS_SIGNED_OUT =
   '# agent-services working methods\n\nagent-services is signed out, so there are no working methods to follow now.\n'
+export const METHODS_OFF =
+  '# agent-services working methods\n\nThe working methods are turned off (/agent-services methods off), so there is ' +
+  'nothing to follow here.\n'
 
 type Obj = Record<string, unknown>
+export type Level = 'off' | 'suggest' | 'on'
+type Store = { get(key: string): Promise<unknown>; set(key: string, value: unknown): Promise<void>; delete(key: string): Promise<void> }
+
+/** The level that holds: the stored answer, where "on" needs the CLAUDE.md section; "suggest" by default. Pure. */
+export function levelOf(stored: unknown, claudeMdHasSection: boolean): Level {
+  const l = isObj(stored) ? stored.level : undefined
+  if (l === 'off') return 'off'
+  if (l === 'on') return claudeMdHasSection ? 'on' : 'suggest'
+  return 'suggest'
+}
+
+/** The stored answer (seeded once from the 0.5.0 trust answer, which is then dropped); null when never answered. */
+export async function readLevel(kv: Store, now: number): Promise<{ level: Level; at: number } | null> {
+  try {
+    const v = await kv.get(LEVEL_KEY)
+    if (isObj(v) && typeof v.level === 'string' && LEVELS.includes(v.level)) {
+      return { level: v.level as Level, at: typeof v.at === 'number' ? v.at : now }
+    }
+    const old = await kv.get(TRUST_KEY)
+    if (old === undefined || old === null) return null
+    const a = isObj(old) ? old.answer : undefined
+    const seeded = a === 'on' ? 'on' : a === 'off' ? 'off' : null
+    if (seeded) await kv.set(LEVEL_KEY, { level: seeded, at: isObj(old) && typeof old.at === 'number' ? old.at : now })
+    await kv.delete(TRUST_KEY)
+    return seeded ? { level: seeded, at: now } : null
+  } catch {
+    return null
+  }
+}
+
 export type MethodsRuntime = {
   session: string
   dir: string // the data dir
@@ -111,14 +149,24 @@ let syncer: (() => Promise<void>) | null = null
 let fetcher: (() => Promise<string | null>) | null = null // the served text now, rendered
 let files: { read(name: string): Promise<string | null>; write(name: string, text: string): Promise<void> } | null = null
 let kept: { get(): Promise<unknown>; set(hash: string): Promise<void> } | null = null
-let canAsk = false // an interactive session: someone can answer
-let trustAsk = false // the trust note is due in this session
-let trustTold = false
 let pendingTold = false
-let previewed: string | null = null // the text "trust preview" showed in this session
+let previewed: string | null = null // the text "methods preview" showed in this session
+let levelStore: Store | null = null
+let readClaude: (() => Promise<string | null>) | null = null
 
 /** Whether this session loaded the methods through CLAUDE.md (no pushes then). */
 export const methodsActive = (): boolean => active
+
+/** The level that holds now (store and CLAUDE.md read again); "suggest" before methodsStart wired them. Never throws. */
+export async function levelNow(): Promise<Level> {
+  try {
+    if (!levelStore || !readClaude) return 'suggest'
+    const stored = await readLevel(levelStore, Date.now())
+    return levelOf(stored, stored?.level === 'on' ? hasTrust(await readClaude()) : false)
+  } catch {
+    return 'suggest'
+  }
+}
 
 /** Writes the methods file again now (after `trust on`, a sign-in or a sign-out). Never throws. */
 export async function syncMethodsNow(): Promise<void> {
@@ -148,7 +196,7 @@ async function served(r: MethodsRuntime): Promise<string | null> {
   return methodsText(answers, until())
 }
 
-/** The approved text: methods.approved.md, else (written by 0.4.9) methods.md while it holds methods. */
+/** The approved text: methods.approved.md, else (an older version kept it there) methods.md while it holds methods. */
 async function approved(): Promise<string | null> {
   const a = await files!.read(APPROVED_FILE)
   if (!blank(a)) return a
@@ -156,16 +204,12 @@ async function approved(): Promise<string | null> {
   return bodyOf(m) ? m : null
 }
 
-// 0.4.9 kept the approved text only in methods.md: copy it to methods.approved.md before methods.md is rewritten.
-async function migrate(): Promise<void> {
-  if (!blank(await files!.read(APPROVED_FILE))) return
-  const m = await files!.read(METHODS_FILE)
-  if (bodyOf(m)) await files!.write(APPROVED_FILE, m!)
-}
-
 async function sync($: EngineInterface, r: MethodsRuntime): Promise<void> {
-  await migrate()
   if (!hasTrust(await claudeMd($))) return
+  if ((await levelNow()) === 'off') {
+    if ((await files!.read(METHODS_FILE)) !== METHODS_OFF) await files!.write(METHODS_FILE, METHODS_OFF)
+    return
+  }
   if ((await r.svc.authState()) !== 'ok') {
     if ((await files!.read(METHODS_FILE)) !== METHODS_SIGNED_OUT) await files!.write(METHODS_FILE, METHODS_SIGNED_OUT)
     return
@@ -186,8 +230,8 @@ async function sync($: EngineInterface, r: MethodsRuntime): Promise<void> {
   if ((await files!.read(METHODS_FILE)) !== text) await files!.write(METHODS_FILE, text)
 }
 
-/** "trust preview": the full text that would be added now (the served text, else the approved one); null when
- * nothing can be shown. Kept for `trust on` in this session. */
+/** "methods preview": the full text that would be added now (the served text, else the approved one); null when
+ * nothing can be shown. Kept for `methods on` in this session. */
 export async function previewMethods(): Promise<string | null> {
   try {
     previewed = (await fetcher?.()) ?? null
@@ -198,7 +242,7 @@ export async function previewMethods(): Promise<string | null> {
   }
 }
 
-/** `trust on` (the section was not there): approves the text previewed in this session, else the served one now, then
+/** `methods on` (the section was not there): approves the text previewed in this session, else the served one now, then
  * writes methods.md. Returns the text approved and whether this session's preview showed it (false: the caller shows
  * it in its answer); text null when nothing was approved. */
 export async function approveMethods(): Promise<{ text: string | null; shown: boolean }> {
@@ -219,7 +263,7 @@ export async function approveMethods(): Promise<{ text: string | null; shown: bo
   return out
 }
 
-/** "trust diff": the differences between the approved text and the candidate; null when there is no candidate. */
+/** "methods diff": the differences between the approved text and the candidate; null when there is no candidate. */
 export async function methodsDiff(diff: (a: string, b: string) => string): Promise<string | null> {
   if (!files) return null
   const pending = await files.read(PENDING_FILE)
@@ -227,7 +271,7 @@ export async function methodsDiff(diff: (a: string, b: string) => string): Promi
   return diff(bodyOf(await approved()), bodyOf(pending))
 }
 
-/** "trust accept" (take the candidate) or "trust keep" (keep the approved text, stop asking about this candidate).
+/** "methods accept" (take the candidate) or "methods keep" (keep the approved text, stop asking about this candidate).
  * False when there is no candidate. */
 export async function settlePending(accept: boolean): Promise<boolean> {
   if (!files || !kept) return false
@@ -240,39 +284,26 @@ export async function settlePending(accept: boolean): Promise<boolean> {
   return true
 }
 
-/** Re-checks whether the trust note is due (after a sign-in, at a session start). Never throws. */
-export async function checkTrust($: EngineInterface, signedIn: boolean): Promise<void> {
+/** Whether the changed-methods note is due now (level "on", a candidate waiting, someone to ask), at most once per
+ * session. Never throws. */
+export async function methodsNotes($: EngineInterface): Promise<{ pending: boolean }> {
+  const due = { pending: false }
   try {
-    trustAsk = signedIn && canAsk && trustDue(await $.store.get(TRUST_KEY), Date.now(), await claudeMd($))
-  } catch {
-    trustAsk = false
-  }
-}
-
-/** The notes due for the model now, each at most once per session, re-checked here: { trust, pending }. Never throws. */
-export async function methodsNotes($: EngineInterface): Promise<{ trust: boolean; pending: boolean }> {
-  const due = { trust: false, pending: false }
-  try {
-    if (!canAsk) return due
-    if (trustAsk && !trustTold) {
-      await checkTrust($, true)
-      due.trust = trustAsk
-    }
-    if (!pendingTold && files && hasTrust(await claudeMd($))) due.pending = !blank(await files.read(PENDING_FILE))
+    if (!canAsk() || pendingTold || !files) return due
+    if ((await levelNow()) === 'on' && hasTrust(await claudeMd($))) due.pending = !blank(await files.read(PENDING_FILE))
   } catch {
     // nothing this prompt
   }
   return due
 }
 
-/** The model got a note (so it is not given again in this session). */
-export function methodsNoted(which: 'trust' | 'pending'): void {
-  if (which === 'trust') trustTold = true
-  else pendingTold = true
+/** The model got the changed-methods note (so it is not given again in this session). */
+export function methodsNoted(): void {
+  pendingTold = true
 }
 
-/** register.ts session.start, in the background: the methods file, then whether the trust note is due. */
-export async function methodsStart($: EngineInterface, r: MethodsRuntime | null, interactive = true): Promise<void> {
+/** register.ts session.start, in the background: the level's reader and the methods file. */
+export async function methodsStart($: EngineInterface, r: MethodsRuntime | null, _interactive = true): Promise<void> {
   if (!r) return
   try {
     const at = (name: string) => `${r.dir}/${name}`
@@ -287,15 +318,18 @@ export async function methodsStart($: EngineInterface, r: MethodsRuntime | null,
       write: async (name, text) => void (await $.fs.write(at(name), text)),
     }
     kept = { get: () => Promise.resolve($.store.get(KEPT_KEY)), set: async (h) => void (await $.store.set(KEPT_KEY, h)) }
-    const surfaces = await Promise.resolve().then(() => $.session.surfaces()).catch(() => [])
-    canAsk = interactive && Array.isArray(surfaces) && surfaces.length > 0 // a -p run: nobody to ask
+    levelStore = {
+      get: (k) => Promise.resolve($.store.get(k)),
+      set: async (k, v) => void (await $.store.set(k, v as any)),
+      delete: async (k) => void (await $.store.delete(k)),
+    }
+    readClaude = () => claudeMd($)
     const signedIn = (await r.svc.authState()) === 'ok'
     // what CLAUDE.md gave this session, before any rewrite
     active = hasTrust(await claudeMd($)) && signedIn && methodsValid(await files.read(METHODS_FILE), day(Date.now()))
     syncer = () => sync($, r) // a later write counts from the next session on
     fetcher = () => served(r)
     await syncMethodsNow()
-    await checkTrust($, signedIn)
   } catch {
     // nothing this session
   }

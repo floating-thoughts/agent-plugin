@@ -1,4 +1,4 @@
-// Transcript facts (cleanup route R6, moved from metrics.ts unchanged): the usage module's prices and usage
+// Transcript facts (moved from metrics.ts unchanged): the usage module's prices and usage
 // counts, the transcript walk order and entry collection, the dispatch type words and scan(), the facts the
 // daily body and the estimate are built from. Nothing here touches the engine: files and prices are passed in.
 import { utf8 } from './e2e'
@@ -9,7 +9,7 @@ export const DISPATCH_TOOLS = ['Agent', 'Task']
 export const SUBAGENT_TYPES = ['general-purpose', 'Explore', 'Plan', 'claude', 'fork', 'statusline-setup', 'claude-code-guide']
 export const MODEL_WORDS = ['haiku', 'sonnet', 'opus', 'fable', 'inherit']
 export const EFFORTS = ['low', 'medium', 'high', 'xhigh', 'max']
-// tools/diagnostic/facts.py TYPE_WORDS, in order; the escaped words are the Chinese type words the user's
+// the diagnostic tool's TYPE_WORDS, in order; the escaped words are the Chinese type words the user's
 // dispatches use (review x4, replan, plan x2, acceptance, default, implement, fix, test, research, search, lookup,
 // write, refactor, debug, docs, build, deploy, check, analyze).
 export const TYPE_WORDS = [
@@ -254,7 +254,7 @@ const newDay = (): DayFacts => ({
 const sizeOf = (f: TranscriptFile): number =>
   typeof f.size === 'number' && f.size >= 0 ? f.size : typeof f.text === 'string' ? utf8(f.text).length : 0
 
-/** tools/diagnostic/facts.py scan() for the parts the daily and estimate bodies use. */
+/** the diagnostic tool's scan() for the parts the daily and estimate bodies use. */
 export function scan(files: TranscriptFile[], prices: Prices): Facts {
   const s = new Scanner(prices)
   for (const f of files) s.add(f)

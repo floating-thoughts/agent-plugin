@@ -1,4 +1,4 @@
-// agent-services update check (owner 2026-11-01): the plugin never updates itself; it only checks whether a newer
+// agent-services update check: the plugin never updates itself; it only checks whether a newer
 // version is listed, and the user decides. START_DELAY_MS after session.start and every CHECK_EVERY_MS after, never
 // awaited by a hook: at most every UPDATE_EVERY_MS (a failed check counts too), and by one session on this computer at
 // a time (a lease in the shared state file), it runs `claude plugin marketplace update <marketplace>` (which refreshes the marketplace's
@@ -21,7 +21,6 @@ export const UPDATE_EVERY_MS = 3_600_000 // how often the listing is refreshed, 
 export const LEASE_MS = 300_000 // a session checking holds the others off this long
 export const LEASE_SETTLE_MS = 2_000 // a lease written is read back after this, so one of two writers wins
 const RUN_TIMEOUT_MS = 120_000
-const UPGRADE_HINT = 'no longer accepted' // the service gate's upgrade notice
 const STATE_NAME = 'plugin-update.json'
 
 type Row = Record<string, unknown>
@@ -110,13 +109,6 @@ async function noted($: EngineInterface, what: string): Promise<void> {
   lastCheck = { at: await safe(() => $.clock.now(), Date.now()), what }
 }
 
-// Every core answer passes here: 'inactive' closes the gate (its notice, given once, tells an upgrade apart).
-export function noteGate(a: { fallback: string | null; notice: string | null }): void {
-  if (a.fallback !== 'inactive') gate = 'open'
-  else if (typeof a.notice === 'string' && a.notice.includes(UPGRADE_HINT)) gate = 'upgrade'
-  else if (a.notice || gate === 'open') gate = 'closed'
-}
-
 // an engine call that may throw or reject: `d` then
 const safe = <T>(f: () => Promise<T> | T, d: T): Promise<T> => Promise.resolve().then(f).catch(() => d)
 const text = async (read: () => Promise<unknown>) => String((await safe(read, '')) ?? '').trim()
@@ -195,7 +187,7 @@ async function run($: EngineInterface, interactive: boolean): Promise<void> {
   if (await text(() => $.env.get('CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC'))) {
     return noted($, 'skipped (CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC is set)')
   }
-  if (!interactive && ((await safe(() => $.session.surfaces(), [])) ?? []).length === 0) return // a -p run
+  if (!interactive) return // nobody can be asked here (choice.ts canAskNow, passed in by register.ts): a -p run
   // another session ran /agent-services remove: nothing more here (its marker file)
   const marker = removedMarker(await dataDir($))
   if (String((await safe(() => $.fs.read(marker), '')) ?? '').trim()) return markRemoved()
@@ -310,9 +302,6 @@ export async function applyUpdate($: EngineInterface, marketplace = 'agent-plugi
   return (applied = answer)
 }
 
-/** False once a `$.process` call could not run here (a surface without it); true until then. */
-export const canRunCommands = (): boolean => !processMissing
-
 // The engine's own refusal of an empty argv (measured 2026-10-31, CLI 2.1.316): `$.process` is there.
 const ARGV_REFUSAL = /non-empty list|argv/i
 
@@ -331,7 +320,7 @@ export async function probeProcess($: EngineInterface): Promise<boolean> {
 }
 
 // From session.start: schedules the checks once per loaded copy. Never throws, never waits. `gateFrom` (optional)
-// tells the gate at each check (signed out: closed; a shell-gate upgrade answer: upgrade); without it noteGate does.
+// tells the gate at each check (signed out: closed; a shell-gate upgrade answer: upgrade); without it the gate stays open.
 // `onMissing` is told once when `$.process` turns out to be missing: from then on nothing is run.
 export function updateCheck($: EngineInterface, interactive: boolean, gateFrom?: () => Promise<Gate>, onMissing?: () => void): void {
   if (started || processMissing) return

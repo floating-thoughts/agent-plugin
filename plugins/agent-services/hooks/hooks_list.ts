@@ -1,4 +1,4 @@
-// Every hook this plugin registers, as a fixed table (owner 2026-11-01): `/agent-services hooks` and the setup tool's
+// Every hook this plugin registers, as a fixed table: `/agent-services hooks` and the setup tool's
 // "hooks" print it, so the user and the model can see what each hook may do before trusting it. A test reads the
 // on(...) calls of register.ts and the modules it wires (tools.ts, command.ts, band.ts) and fails when a hook is
 // missing here or listed here without being registered. Pure: no engine calls.
@@ -30,18 +30,23 @@ export const HOOKS: readonly HookRow[] = [
   {
     event: 'session.start', matcher: '', file: 'register.ts', does: ['network', 'file', 'process', 'ui', 'count'],
     what: 'Registers the tools and the slash command. In the background: the sign-in check, the daily usage upload ' +
-      '(only after you turned the savings record on), the start notices, the request-log cleanup (90 days), the ' +
-      'working methods for the first prompt and the CLAUDE.md methods file (only after trust on), a one-time move ' +
+      '(only while the savings record is on), the request-log cleanup (90 days), the working methods for the first ' +
+      'prompt (only at methods level suggest) and the CLAUDE.md methods file (only at methods on), a one-time move ' +
       'from an older version, and the update check (`claude plugin list --json` and `claude plugin marketplace ' +
-      'update agent-plugin`; it never updates the plugin).',
-    shown: 'Start notices as dim lines or toasts.',
+      'update agent-plugin`; it never updates the plugin; not in a session nobody can be asked in). After the other plugins\' start hooks: registers the ' +
+      'checkpoint tool, unless another plugin in the session already has a tool named checkpoint (then the notes ' +
+      'name that one), and reads the open count of .agent/pending.md in the project.',
+    shown: 'A dim line when the sign-in check has something to say.',
   },
   {
     event: 'agent.spawn', matcher: '', file: 'register.ts', does: ['network', 'deny', 'rewrite', 'ui'],
     what: 'Asks the service for routing advice on each subagent (forks and teammates are skipped). The advice can ' +
-      'deny the subagent with a reason, or set its model and effort.',
+      'deny the subagent with a reason, or set its model and effort. The request also carries the main session\'s ' +
+      'model id and whether your latest message asked for a review (yes or no; your text is not sent). Unless the ' +
+      'methods level is off, the service\'s speed-up suggestion is added once to the end of the subagent\'s prompt, ' +
+      'labelled as an agent-services suggestion.',
     shown: 'A deny shows its reason, which starts with "agent-services routing". A changed model is said each ' +
-      'time in a dim line naming the model.',
+      'time in a dim line naming the model. The added suggestion is in the subagent\'s prompt.',
   },
   {
     event: 'turn.step', matcher: '', file: 'register.ts', does: ['rewrite', 'count'],
@@ -51,11 +56,17 @@ export const HOOKS: readonly HookRow[] = [
   },
   {
     event: 'tool.call', matcher: '', file: 'register.ts', does: ['deny', 'count'],
-    what: 'The planning gate: while you are signed in, it denies Edit, Write, MultiEdit and NotebookEdit of the ' +
-      'main agent when the project has no agent-state.md, or it is still in planning, or it has no goal and plan ' +
-      '(writes to agent-state.md itself always go through). It also counts tool calls, commits and finished todos ' +
-      'locally, and the size of files read in parts. It never changes a tool\'s input.',
-    shown: 'The deny reason, which starts with "agent-services planning gate".',
+    what: 'The planning gate, only at methods level on (methods on): while you are signed in, it denies Edit, Write, ' +
+      'MultiEdit and NotebookEdit of the main agent when the project has no agent-state.md, or it is still in ' +
+      'planning, or it has no goal and plan; an Edit or MultiEdit of at most 10 changed lines passes, and writes to ' +
+      'agent-state.md and to files under .agent/ always go through. Bash is never held, so a file written through Bash is not seen. At ' +
+      'level suggest it only notes such a change for one reminder; at off it does nothing. It also counts tool ' +
+      'calls, commits and finished todos locally, and the size of files read in parts. It never changes a tool\'s ' +
+      'input. The test lock: it denies a subagent\'s Edit, Write, MultiEdit or NotebookEdit of a file that ' +
+      'matches a glob in the project\'s .agent/test-lock.json (the main conversation may edit them; Bash is ' +
+      'not checked). It times the main conversation\'s foreground Bash, PowerShell and subagent calls and ' +
+      'counts its subagent dispatches, locally.',
+    shown: 'The deny reason, which starts with "agent-services planning gate" or "agent-services test lock".',
   },
   {
     event: 'tool.call', matcher: 'tool: mcp__agent-services__<tool>', file: 'tools.ts', does: ['answer', 'network'],
@@ -74,8 +85,7 @@ export const HOOKS: readonly HookRow[] = [
   },
   {
     event: 'tool.call', matcher: 'tool: mcp__agent-services__setup', file: 'command.ts', does: ['answer', 'network', 'file'],
-    what: 'Runs one subcommand from a fixed list with the answer you gave (sharing, savings, dashboard, trust, ' +
-      'update, data, hooks).',
+    what: 'Runs one subcommand from a fixed list with the answer you gave (sharing, methods, update, info).',
     shown: 'The tool call and its answer.',
   },
   {
@@ -86,8 +96,13 @@ export const HOOKS: readonly HookRow[] = [
   {
     event: 'turn.complete', matcher: '', file: 'register.ts', does: ['network', 'file', 'ui'],
     what: 'Asks the service whether this is a good moment to compact (counters only). Publishes your private ' +
-      'savings page (and a company admin\'s board) with Claude Code\'s Artifact tool, only when you allowed it.',
-    shown: 'The Artifact call.',
+      'savings page (and a company admin\'s board) with Claude Code\'s Artifact tool, only when you allowed it. ' +
+      'Once a day, a session left open sends the daily usage summary of the new day (only while the savings record ' +
+      'is on). ' +
+      'After a main turn it also runs the compaction of a checkpoint marked in it, reads .agent/pending.md and ' +
+      '.agent/steps.json in the project, and keeps a note for the next turn when steps are ready to start but ' +
+      'fewer subagents were dispatched, or when a foreground call ran longer than 60 seconds.',
+    shown: 'The Artifact call. The open count on the status line.',
   },
   {
     event: 'tool.check', matcher: 'tool: Artifact', file: 'register.ts', does: ['answer'],
@@ -100,7 +115,10 @@ export const HOOKS: readonly HookRow[] = [
     what: 'Drops a message that is only a sign-in code while a sign-in waits for one, and finishes the sign-in with ' +
       'it, so the code never reaches the model. Adds context blocks for the model, after your text and without ' +
       'changing it: the service\'s compaction advice, the working methods of the current phase, and the plugin ' +
-      'notes (the setup question, a newer version, the methods review), each labelled as an agent-services note.',
+      'notes (the setup questions, a newer version, the methods review), one planning reminder at methods level ' +
+      'suggest and, unless the methods level is off, a reminder to run long work in the background and the steps ' +
+      'of .agent/steps.json ready to start, each labelled as an agent-services note. It notes locally whether ' +
+      'your message asks for a review (the routing request carries only yes or no).',
     shown: 'A dropped code: a toast and the sign-in answer in its place. The context blocks are not shown.',
   },
   {
@@ -123,11 +141,19 @@ export const HOOKS: readonly HookRow[] = [
     what: 'Draws one dim line above the prompt (sign-in state, savings).',
     shown: 'The line itself.',
   },
+  {
+    event: 'tool.call', matcher: 'tool: mcp__agent-services__checkpoint', file: 'flow.ts', does: ['answer', 'ui', 'context'],
+    what: 'Answers the checkpoint tool (main conversation only): once that reply ends, it compacts the conversation ' +
+      'with instructions that keep what the model listed, then, when the model gave a next step, sends that step ' +
+      'as a message from this plugin. Nothing is compacted after an interrupted turn, and nothing is sent once you ' +
+      'wrote a message yourself.',
+    shown: 'The tool call, a dim line after the compaction, and the plugin\'s message with the next step.',
+  },
 ]
 
 export const HOOKS_ALSO =
-  'Not hooks, also used: the status line ($.ui.status), timers (the request log is written every 5 seconds; the ' +
-  'update check), and questions in Claude Code\'s own dialog when you run a command (sign-in, savings record).'
+  'Not hooks, also used: the status line ($.ui.status; with the count of open lines in .agent/pending.md), timers (the request log is written every 5 seconds; the ' +
+  'update check), and questions in Claude Code\'s own dialog when you run a command (sign-in, the setup questions).'
 
 /** The table as text, for /agent-services hooks and the setup tool. */
 export function hooksText(): string {

@@ -1,8 +1,8 @@
-// The plugin's tools in Claude Code (plan 3.2, module P5): the port of host/mcp_server.py on the hooks engine.
+// The plugin's tools in Claude Code: the Python client's tool server, ported onto the hooks engine.
 // `$.tool.register` replaces .mcp.json and a `tool.call` hook answers each tool from the in-process core
-// (core.ts) over the svc channel (svc.ts). P8 wires it into register.ts.
+// (core.ts) over the svc channel (svc.ts). register.ts wires it.
 //
-// Rules (plan 3.2, 3.3 item 3, 3.9):
+// Rules:
 // - registerTools($) issues every `$.tool.register` call, each with isDeferred: false, before it awaits anything,
 //   and it touches nothing else of `$`. session.start calls it before its first slow await (store, fetch, file).
 //   All five tools are registered every session: knowing whether the user is signed in takes a store read, which
@@ -17,7 +17,7 @@
 //   open_answer) with the gate's one-line reason as `notice`.
 // - Each tool.call answers within TOOL_BUDGET_MS (the hook budget is about 10 s; fetch has a 30 s built-in timeout,
 //   so the answer is raced against a deadline and the late work is dropped).
-// - Registered tools never ask for permission (M0a), so no tool here does anything that needs consent; consent
+// - Registered tools never ask for permission, so no tool here does anything that needs consent; consent
 //   steps (estimate send, savings on) live in the slash command.
 // - Served text (lesson_lookup items, wrapped by guard.ts) only travels in the tool result: nothing here writes to
 //   the store or a file, and the outbox gets only the tool name and the model's arguments.
@@ -82,7 +82,7 @@ export type ToolCore = {
 
 export type ToolDeps = {
   core: ToolCore
-  /** The auth-fail line (3.9) or null while signed in; `fresh` re-reads the store now (else at most every 5 s). */
+  /** The auth-fail line or null while signed in; `fresh` re-reads the store now (else at most every 5 s). */
   authLine(fresh?: boolean): Promise<string | null>
   sleep: Sleep
   outbox?: { tool(name: string, args: unknown): void } | null
@@ -102,7 +102,7 @@ export function render(v: unknown): string {
   return JSON.stringify(sort(v)) ?? 'null'
 }
 
-/** The one line every tool answers in auth fail (3.9 item 1). */
+/** The one line every tool answers in auth fail. */
 export const authFailLine = (reason: string | null): string =>
   reason === 'locked' ? LOCKED_LINE : reason === 'paused' ? ORG_PAUSED_LINE : SIGN_IN_LINE
 
@@ -149,7 +149,7 @@ async function respond(deps: ToolDeps, name: string, args: unknown, ctx: ToolCon
   if (after) return { result: after }
   if (ans.fallback === 'inactive' && AUTH_FAIL_REASONS.includes(typeof ans.reason === 'string' ? ans.reason : '')) {
     // the store says signed in (another session signed in again) while this session's channel still says
-    // login or locked: one handshake reopens it (plan 3.9 item 5), then the call is answered again
+    // login or locked: one handshake reopens it, then the call is answered again
     await deps.core.gate(true)
     ans = await ask()
   }

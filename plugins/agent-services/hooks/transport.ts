@@ -1,4 +1,4 @@
-// The core's Transport over the svc channel (cleanup route R6, moved from wiring.ts unchanged): engine_types.ts
+// The core's Transport over the svc channel (moved from wiring.ts unchanged): engine_types.ts
 // Transport on svc.ts Svc, with the hook budget each core deadline fits in.
 import type { CallOptions, GateState, SvcResult, Transport } from './engine_types'
 import type { Hook, Kind, Svc } from './svc'
@@ -20,7 +20,7 @@ export const hookFor = (deadlineMs: number): Hook =>
 const FAILED: SvcResult = { ok: false, status: null, body: null, error: 'failed' }
 
 /**
- * engine_types.ts Transport on svc.ts Svc. The gate is the auth state first (3.9: 'login' or 'locked' straight
+ * engine_types.ts Transport on svc.ts Svc. The gate is the auth state first ('login' or 'locked' straight
  * from the store, so a signed-out session passes every event through from its first one), then the channel's gate.
  * Never throws.
  */
@@ -40,7 +40,7 @@ export function svcTransport(svc: Svc): Transport {
         if (a !== 'ok') return { open: false, reason: a === 'locked' || a === 'paused' ? a : 'login', minShell: null }
         const g = svc.gateState()
         // Signed in (in the store) while this session's gate still says login or locked: another session signed in
-        // since this one's 401 or 423 (3.9 item 5). Report unknown so the core handshakes again.
+        // since this one's 401 or 423. Report unknown so the core handshakes again.
         if (!g.open && (g.reason === 'login' || g.reason === 'locked' || g.reason === 'paused')) return { open: false, reason: 'unknown', minShell: null }
         return { open: g.open, reason: g.reason, minShell: g.min_shell }
       } catch {

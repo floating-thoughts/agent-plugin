@@ -1,4 +1,4 @@
-// The store's day counters as host/metrics.py reads them (cleanup route R6, moved from wiring.ts unchanged): model
+// The store's day counters as the Python client reads them (moved from wiring.ts unchanged): model
 // ids normalized, the status line's and the dashboard's event counts, and the days with a counter record. The
 // counters themselves are counters.ts; this module only reads them.
 import { COUNTER_PREFIX, MAX_COMPACT_ROWS, MAX_INDEX_ROWS, MAX_ROUTE_ROWS, MAX_STEP_MODELS, MAX_STEPS, readDay } from './counters'
@@ -9,10 +9,10 @@ import { normModel } from './transcripts'
 
 const cmp = (a: string, b: string): number => (a < b ? -1 : a > b ? 1 : 0)
 
-// ------------------------------------------------------------------ store counters, as host/metrics.py reads them
+// ------------------------------------------------------------------ store counters, as the Python client reads them
 
 /**
- * The day counters with model ids normalized (host/metrics.py read_events applies norm_model to every event before
+ * The day counters with model ids normalized (the Python client's read_events applies norm_model to every event before
  * _counters folds them): rows whose ids become equal are merged, then sorted and capped as _counters does.
  */
 export function normalizeDay(dc: DayCounters): DayCounters {

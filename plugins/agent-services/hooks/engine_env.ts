@@ -1,4 +1,4 @@
-// The Claude Code environment over `$` (cleanup route R6, moved from command.ts unchanged): environment variables
+// The Claude Code environment over `$` (moved from command.ts unchanged): environment variables
 // by literal name, the home and config folders, the agent-services data folder, file reads and the Claude account
 // hash. Used by command.ts, register.ts, dashboard.ts and update.ts (through command.ts).
 import type { EngineInterface } from 'claude-code'
@@ -6,7 +6,7 @@ import { sha256Hex, utf8 } from './e2e'
 
 const isObj = (v: unknown): v is Record<string, any> => typeof v === 'object' && v !== null && !Array.isArray(v)
 
-// ------------------------------------------------------------------ the Claude account hash (plan 3.4 item 2)
+// ------------------------------------------------------------------ the Claude account hash
 
 /** sha256 hex of oauthAccount.accountUuid from .claude.json (under CLAUDE_CONFIG_DIR first, then the home folder);
  * "" when there is none. The raw id never leaves this function. */
@@ -51,7 +51,7 @@ export async function envOf($: EngineInterface, name: string): Promise<string | 
   }
 }
 
-/** <home> and <config dir> as plan 0.2 builds them (HOME, else USERPROFILE; CLAUDE_CONFIG_DIR, else <home>/.claude). */
+/** <home> and <config dir> (HOME, else USERPROFILE; CLAUDE_CONFIG_DIR, else <home>/.claude). */
 export async function engineDirs($: EngineInterface): Promise<{ home: string; configDir: string; configSet: boolean }> {
   const get = async (n: string) => {
     try {
@@ -93,7 +93,7 @@ export function readTextOf($: EngineInterface): (path: string) => Promise<string
   }
 }
 
-/** The Claude account hash for Svc's claudeHash dependency (plan 3.4 item 2). */
+/** The Claude account hash for Svc's claudeHash dependency. */
 export function engineClaudeHash($: EngineInterface): () => Promise<string> {
   return async () => {
     const d = await engineDirs($)

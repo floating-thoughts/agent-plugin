@@ -1,5 +1,5 @@
 // What agent-services did for this customer, in plain words: the board's `timeline` (today) and `weekly` parts
-// (cleanup route R8), built so the band above the prompt (R9) can call the same functions and say the same thing.
+// built so the band above the prompt can call the same functions and say the same thing.
 //
 // Harness-neutral and pure except readOutboxDay, which takes the file access. The facts are the ones the status
 // line uses (status.ts COUNTED wording, day_counts.ts countsOf over the store counters, the cached GET
@@ -13,7 +13,7 @@
 //   inOrg(status)                             -> true for a person in an org (status.org: readOrg), else null
 //   boardData(collected, input)               -> render.ts collect()'s answer plus timeline and weekly (BOARD_FIELDS)
 //
-// collect() stays the port of host/dashboard.py (its parity tests); the page's data slot is BOARD_FIELDS.
+// collect() stays the port of the Python client (its parity tests); the page's data slot is BOARD_FIELDS.
 import { localDay } from './counters'
 import { DATA_FIELDS } from './render'
 import { COMMAND, COUNTED, fixed, shortDay } from './status'
@@ -213,9 +213,9 @@ export function weeklyLines(w: Obj, metricsOn?: boolean | null): string[] {
 }
 
 /**
- * Hook point for org membership (owner decision 2026-10-31: an employee's own board says that the company admin
+ * Hook point for org membership (an employee's own board says that the company admin
  * sees their savings figure). wiring.ts dashboardData passes `org` = org.ts readOrg (the hello answer's org, kept
- * under KEYS.org by O3): an object for any savings choice ("each" included) answers true; null (no org) answers
+ * under KEYS.org): an object for any savings choice ("each" included) answers true; null (no org) answers
  * null and the line stays off. A non-empty `org_id` also answers true.
  */
 export function inOrg(status: unknown): boolean | null {

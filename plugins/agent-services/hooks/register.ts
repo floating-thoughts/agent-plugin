@@ -1,15 +1,15 @@
-// agent-services Claude Code adapter (plan 3.1, module P8): the engine's hooks wired to the in-process core.
+// agent-services Claude Code adapter: the engine's hooks wired to the in-process core.
 // Nothing here talks to a local process: the core (core.ts), the svc channel (svc.ts), the tools (tools.ts), the slash
 // command (command.ts), the status line, dashboard, metrics and estimate (wiring.ts), the dashboard publish
 // (dashboard.ts) and the update check (update.ts) all run in this module, one instance per Claude Code session.
 //
 // Rules kept here:
-// - session.start registers the tools and the slash command first, before anything is awaited (plan 3.2 item 1);
+// - session.start registers the tools and the slash command first, before anything is awaited;
 //   the rest is built after, and every network step (hello, plan, rotation, metrics, migration) runs in the
 //   background, so no hook comes near the ~10 s budget. Every other hook waits at most a fixed time for the core
 //   and otherwise passes the event through untouched.
 // - Each engine hook becomes one or two core/1 events; the core's answer is applied as before (deny, rewrite,
-//   inject, notice). While auth has failed (3.9) the core answers pass-through, so every event goes on unchanged.
+//   inject, notice). While auth has failed the core answers pass-through, so every event goes on unchanged.
 // - The first session.start of this release runs the one-time move from the Python core (migrate.ts) in the
 //   background; it never starts or kills a process.
 // - Nothing here writes the user's settings or permission rules ($.settings is read only).
@@ -17,17 +17,19 @@ import type { EngineInterface, Register } from 'claude-code'
 import { dataDir, declareCommand, denyReason, engineClaudeHash, engineDirs, isRemoved, MARKETPLACE, onboardingNote, pastedCode, serveCommand, spawnLine } from './command'
 import { Core, type Answer } from './core'
 import { dashboardGrant, GRANT_REASON, PUBLISH_START_WAIT_MS } from './dashboard'
-import { publishBoards } from './boss' // O5: the person's board, then the company admin's
+import { publishBoards } from './boss' // the person's board, then the company admin's
+import { briefed, flowAfter, flowLock, flowPrompt, flowStart, flowTurnEnd, installFlow, withPending } from './flow' // checkpoint tool, test lock, brief, notes
 import { Guard } from './guard'
 import { migrate, OLD_SIGNIN_KEY, OLD_SIGNIN_LINE } from './migrate'
 import { FLUSH_EVERY_MS, Outbox } from './outbox'
-import { holdWrite, lessonHold, methodsStart, pushAgain, pushLessons, pushStart, surveyTool } from './phase'
+import { holdWrite, lessonHold, methodsStart, pushAgain, pushLessons, pushStart } from './phase'
 import { PRICES } from './prices'
 import { engineStore, safeDelete, safeGet, type KV } from './store'
 import { Svc, type HttpAnswer } from './svc'
 import { engineSleep, installTools, registerTools, SESSION_FALLBACK, svcAuthLine, toolInput } from './tools'
 import { probeProcess, updateCheck, type Gate } from './update'
 import { bandSetter, createWiring, installBand, svcTransport, type Wiring } from './wiring'
+import { canAskNow } from './choice'
 
 type Ev = Record<string, any>
 type Usage = { input: number; output: number; cache_read: number; cache_write: number }
@@ -86,15 +88,13 @@ const show = ($: EngineInterface, notice: string | null | undefined, toast = fal
     if (toast) $.ui.toast(notice)
   } catch {}
 }
-
 // ------------------------------------------------------------------ the session's runtime, built once
 
-// The status line's update hint: selfUpdates turns false once update.ts finds no $.process here (plan 3.8).
+// The status line's update hint: selfUpdates turns false once update.ts finds no $.process here.
 const updates = { marketplace: MARKETPLACE as string | null, selfUpdates: true }
-
 let runtime: Promise<Rt | null> | null = null
 let declared = false
-let interactive = true // session.start's isInteractive (false in a -p run: no consent dialog)
+let interactive = true // choice.ts canAskNow at session.start (false in a -p run: nobody to ask)
 let resolveFirst: (r: Rt | null) => void = () => undefined
 const first = new Promise<Rt | null>((resolve) => (resolveFirst = resolve))
 
@@ -152,7 +152,7 @@ async function build($: EngineInterface): Promise<Rt | null> {
     const readText = async (p: string) => maybe(async () => String(await $.fs.read(p)))
     const setStatus = (text: string): void => {
       try {
-        $.ui.status(text)
+        $.ui.status(withPending(text)) // flow.ts: the open-decision count
       } catch {}
     }
     const outbox = new Outbox({ fs, dir: `${dir}/services/outbox`, session, now })
@@ -168,7 +168,7 @@ async function build($: EngineInterface): Promise<Rt | null> {
       harness: HARNESS,
     })
     const transport = svcTransport(svc)
-    // no $.process here: update.ts runs nothing, and the status line shows the terminal update command (plan 3.8)
+    // no $.process here: update.ts runs nothing, and the status line shows the terminal update command
     if (!(await capped(probeProcess($), sleep, PROBE_WAIT_MS, true))) updates.selfUpdates = false
     const wiring = createWiring({
       svc,
@@ -178,7 +178,7 @@ async function build($: EngineInterface): Promise<Rt | null> {
       prices: PRICES,
       template: async () => maybe(async () => String(await $.fs.read(`${$.plugin.root}/dashboard/index.html`))),
       setStatus,
-      setBand: bandSetter($), // band.ts: the band above the prompt (R9)
+      setBand: bandSetter($), // band.ts: the band above the prompt
       outbox,
       clock: now,
       projectsRoot: `${dirs.configDir}/projects`,
@@ -222,10 +222,9 @@ async function send($: EngineInterface, kind: string, agent: string | null, fiel
   return capped(r.core.handle(event), r.sleep, EVENT_WAIT_MS, null)
 }
 
-// Session-start background: metrics upload, savings lines (startNotices), outbox sweep, migration, update check.
+// Session-start background: metrics upload, outbox sweep, migration, update check.
 function background($: EngineInterface, r: Rt, interactive: boolean): void {
   void r.wiring.metricsTick().catch(() => undefined)
-  void r.wiring.startNotices().then((lines) => lines.forEach((line) => show($, line, true))).catch(() => undefined)
   void r.outbox.sweep().catch(() => undefined)
   void pushStart(r).then(() => methodsStart($, r, interactive)) // phase.ts: plan items; methods.ts: CLAUDE.md file
   void migrate({
@@ -270,19 +269,20 @@ export const register: Register = (on) => {
   }, () => {
     void runtime?.then((r) => r && refreshStatus(r.setStatus, r.wiring, r.store)).catch(() => undefined)
   })
-  installBand(on) // band.ts: the band above the prompt draws the facts setBand writes (R9)
+  installBand(on); installFlow(on) // flow.ts: the checkpoint tool; band.ts: the band above the prompt draws the facts setBand writes
 
   on('session.start', async ($, e: Ev, next) => {
     declare($)
     const pending = ready($)
-    interactive = e.isInteractive !== false
-    const out = await next(e)
+    const asking = canAskNow($, e.isInteractive) // the one "can we ask the user now" check
+    const out = await next(e); await flowStart($, ready($)) // flow.ts: the checkpoint tool, after the other plugins' tools
     const r = await pending
+    interactive = await asking
     if (r) {
       const cwd = e.cwd ?? (await maybe(() => $.session.cwd())) ?? null
       const a = await capped(send($, 'session_start', null, { cwd, inject_on: ['prompt'] }), r.sleep, START_WAIT_MS, null)
       show($, a?.notice)
-      background($, r, e.isInteractive === true)
+      background($, r, interactive)
     }
     return out
   }).catch(($, e, next) => next(e))
@@ -293,7 +293,7 @@ export const register: Register = (on) => {
     const a = await send($, 'dispatch', agent, {
       subagent_type: e.subagentType,
       description: e.description,
-      model: e.model ?? null,
+      model: e.model ?? null, parent_model: e.parentModel ?? null,
       effort: e.effort ?? null,
       fork: e.fork === true,
       teammate: e.isTeammate === true,
@@ -303,7 +303,7 @@ export const register: Register = (on) => {
     if (a?.action === 'deny') {
       return { deny: denyReason(a.reason) }
     }
-    const spawned: Ev = await next(a?.action === 'rewrite' && a.set ? { ...e, model: a.set.model } : e)
+    const spawned: Ev = await next(await briefed($, a, a?.action === 'rewrite' && a.set ? { ...e, model: a.set.model } : e))
     if (spawned && typeof spawned.agentId === 'string') {
       show($, (await send($, 'dispatched', agent, { call, child: spawned.agentId }))?.notice)
     }
@@ -323,7 +323,7 @@ export const register: Register = (on) => {
   })
 
   on('tool.call', async ($, e: Ev, next) => {
-    const held = await holdWrite(ready($), e.tool, toolInput(e), () => $.session.cwd(), e.agentId) // phase.ts: main agent
+    const held = (await holdWrite(ready($), e.tool, toolInput(e), () => $.session.cwd(), e.agentId)) ?? (await flowLock($, e, ready($))) // phase.ts: main agent; flow.ts: test lock
     if (held) return { deny: held }
     const fields = { tool: e.tool, input: toolInput(e), call: e.tool_use_id ?? null }
     const agent = e.agentId ?? null
@@ -333,13 +333,13 @@ export const register: Register = (on) => {
       return { deny: denyReason(a.reason, 'tool check') }
     }
     const done: Ev = await next(e) // a tool's input is never changed
-    await surveyTool(ready($), e.tool, toolInput(e), done, () => $.session.cwd()) // phase.ts: R11 survey counts
+    await flowAfter($, e, ready($)) // flow.ts: timing
     show($, (await send($, 'post_tool', agent, { ...fields, ok: done?.deny === undefined && done?.isError !== true }))?.notice)
     return done
   }).catch(($, e, next) => next(e))
 
   on('turn.complete', async ($, e: Ev, next) => {
-    const done = await next(e)
+    const done = await next(e); await flowTurnEnd($, e, ready($)) // flow.ts: checkpoint compaction, next turn's notes
     const u: Ev | null = await maybe(() => $.session.usage())
     const a = await send($, 'turn_end', e.agentId ?? null, {
       reason: e.reason ?? null,
@@ -375,7 +375,7 @@ export const register: Register = (on) => {
     show($, a?.notice)
     // The server's advice and the first prompt's setup note: their own labelled context blocks (text untouched)
     const blocks = a?.action === 'inject' && a.context && a.context.length ? [a.context.join('\n')] : []
-    blocks.push(...(await pushLessons(ready($), e.agentId, () => $.session.cwd()))) // phase.ts: served items by phase
+    blocks.push(...(await pushLessons(ready($), e.agentId, () => $.session.cwd())), ...(await flowPrompt($, e, ready($)))) // phase.ts: served items by phase; flow.ts: notes
     const note = !e.agentId && (await ready($)) ? await onboardingNote($) : null
     if (note) blocks.push(note)
     return blocks.length ? next({ ...e, context: [...(e.context ?? []), ...blocks] }) : next(e)

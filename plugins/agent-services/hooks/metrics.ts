@@ -1,15 +1,15 @@
 // Daily metrics, harness-neutral: transcript parsing, the POST /metrics/daily body and its upload plan.
 //
-// A port of host/metrics.py (the body builder and the day selection of Metrics.tick), of the parts of
-// the usage module parser it uses (collect, price_of, cost_of, usage_of, parse_iso) and of tools/diagnostic/facts.py
+// A port of the Python client (the body builder and the day selection of Metrics.tick), of the parts of
+// the usage module parser it uses (collect, price_of, cost_of, usage_of, parse_iso) and of the diagnostic tool
 // scan(). Nothing here touches the engine: transcript files, the savings events, the salt, the prices and the
-// clock are passed in, and nothing is sent or stored. Phase 2 wiring (P4, P2) reads the inputs and sends the text.
+// clock are passed in, and nothing is sent or stored. The wiring reads the inputs and sends the text.
 //
 // Inputs of each entry point:
 //   scan(files, prices)            files: TranscriptFile[] in walk order (walkOrder sorts), each { rel, size, text };
 //                                  text null when the file is over READ_LIMIT (4 MiB) or unreadable: such a file is
 //                                  left out of the facts and listed in facts.unread (estimate.ts scales it).
-//                                  prices: the parsed modules/usage/prices.json.
+//                                  prices: the parsed price table.
 //   readEvents(events)             the savings events (objects or JSON lines), as the Python event log holds them.
 //   dailyBody(day, input)          { facts, events, salt (bytes), prices, kinds?, clientVersion? }; throws BodyTooLarge.
 //   dailyRequest(day, input)       -> { method, route, body_text } or { error }: the exact text a send carries, so
@@ -21,7 +21,7 @@
 // value Python keeps as 5.0 prints as 5 here (bodies are compared as parsed JSON); the 64 KiB size check counts
 // this module's JSON text. Day boundaries use the process's local time zone, as the Python does.
 //
-// Cleanup route R6: the transcript facts (scan and the prices) live in transcripts.ts and the Python-compatible
+// The transcript facts (scan and the prices) live in transcripts.ts and the Python-compatible
 // helpers in pyfmt.ts; this module re-exports them, so importers of metrics.ts keep working.
 import { utf8 } from './e2e'
 import { cmpTuple, isObj, localDay, parseIso, plusDays, pyRound, ref } from './pyfmt'
@@ -112,7 +112,7 @@ const EVENT_FIELDS: Record<string, Record<string, (v: unknown) => boolean>> = {
 
 export type SavingsEvent = { day: string; moment: number; e: Obj }
 
-/** host/metrics.py read_events: the valid events with their local day, in order; bad ones skipped. */
+/** the Python client's read_events: the valid events with their local day, in order; bad ones skipped. */
 export function readEvents(events: unknown[]): SavingsEvent[] {
   const out: SavingsEvent[] = []
   for (const item of events ?? []) {
@@ -139,11 +139,11 @@ export function readEvents(events: unknown[]): SavingsEvent[] {
   return out
 }
 
-/** host/metrics.py _long: whether a route turn of this (normalized) model and prompt size is a long-prompt one. */
+/** the Python client's _long: whether a route turn of this (normalized) model and prompt size is a long-prompt one. */
 export const isLong = (model: string, prompt: number, prices: Prices): boolean =>
   (prices.long_prompt ?? []).some((t: Obj) => matches(bare(model), t.prefix) && prompt > t.over)
 
-/** host/metrics.py _counters: the raw savings counters of one day. */
+/** the Python client's _counters: the raw savings counters of one day. */
 export function counters(events: SavingsEvent[], day: string, prices: Prices): Obj {
   const route = new Map<string, Obj>()
   const index = new Map<string, { model: string; tokens: number; n: number }>()
@@ -235,7 +235,7 @@ export function active(day: string, facts: Facts, events: SavingsEvent[]): boole
   return events.some((e) => e.day === day)
 }
 
-/** The POST /metrics/daily body for one local day (host/metrics.py _Sources.body); throws BodyTooLarge. */
+/** The POST /metrics/daily body for one local day (the Python client's _Sources.body); throws BodyTooLarge. */
 export function dailyBody(day: string, input: DailyInput): Obj {
   const { facts, salt, prices } = input
   const events = input.events ?? []

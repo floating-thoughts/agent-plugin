@@ -1,23 +1,29 @@
-// The planning gate (decision 2026-10-31, "read as you need only"): every task has two phases, planning then
-// running, kept in a local state document the agent writes, agent-state.md in the session's working directory.
-// The plugin only reads it.
+// The planning gate: every task has two phases, planning then running, kept in a local state document the agent
+// writes, agent-state.md in the session's working directory. The plugin only reads it. The gate follows the methods
+// level (methods.ts levelNow):
 //
-// - File changes (Edit, Write, MultiEdit, NotebookEdit) on any path but agent-state.md are denied while the
-//   document is missing, says `phase: planning` (or has a malformed first line), or says `phase: running` without a
-//   goal and at least one plan step. Writes to agent-state.md always go through. Bash and the read tools are never
-//   held (a Bash write is a known gap).
+// - "on" (the user made the methods their own instructions): file changes (Edit, Write, MultiEdit, NotebookEdit) on
+//   any path but agent-state.md are denied while the document is missing, says `phase: planning` (or has a
+//   malformed first line), or says `phase: running` without a goal and at least one plan step. Small edits pass
+//   (smallEdit: an Edit or MultiEdit that changes at most SMALL_EDIT_LINES lines in all). Writes to agent-state.md
+//   always go through.
+// - "suggest" (the default): nothing is denied; the first such change of a session brings one reminder line with the
+//   next prompt (GATE_REMINDER).
+// - "off": the gate does nothing.
+// - Bash and the read tools are never held at any level: a file written through Bash is not seen by the gate.
+// - No session that nobody can be asked in (a -p run, choice.ts canAsk) is held.
 // - lesson_lookup answers only phase `plan` until the document is running; any other phase gets an empty item list
-//   and a short reason, without asking the server.
+//   and a short reason, without asking the server. At "off" it gives no items, and at "on" it points to the
+//   approved text the CLAUDE.md line already loads.
 // - Subagents are never held: the gate is the main agent's startup phase, and a subagent is dispatched by a main
 //   session that has already planned (often in a git worktree with no agent-state.md). The engine's `agentId` on
 //   tool.call marks a subagent, the same signal prompt.submit uses (pushLessons).
 // - The caller runs this only while signed in (`active`): in auth fail the plugin stays inert.
-// Harness-neutral: nothing here touches `$`; reading the file, the working directory and the auth state are
+// Harness-neutral apart from the level and canAsk: reading the file, the working directory and the auth state are
 // injected (register.ts wires them).
-import type { KV } from './engine_types'
 import { normPath } from './paths'
-import { roundCounts, Survey, SURVEY_TOOL } from './survey'
-import { methodsActive } from './methods'
+import { canAsk } from './choice'
+import { levelNow, methodsActive } from './methods'
 export { methodsStart } from './methods' // register.ts wires it beside pushStart
 
 export const STATE_FILE = 'agent-state.md'
@@ -31,6 +37,12 @@ export const INCOMPLETE_REASON = 'agent-services planning gate (a plugin rule): 
   'has no written goal and plan, so file changes still wait. A task can switch to running only with text under ' +
   '`## Goal` and at least one `- ` step line under `## Plan`; fill them in, then try again.'
 export const LESSON_REASON = 'finish planning first (agent-state.md phase: planning)'
+export const LESSON_OFF = 'the working methods are off (/agent-services methods suggest turns them back on)'
+export const LESSON_ON = 'the working methods you approved are already loaded by your CLAUDE.md; follow that text'
+export const SMALL_EDIT_LINES = 10 // an Edit or MultiEdit changing at most this many lines passes the gate at "on"
+export const GATE_REMINDER = '[agent-services suggestion, not written by the user] Files were changed while ' +
+  'agent-state.md had no running plan. agent-services suggests planning larger changes first: the goal and the plan ' +
+  'steps in agent-state.md, then `phase: running` as its first line. Nothing was held; this is said once per session.'
 
 export type PhaseState = { exists: boolean; phase: 'planning' | 'running'; goal: string; plan: string[] }
 type Read = (path: string) => Promise<string | null>
@@ -65,7 +77,8 @@ const trimDir = (p: string): string => normPath(p).replace(/\/+$/, '')
 
 export const statePath = (cwd: string): string => `${trimDir(cwd)}/${STATE_FILE}`
 
-/** Whether `path` (absolute, or relative to `cwd`) is the state document itself. */
+/** Whether `path` (absolute, or relative to `cwd`) is the state document itself or a project helper file under
+ *  `.agent/` (pending decisions, steps, test lock): both always pass the gate. */
 export function isStatePath(path: unknown, cwd: string): boolean {
   if (typeof path !== 'string' || !path) return false
   let p = normPath(path)
@@ -76,7 +89,8 @@ export function isStatePath(path: unknown, cwd: string): boolean {
     if (seg === '..' && parts.length > 1) parts.pop()
     else parts.push(seg)
   }
-  return parts.join('/').toLowerCase() === statePath(cwd).toLowerCase()
+  const full = parts.join('/').toLowerCase()
+  return full === statePath(cwd).toLowerCase() || full.startsWith(`${trimDir(cwd)}/.agent/`.toLowerCase())
 }
 
 export const missingReason = (cwd: string): string =>
@@ -137,20 +151,38 @@ export async function lessonGate(phase: unknown, cwd: string | null, read: Read)
 
 /** ToolDeps.lessonHold (tools.ts): the held answer of a lesson_lookup, or null to answer it as before. */
 export const lessonHold = (read: Read) => async (args: Obj, cwd: string | null): Promise<Obj | null> => {
-  const why = await lessonGate(args.phase, cwd, read)
-  return why ? heldLesson(args, why) : null
+  const level = await levelNow()
+  if (level === 'off') return { ...heldLesson(args, LESSON_OFF), fallback: 'off' }
+  if (level === 'on') return { ...heldLesson(args, LESSON_ON), fallback: 'claude_md' }
+  return null // suggest: the text served now, never held (lessonGate stays for a caller that wants the planning hold)
+}
+
+const lines = (v: unknown): number => (typeof v === 'string' && v ? v.split(/\r?\n/).length : 0)
+
+/** An Edit or MultiEdit that changes at most SMALL_EDIT_LINES lines in all (each edit counts its longer side).
+ * Write and NotebookEdit are never small. Pure. */
+export function smallEdit(tool: unknown, input: Obj): boolean {
+  const one = (e: unknown) => (e && typeof e === 'object' ? Math.max(lines((e as Obj).old_string), lines((e as Obj).new_string)) : Infinity)
+  if (tool === 'Edit') return one(input) <= SMALL_EDIT_LINES
+  if (tool === 'MultiEdit') return Array.isArray(input.edits) && input.edits.reduce((n: number, e) => n + one(e), 0) <= SMALL_EDIT_LINES
+  return false
 }
 
 type Runtime = { svc: { authState(): Promise<string> }; readText: Read; sleep: (ms: number) => Promise<unknown> } | null
 
+const reminders = new WeakMap<object, 'due' | 'told'>() // one per runtime: the suggest-level reminder
+
 /** register.ts tool.call: the deny reason for a main-agent file change while planning, or null (`agent` set: a
- * subagent's call, never held). Other tools never wait for the
- * runtime; the check is capped at PHASE_WAIT_MS (late: the call goes on). Never throws. */
+ * subagent's call, never held). Only at methods level "on" is anything held (small edits pass); at "suggest" a held
+ * change is let through and one reminder goes with the next prompt. Other tools never wait for the runtime; the
+ * check is capped at PHASE_WAIT_MS (late: the call goes on). Never throws. */
 export async function holdWrite(rt: Promise<Runtime>, tool: unknown, input: Obj, cwd: () => Promise<string>, agent?: unknown): Promise<string | null> {
   if (agent || typeof tool !== 'string' || !WRITE_TOOLS.includes(tool)) return null // a subagent: never held
   try {
     const r = await rt
-    if (!r) return null
+    if (!r || !canAsk()) return null
+    const level = await levelNow()
+    if (level === 'off') return null
     const gate = toolGate(tool, input, {
       active: async () => (await r.svc.authState()) === 'ok',
       cwd: async () => {
@@ -162,25 +194,37 @@ export async function holdWrite(rt: Promise<Runtime>, tool: unknown, input: Obj,
       },
       read: r.readText,
     })
-    return await Promise.race([gate, Promise.resolve(r.sleep(PHASE_WAIT_MS)).then(() => null, () => null)])
+    const why = await Promise.race([gate, Promise.resolve(r.sleep(PHASE_WAIT_MS)).then(() => null, () => null)])
+    if (why === null) return null
+    if (level === 'on') return smallEdit(tool, input) ? null : why
+    if (!reminders.has(r)) reminders.set(r, 'due')
+    return null
   } catch {
     return null
   }
 }
 
-// ------------------------------------------------------------------ push by phase (cleanup route R3)
+/** The suggest-level reminder for this prompt, once per session (null when none is due). */
+function takeReminder(r: object | null): string | null {
+  if (!r || reminders.get(r) !== 'due') return null
+  reminders.set(r, 'told')
+  return GATE_REMINDER
+}
+
+// ------------------------------------------------------------------ push by phase
 // The plugin itself puts the served items of the current phase into the main agent's context on prompt.submit, so a
 // model that never calls lesson_lookup still gets them: the plan-phase items on the first prompt of a session, the
 // run-phase items (RUN_PHASES) once, on the first prompt after agent-state.md reads running (isRunning), and the
 // current phase's items again on the first prompt after a /clear or a compaction of the main agent (pushAgain:
 // that context no longer holds the earlier block). The items
-// come the way lesson_lookup gets them (Core.ask: the session's guard with its watermark, canaries and rule, role
-// `auto` as the server binds a customer session), so a manual lookup later reuses the same guard cache.
+// come the way lesson_lookup gets them (Core.ask: the session's guard with its rule, role `auto` as the server binds
+// a customer session), so a manual lookup later reuses the same guard cache.
+// - Only at methods level "suggest": "off" sends nothing, and at "on" the CLAUDE.md line carries the approved text.
 // - Signed out (auth fail): nothing is fetched or injected. Subagents get nothing (main agent only).
 // - Fail open: an error, a fallback answer, an answer without the guard's rule or with no items injects nothing for
 //   that push, and it is not tried again. A prompt waits at most PHASE_WAIT_MS; a fetch still running then is kept
 //   and its items go with a later prompt.
-// - The block is labelled as served advice from agent-services (PUSH_LABEL), never as the user's or owner's words.
+// - The block is labelled as served advice from agent-services (PUSH_LABEL), never as the user's own words.
 
 export const RUN_PHASES: readonly string[] = ['implement', 'test', 'review', 'deliver', 'checkpoint']
 export const PUSH_LABEL = '[agent-services served advice, not written by the user] The agent-services service serves ' +
@@ -330,61 +374,18 @@ export function pushAgain(r: PushRuntime, agent: unknown): void {
   }
 }
 
-/** register.ts prompt.submit: the served-lessons blocks for this prompt ([] for a subagent, signed out, on error). */
+/** register.ts prompt.submit: the served-lessons blocks for this prompt, and the planning reminder ([] for a
+ * subagent, signed out, at level "off", on error). */
 export async function pushLessons(rt: Promise<PushRuntime>, agent: unknown, cwd: () => Promise<string>): Promise<string[]> {
   if (agent) return []
   try {
     const r = await rt
-    const look = surveyTool(Promise.resolve(r as SurveyRuntime), null, {}, null, async () => cwd()) // R11: the phase
+    if (!r || (await levelNow()) === 'off') return []
     // the methods came with CLAUDE.md (methods.ts): no push repeats them
-    const text = r && !methodsActive() ? await lessonPush(r).prompt(async () => cwd()) : null
-    await look
-    return text ? [text] : []
+    const text = !methodsActive() ? await lessonPush(r).prompt(async () => cwd()) : null
+    const remind = takeReminder(r)
+    return [text, remind].filter((t): t is string => !!t)
   } catch {
     return []
-  }
-}
-
-// ------------------------------------------------------------------ survey quality (cleanup route R11)
-// survey.ts counts the plan-phase AskUserQuestion rounds and the switch to running. The phase is read from
-// agent-state.md after an AskUserQuestion call, after a file change of agent-state.md, and on each main-agent prompt
-// (pushLessons), so a switch written through Bash is seen on the next prompt. Signed in only; a runtime without a
-// store counts nothing. Capped at PHASE_WAIT_MS; never throws.
-
-type SurveyRuntime = {
-  session: string
-  store?: KV
-  svc: { authState(): Promise<string> }
-  readText: Read
-  sleep: (ms: number) => Promise<unknown>
-} | null
-
-const surveys = new WeakMap<object, Survey>() // one per runtime, as pushes
-
-async function surveyLook(r: NonNullable<SurveyRuntime>, cwd: () => Promise<string | null>, tool: unknown, input: Obj, done: unknown): Promise<void> {
-  if (!r.store || (await r.svc.authState()) !== 'ok') return // store: checked again for the type
-  const dir = await cwd().catch(() => null)
-  if (typeof dir !== 'string' || !dir) return
-  const ask = tool === SURVEY_TOOL
-  if (tool !== null && !ask && !isStatePath(input.file_path ?? input.notebook_path ?? input.path, dir)) return
-  let s = surveys.get(r)
-  if (!s) surveys.set(r, (s = new Survey({ store: r.store, session: r.session })))
-  const running = isRunning(parseState(await r.readText(statePath(dir))))
-  await s.phase(running)
-  const c = ask && !running ? roundCounts(input, done) : null
-  if (c) await s.round(c)
-}
-
-/** register.ts tool.call, after the call: an AskUserQuestion round while planning, or a phase switch after a file
- * change of agent-state.md (tool null: a prompt's look at the phase). Other tools return at once. */
-export async function surveyTool(rt: Promise<SurveyRuntime>, tool: unknown, input: Obj, done: unknown, cwd: () => Promise<string | null>): Promise<void> {
-  if (tool !== null && tool !== SURVEY_TOOL && !(typeof tool === 'string' && WRITE_TOOLS.includes(tool))) return
-  try {
-    const r = await rt
-    if (!r || !r.store) return
-    const look = surveyLook(r, cwd, tool, input, done).catch(() => undefined)
-    await Promise.race([look, Promise.resolve(r.sleep(PHASE_WAIT_MS)).then(() => undefined, () => undefined)])
-  } catch {
-    // not counted
   }
 }

@@ -1,4 +1,4 @@
-// Paths for indexed reads, with Windows semantics (cleanup route R6, moved from core.ts unchanged): drive-letter
+// Paths for indexed reads, with Windows semantics (moved from core.ts unchanged): drive-letter
 // normalization, ntpath.normpath with forward slashes, and whether a file is listed in a DOCINDEX.md or has a
 // codeindex page. Used by core.ts and phase.ts.
 import type { ReadText } from './engine_types'

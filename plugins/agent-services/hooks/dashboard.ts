@@ -5,15 +5,16 @@
 // goes back to the in-process core through `report` (register.ts passes the core's dashboard_published {url} and
 // dashboard_denied events), and a deny's reason to `note` (wiring.ts logs it in the outbox). This module never throws.
 //
-// Nothing is published without the user's consent (command.ts CONSENT_KEY): when it was never given, the first
-// publish that is due asks once in the dialog (not in a -p run, at most once per session; "Not now" holds 7 days).
-// With consent, register.ts's tool.check hook allows exactly this module's own calls (dashboardGrant), so the
-// Artifact tool runs without a permission rule; the user's settings are never written.
+// Nothing is published without the user's own yes to the private page (choice.ts pageOn: `sharing on`, or
+// `sharing page on`); no dialog is shown from here. With that yes, register.ts's tool.check hook allows exactly this
+// module's own calls (dashboardGrant), so the Artifact tool runs without a permission rule; the user's settings are
+// never written.
 //
-// O5: the same path publishes a second board, the company admin's (boss.ts, BOSS_BOARD: <data dir>/boss/index.html
-// and services/boss.json), with its own throttle and denial; the grant allows the calls of either board.
+// The same path publishes a second board, the company admin's (boss.ts, BOSS_BOARD: <data dir>/boss/index.html
+// and services/boss.json), with its own throttle and denial; the grant allows the calls of either board. It follows
+// the admin's own page answer, never the company's upload choice.
 import type { EngineInterface } from 'claude-code'
-import { consentState, readConsent } from './consent'
+import { pageOn } from './choice'
 import { dataDir } from './engine_env'
 import { engineStore } from './store'
 
@@ -35,7 +36,7 @@ type State = { changed_at: number | null; url: string | null; published_at: numb
 type Res = { deny?: string; text?: string; isError?: boolean; result?: unknown }
 /** Where the outcome goes: (kind, fields) as a core event of this session (dashboard_published, dashboard_denied). */
 export type Report = (session: string, kind: string, fields?: Record<string, unknown>) => unknown
-/** interactive: false in a -p run (no consent dialog then); note: receives a denied call's reason. */
+/** note: receives a denied call's reason. */
 export type PublishOptions = { interactive?: boolean; note?: (d: { reason?: string }) => void; board?: Board }
 
 const lastAttempt = new Map<string, number>() // per board page
@@ -109,9 +110,8 @@ export async function publishDashboard($: EngineInterface, report?: Report, opts
     if (!(await $.tool.list()).some(t => t.name === TOOL)) {
       return 'no_tool'
     }
-    // no dialog from here: after a turn nobody can be asked (the desktop app showed none); the consent is asked by
-    // the slash command (after a sign-in, and by status while unanswered)
-    if (consentState(await readConsent(engineStore($)), now) !== 'allow') {
+    // no dialog from here: after a turn nobody can be asked; the page is asked about by /agent-services setup
+    if (!(await pageOn(engineStore($)))) {
       return 'not_allowed'
     }
     lastAttempt.set(board.page, now)
@@ -159,7 +159,7 @@ export async function dashboardGrant($: EngineInterface, input: unknown): Promis
     if (!isObj(input)) {
       return false
     }
-    if (consentState(await readConsent(engineStore($)), Number(await $.clock.now())) !== 'allow') {
+    if (!(await pageOn(engineStore($)))) {
       return false
     }
     const dir = await dataDir($)

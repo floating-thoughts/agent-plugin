@@ -1,22 +1,19 @@
-// The org level on the client (O2 and O3): a company's pause and its one savings-record choice. Harness-neutral:
-// the store is passed in.
+// The company level on the client: a company's pause and its one choice for the daily upload. Harness-neutral: the
+// store is passed in.
 //
-// - O2 kill switch: while the org's admin has paused the org the server answers 423 org_paused to every signed
+// - Pause: while the company's admin has paused the company the server answers 423 org_paused to every signed
 //   request and to the sign-in. svc.ts keeps a short shared block for it (BLOCK_SECONDS.org_paused), so nothing is
 //   sent meanwhile and an unpause is picked up when the block runs out; the sign-in stays. Every tool, the slash
 //   command and the status line answer ORG_PAUSED_LINE (auth state 'paused').
-// - O3 savings record: POST /auth/hello carries {"org": {"savings": "each" | "on" | "off"}} for an account in an org
-//   (definitions OrgSavings in host/service_api.json). keepOrg stores it under KEYS.org at every hello and, for on
-//   or off, applies it as the person's own savings-record choice (the record, the upload switch and the board
-//   consent). While it is on or off the savings question is not asked, the parts cannot be changed here, and the
-//   person is told the choice once (orgNotice). An answer without "org" (no org, or an older server) drops KEYS.org.
-//   The company's choice is stored with by: 'org' (and the time it was first made). When the company hands the choice
-//   back ("each", or no org any more), a choice the company made is dropped: the upload stops and the person is
-//   asked, so the company's old yes never stands as the person's own answer (consent.ts uploadAnswered).
-// - O5 company admin: the org field also carries "admin": true for the org's admin (shell 0.4.0 or later); it is kept
-//   as `admin: true` in the org state (orgAdmin), and boss.ts then renders and publishes the company board.
+// - Upload choice: POST /auth/hello carries {"org": {"savings": "each" | "on" | "off"}} for an account in a company
+//   (definitions OrgSavings in the contract). keepOrg stores it under KEYS.org at every hello. "on" or "off" decides
+//   the daily upload for everyone (choice.ts recordState reads it over the person's own answer); the private page
+//   stays each person's own answer. Nothing of the person's answer is written here, so a company that hands the choice
+//   back ("each", or no company any more) leaves the person's own answer as it was. The person is told the company's
+//   choice once (orgNotice). An answer without "org" (no company, or an older server) drops KEYS.org.
+// - Company admin: the org field also carries "admin": true for the company's admin; it is kept as `admin: true` in
+//   the org state (orgAdmin), and boss.ts then renders and publishes the company board.
 import { CONTRACT } from './contract'
-import { CONSENT_KEY } from './consent'
 import { KEYS, safeDelete, safeGet, safeSet } from './store'
 import type { KV } from './store'
 
@@ -25,83 +22,73 @@ export const ORG_SAVINGS: readonly string[] = (CONTRACT as any).definitions.OrgS
 export const ORG_ADMIN_SEES = "Your company's admin sees each member's email address, how many devices each member " +
   "is signed in on, and each member's weekly savings figure (\"no data yet\" while that member uploads nothing)."
 export const ORG_SAVINGS_TEXT: Readonly<Record<string, string>> = {
-  on: `Your company turned the savings record on for everyone, so you are not asked about it: the daily upload and ` +
-    `your private savings page are on, and only your company's admin can turn them off. ${ORG_ADMIN_SEES}`,
-  off: 'Your company turned the savings record off for everyone, so you are not asked about it and nothing is uploaded.',
+  on: `Your company turned the daily usage upload on for everyone, so you are not asked about it, and only your ` +
+    `company's admin can turn it off. Your private savings page stays your own choice (/agent-services sharing page ` +
+    `on). ${ORG_ADMIN_SEES}`,
+  off: 'Your company turned the daily usage upload off for everyone, so you are not asked about it and nothing is ' +
+    'uploaded.',
 }
-export const ORG_SET_TEXT = 'Your company set the savings record for everyone, so it cannot be changed here. Ask your admin.'
+export const ORG_SET_TEXT = 'Your company decides the daily upload for everyone, so it cannot be changed here. Ask your ' +
+  'admin. Your private savings page stays yours: /agent-services sharing page on|off.'
 
 export type OrgSavings = 'each' | 'on' | 'off'
-export type OrgState = { savings: OrgSavings; at: number; told: OrgSavings | null; admin?: true }
+export type OrgState = { savings: OrgSavings; at: number; told: OrgSavings | null; since?: number; admin?: true }
 
 const isObj = (v: unknown): v is Record<string, any> => typeof v === 'object' && v !== null && !Array.isArray(v)
 
-/** The hello answer's "org" field is well formed: exactly {"savings": <OrgSavings>}, plus "admin": true (O5). */
+/** The hello answer's "org" field is well formed: exactly {"savings": <OrgSavings>}, plus "admin": true. */
 export function validOrg(v: unknown): boolean {
   if (!isObj(v) || !ORG_SAVINGS.includes(v.savings)) return false
   const keys = Object.keys(v).sort().join(',')
   return keys === 'savings' || (keys === 'admin,savings' && v.admin === true)
 }
 
-/** The stored org state, or null (no org, or unreadable). */
+/** The stored org state, or null (no company, or unreadable). */
 export async function readOrg(kv: KV): Promise<OrgState | null> {
   const v = await safeGet(kv, KEYS.org)
   if (!isObj(v) || !ORG_SAVINGS.includes(v.savings) || typeof v.at !== 'number') return null
   const told = ORG_SAVINGS.includes(v.told) ? v.told : null
-  return v.admin === true ? { savings: v.savings, at: v.at, told, admin: true } : { savings: v.savings, at: v.at, told }
+  const o: OrgState = { savings: v.savings, at: v.at, told }
+  if (typeof v.since === 'number') o.since = v.since
+  return v.admin === true ? { ...o, admin: true } : o
 }
 
-/** True while the signed-in account is its company's admin (O5). */
+/** True while the signed-in account is its company's admin. */
 export async function orgAdmin(kv: KV): Promise<boolean> {
   return (await readOrg(kv))?.admin === true
 }
 
-/** 'on' or 'off' while the org set the savings record for everyone, else null. */
+/** 'on' or 'off' while the company set the daily upload for everyone, else null. */
 export async function orgChoice(kv: KV): Promise<'on' | 'off' | null> {
   const o = await readOrg(kv)
   return o && (o.savings === 'on' || o.savings === 'off') ? o.savings : null
 }
 
-/** Keep the hello's org field (undefined: none) and apply an on or off choice. Never throws. */
+/** Keep the hello's org field (undefined: none). `setMetrics` gets the upload switch the svc channel keeps for the
+ * metrics routes: off while the company says off, on again when it no longer does (the record decides the upload).
+ * Never throws. */
 export async function keepOrg(kv: KV, org: unknown, now: number, setMetrics: (on: boolean) => Promise<boolean>): Promise<void> {
   try {
     const prev = await readOrg(kv)
-    const sharing = await safeGet(kv, KEYS.sharing)
-    const byOrg = isObj(sharing) && sharing.by === 'org'
-    if (!validOrg(org) || (org as { savings: unknown }).savings === 'each') {
-      if (!validOrg(org) && prev) await safeDelete(kv, KEYS.org)
-      await handBack(kv, byOrg, byOrg && sharing.on === true, setMetrics)
-      if (!validOrg(org)) return
+    if (!validOrg(org)) {
+      if (prev) await safeDelete(kv, KEYS.org)
+      if (prev?.savings === 'off') await setMetrics(true)
+      return
     }
     const { savings, admin } = org as { savings: OrgSavings; admin?: true }
     const told = prev && prev.savings === savings ? prev.told : null
-    await safeSet(kv, KEYS.org, admin === true ? { savings, at: now, told, admin } : { savings, at: now, told })
-    if (savings === 'each') return
-    const on = savings === 'on'
-    // the person's own same answer stays theirs; else the company's, from the time it was first seen
-    if (!(isObj(sharing) && sharing.on === on && (sharing.by !== 'org' || typeof sharing.at === 'number'))) {
-      await safeSet(kv, KEYS.sharing, { on, at: now, by: 'org' })
-    }
-    await setMetrics(on)
-    const consent = await safeGet(kv, CONSENT_KEY)
-    if (!(isObj(consent) && consent.answer === (on ? 'allow' : 'not_now'))) {
-      await safeSet(kv, CONSENT_KEY, { answer: on ? 'allow' : 'not_now', at: now, by: 'org' })
-    }
+    // since: the first time this choice was seen (the 30-day floor of the upload for a company "on")
+    const since = prev && prev.savings === savings && typeof prev.since === 'number' ? prev.since : now
+    const state: OrgState = { savings, at: now, told, since }
+    await safeSet(kv, KEYS.org, admin === true ? { ...state, admin } : state)
+    if (savings === 'off') await setMetrics(false)
+    else if (prev?.savings === 'off') await setMetrics(true)
   } catch {
     // the org state is best effort; the next hello tries again
   }
 }
 
-// The company handed the choice back: drop what it chose (the savings answer and the board consent it set); a yes it
-// gave also turns the upload switch off, so nothing is uploaded until the person answers.
-async function handBack(kv: KV, byOrg: boolean, wasOn: boolean, setMetrics: (on: boolean) => Promise<boolean>): Promise<void> {
-  if (byOrg) await safeDelete(kv, KEYS.sharing)
-  const consent = await safeGet(kv, CONSENT_KEY)
-  if (isObj(consent) && consent.by === 'org') await safeDelete(kv, CONSENT_KEY)
-  if (wasOn) await setMetrics(false)
-}
-
-/** The one-time line about the org's choice: the text the first time a choice is seen, then null. */
+/** The one-time line about the company's choice: the text the first time a choice is seen, then null. */
 export async function orgNotice(kv: KV): Promise<string | null> {
   const o = await readOrg(kv)
   if (!o || o.savings === 'each' || o.told === o.savings) return null
@@ -109,7 +96,7 @@ export async function orgNotice(kv: KV): Promise<string | null> {
   return ORG_SAVINGS_TEXT[o.savings] ?? null
 }
 
-/** The savings question, with the admin line for a person in an org where each person decides. */
+/** The savings question, with the admin line for a person in a company where each person decides. */
 export async function sharingQuestion(kv: KV, question: string): Promise<string> {
   const o = await readOrg(kv)
   return o && o.savings === 'each' ? `${question} ${ORG_ADMIN_SEES}` : question

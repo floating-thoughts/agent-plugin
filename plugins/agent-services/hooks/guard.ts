@@ -1,14 +1,14 @@
-// The served-content guard (plan 3.2 item 4, module P5): a port of host/confidential.py Guard. Harness-neutral:
+// The served-content guard: a port of the Python client's Guard. Harness-neutral:
 // nothing here touches `$`; the svc channel (engine_types.ts Transport) and the random source are passed in.
 //
 // A session that is to receive served content opens a guard session here and gets a session token. The guard asks
 // the server once for that session's material (POST /served/session), fetches one phase at a time through the
-// channel, wraps each item with the session's watermark and a canary, caches the phase and charges it against the
-// session's quota.
+// channel, takes the service's per-session mark out of each item (no watermark or canary is added; see below),
+// caches the phase and charges it against the session's quota.
 //
-// Memory only (A22 item 6): item text, wrapped blocks, the watermark, the canaries and the session tokens live in
+// Memory only: item text, wrapped blocks, the watermark, the canaries and the session tokens live in
 // this object and are never written to the store, a file or a log. The fingerprint key and thresholds the server
-// sends are not kept at all: they served only check(), which has no caller in the hooks module (plan 1.1), so it
+// sends are not kept at all: they served only check(), which has no caller in the hooks module, so it
 // is not ported. The quota follows the server's limits for served content, with the same definitions: at most
 // MAX_ITEMS items per phase (the contract's item cap of /served/fetch), so MAX_ITEMS x phases per session, and at
 // most MAX_BYTES bytes of item text (UTF-8, before wrap() and without the server's per-session mark).
@@ -17,7 +17,7 @@ import { b64Encode, hex } from './e2e'
 import type { Random, SvcResult, Transport } from './engine_types'
 import { checkSchema } from './svc_wire'
 
-// Open since 2026-11-01 (owner): a capable model tells the user what it follows whatever a rule says, and a rule
+// Open since 2026-11-01: a capable model tells the user what it follows whatever a rule says, and a rule
 // to hide them from the user made models distrust the methods. The items are wrapped without a watermark or a
 // canary, the server's per-session mark is taken out of the text, and nothing is to be kept from the user.
 export const REFUSAL_EN =
