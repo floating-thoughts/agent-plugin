@@ -1,6 +1,6 @@
 ---
 description: Sign in to agent-services, show its status, or sign out
-argument-hint: "[status | login <email> | code <email> <code> | logout | connect <endpoint> <server key> [<next key>] e2e:<key> [e2e:<next key>]]"
+argument-hint: "[status | login <email> | code <email> <code> | logout | savings [preview | on | off | status] | connect <endpoint> <server key> [<next key>] e2e:<key> [e2e:<next key>]]"
 allowed-tools: Bash(python "${CLAUDE_PLUGIN_ROOT}/hooks/agent_core.py" *), Bash(python -m pip install --user cryptography)
 ---
 
@@ -16,6 +16,15 @@ The user's arguments: `$ARGUMENTS`
 - `code <email> <code>`: run `python "${CLAUDE_PLUGIN_ROOT}/hooks/agent_core.py" login finish --email <email> --code <code>`
   and report whether the sign-in worked. The plugin turns on once the service accepts the sign-in.
 - `logout`: run `python "${CLAUDE_PLUGIN_ROOT}/hooks/agent_core.py" logout` and confirm.
+- `savings`: run `python "${CLAUDE_PLUGIN_ROOT}/hooks/agent_core.py" savings` and report what the services saved so
+  far in one or two sentences. If it answers `service_off`, say that savings are worked out by the service from a daily
+  usage summary this machine uploads only after the user turns it on, and offer `savings on`.
+- `savings on`: first run `python "${CLAUDE_PLUGIN_ROOT}/hooks/agent_core.py" savings preview` and show the user the
+  `body_text` it returns: that is exactly what one daily upload sends. Ask whether to turn the upload on; only on the
+  user's yes run `python "${CLAUDE_PLUGIN_ROOT}/hooks/agent_core.py" savings on` and confirm. Savings appear once a day
+  or more has been uploaded.
+- `savings off`: run `python "${CLAUDE_PLUGIN_ROOT}/hooks/agent_core.py" savings off` and confirm that nothing more is
+  uploaded. `savings status`: run `python "${CLAUDE_PLUGIN_ROOT}/hooks/agent_core.py" savings status` and report it.
 - `connect <endpoint> <server key> [<next key>] e2e:<key> [e2e:<next key>]`: run
   `python "${CLAUDE_PLUGIN_ROOT}/hooks/agent_core.py" connect --endpoint <endpoint> --server-key <server key>
   --e2e-key <key>` (one `--server-key` per plain key and one `--e2e-key` per key given with the `e2e:` prefix, the

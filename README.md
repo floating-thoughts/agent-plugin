@@ -83,6 +83,17 @@ Linux:   /etc/claude-code/managed-settings.json
 
 Each user then signs in once with `/agent-services:agent-services login <email>`.
 
+## See what you saved
+
+```
+/agent-services:agent-services savings on
+/agent-services:agent-services savings
+```
+
+Savings are worked out by the service from a small daily usage summary. Nothing is uploaded until you turn it on:
+`savings on` first shows you exactly what one daily upload contains and asks before turning it on. After a day or more
+has been uploaded, `savings` shows what the services saved so far; `savings off` stops the uploads.
+
 ## Service address
 
 The plugin ships with the address and public keys of our production service, so a fresh install signs in without

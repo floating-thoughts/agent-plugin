@@ -2483,6 +2483,14 @@ def main(argv=None) -> int:
         req = ("PUT", "/local/offline", {"offline": a.arg == "on"})
     elif a.cmd == "stop":
         req = ("POST", "/local/stop", {})
+    elif a.cmd == "savings":   # the metrics client (host/metrics.py): opt-in needs a preview first
+        sub = a.arg or "show"
+        if sub == "show":
+            req = ("GET", "/local/metrics/savings", None)
+        elif sub == "status":
+            req = ("GET", "/local/metrics/status", None)
+        elif sub in ("preview", "on", "off"):
+            req = ("POST", "/local/metrics/" + sub, {})
     elif a.cmd == "served":
         if a.arg == "status":
             req = ("GET", "/local/served", None)
