@@ -21,7 +21,7 @@ import { publishBoards } from './boss' // O5: the person's board, then the compa
 import { Guard } from './guard'
 import { migrate, OLD_SIGNIN_KEY, OLD_SIGNIN_LINE } from './migrate'
 import { FLUSH_EVERY_MS, Outbox } from './outbox'
-import { holdWrite, lessonHold, pushAgain, pushLessons, pushStart, surveyTool } from './phase'
+import { holdWrite, lessonHold, methodsStart, pushAgain, pushLessons, pushStart, surveyTool } from './phase'
 import { PRICES } from './prices'
 import { engineStore, safeDelete, safeGet, type KV } from './store'
 import { Svc, type HttpAnswer } from './svc'
@@ -227,7 +227,7 @@ function background($: EngineInterface, r: Rt, interactive: boolean): void {
   void r.wiring.metricsTick().catch(() => undefined)
   void r.wiring.startNotices().then((lines) => lines.forEach((line) => show($, line, true))).catch(() => undefined)
   void r.outbox.sweep().catch(() => undefined)
-  void pushStart(r) // phase.ts: the plan-phase served items, for the first prompt
+  void pushStart(r).then(() => methodsStart($, r, interactive)) // phase.ts: plan items; methods.ts: CLAUDE.md file
   void migrate({
     dataDir: r.dir,
     fs: engineFs($),

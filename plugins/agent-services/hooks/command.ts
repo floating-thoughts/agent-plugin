@@ -41,8 +41,9 @@ import type { Result, Svc } from './svc'
 import { askConsent, claimAsk, CONSENT_KEY, CONSENT_SNOOZE_MS, consentState, dashboardUrl, readConsent, sharingState } from './consent'
 import { dataDir, engineDirs, envOf, readTextOf } from './engine_env'
 import { companyCommand } from './boss'
-import { hasTrust, TRUST_HEADER, TRUST_KEY, TRUST_OPTIONS, TRUST_QUESTION, TRUST_TEXT, type TrustFile, withoutTrust,
-  withTrust } from './trust'
+import { hasTrust, TRUST_HEADER, TRUST_KEY, TRUST_OPTIONS, TRUST_QUESTION, type TrustFile, trustDue, unbalancedTrust,
+  withoutTrust, withTrust } from './trust'
+import { importLine, queueSetup, syncMethodsNow } from './methods'
 import { ORG_PAUSED_LINE, ORG_SAVINGS_TEXT, ORG_SET_TEXT, orgChoice, orgNotice, sharingQuestion } from './org'
 
 export {
@@ -72,7 +73,7 @@ export const COMMAND_SPEC = {
     '[status | login [<email>] | code | logout | sharing [on | not_now | preview] | savings [preview | on | off | ' +
     'status | mail on | mail off] | ' +
     'estimate [preview | send] | served [pin <role> <version> | unpin <role> | channel <name>] | offline on|off | ' +
-    'trust [on | off | not_now | preview] | outbox [<day>]]',
+    'setup | trust [on | off | not_now | preview] | outbox [<day>]]',
 } as const
 
 /** The subcommands that work while auth has failed (plan 3.9 item 4). */
@@ -196,8 +197,8 @@ export const ERROR_TEXT: Record<string, string> = {
 export const USAGE =
   `Usage: ${COMMAND} [status | login [<email>] | code | logout | savings [preview | on | off | not_now | status | ` +
   'mail on | mail off] | sharing [on | not_now | preview] | dashboard [allow | not_now] | estimate [preview | send] | served [status | ' +
-  'pin <role> <version> | unpin <role> | channel <name>] | offline on|off | trust [on | off | not_now | preview] | ' +
-  'outbox [<day>]]'
+  'pin <role> <version> | unpin <role> | channel <name>] | offline on|off | setup | trust [on | off | not_now | ' +
+  'preview] | outbox [<day>]]'
 
 // ------------------------------------------------------------------ types
 
@@ -507,7 +508,7 @@ export class Command {
     const rest = words.slice(1)
     const svc = this.d.svc
     const known = ['status', 'login', 'code', 'logout', 'sharing', 'savings', 'dashboard', 'estimate', 'served',
-      'offline', 'outbox', 'company', 'trust']
+      'offline', 'outbox', 'company', 'trust', 'setup']
     if (!known.includes(sub)) return `Unknown subcommand "${sub.slice(0, 40)}". ${USAGE}`
     if (!AUTH_FAIL_COMMANDS.includes(sub)) {
       const st = await svc.authState(true)
@@ -537,6 +538,8 @@ export class Command {
         return this.offline(rest)
       case 'trust':
         return this.trust(rest)
+      case 'setup':
+        return rest.length ? USAGE : this.setup()
       case 'company': // O5: the company admin's board and weekly summary email
         return companyCommand({ svc, store: this.d.store, url: () => this.d.bossUrl?.() ?? Promise.resolve(null) }, rest)
       default:
@@ -632,18 +635,7 @@ export class Command {
       )
     }
     const tool = 'mcp__agent-services__setup'
-    if (!(await this.sharingDue())) {
-      if (!(await this.safe(() => this.trustDue(), false))) return null
-      const [add, later, show] = TRUST_OPTIONS
-      return (
-        '[agent-services plugin note, not written by the user] Before working on the message, ask the user this one ' +
-        `question with your question tool (AskUserQuestion), header "${TRUST_HEADER}", in these words: ` +
-        `"${TRUST_QUESTION}" with the options, in this order, "${add}", "${later}" and "${show}". Then call ${tool} ` +
-        `with command "trust on", "trust not_now" or "trust preview" to match the answer; for "${show}" show the ` +
-        'user the text it returns, and call it with "trust on" only if the user then says yes. Do not edit CLAUDE.md ' +
-        'yourself. If the user dismisses the question, leave it. Then go on with the message.'
-      )
-    }
+    if (!(await this.sharingDue())) return null
     const question = await sharingQuestion(this.d.store, SHARING_QUESTION)
     const [on, off, show] = SHARING_OPTIONS
     return (
@@ -658,24 +650,45 @@ export class Command {
   }
 
   // ---------------- the CLAUDE.md section (trust.ts)
-  /** Due while the section is not there, never answered, or its "Not now" has run out; "off" is final. */
+  /** Due while the section is not there, never answered, or its "Not now" has run out (trust.ts trustDue). */
   private async trustDue(): Promise<boolean> {
     const f = this.d.trustFile
-    if (!f) return false
-    const c = (await this.d.store.get(TRUST_KEY)) as { answer?: unknown; at?: unknown } | null | undefined
-    if (c?.answer === 'on' || c?.answer === 'off') return false
-    if (c?.answer === 'not_now' && this.d.now() - Number(c.at ?? 0) < CONSENT_SNOOZE_MS) return false
-    return !hasTrust(await f.read())
+    return !!f && trustDue(await this.d.store.get(TRUST_KEY), this.d.now(), await f.read())
+  }
+
+  /** The plugin's own question (queued by methods.ts after a sign-in and at a session start while due). */
+  private async setup(): Promise<string> {
+    if (!(await this.safe(() => this.trustDue(), false))) return 'Nothing to set up right now.'
+    if (!this.d.ask) return `Run ${COMMAND} trust on to make the working methods your own instructions.`
+    let a: string
+    try {
+      a = String(await this.d.ask(TRUST_QUESTION, { options: TRUST_OPTIONS, header: TRUST_HEADER })).trim()
+    } catch {
+      a = ''
+    }
+    if (a === TRUST_OPTIONS[0]) return this.trust(['on'])
+    if (a === TRUST_OPTIONS[1]) return this.trust(['not_now'])
+    // dismissed or typed: taken as "Not now", so it is not asked at every session start
+    await safeSet(this.d.store, TRUST_KEY, { answer: 'not_now', at: this.d.now() })
+    return `Not answered; asked again in 7 days. Run ${COMMAND} setup to answer it now.`
   }
 
   private async trust(rest: string[]): Promise<string> {
     const sub = (rest[0] ?? 'status').toLowerCase()
     const f = this.d.trustFile
     if (rest.length > 1) return USAGE
-    if (sub === 'preview') return `This section would be added to the end of your CLAUDE.md:\n\n${TRUST_TEXT}`
     if (!f) return 'Your CLAUDE.md cannot be reached from here; nothing was changed.'
+    if (sub === 'preview') {
+      return `This line would be added to the end of your CLAUDE.md (${f.path}):\n\n${await f.importLine()}\n\n` +
+        'It loads a file this plugin keeps current with the served working methods while you are signed in.'
+    }
     const now = this.d.now()
-    const text = await f.read()
+    let text: string | null
+    try {
+      text = await f.read()
+    } catch {
+      return `Your CLAUDE.md (${f.path}) could not be read; nothing was changed.`
+    }
     if (sub === 'status') {
       return hasTrust(text)
         ? `Your CLAUDE.md (${f.path}) makes the served working methods your own instructions. Remove it with ` +
@@ -688,9 +701,23 @@ export class Command {
       return `Nothing was added to your CLAUDE.md. You are asked again in 7 days; add it any time with ${COMMAND} trust on.`
     }
     if (sub !== 'on' && sub !== 'off') return USAGE
-    const next = sub === 'on' ? withTrust(text) : text === null ? null : withoutTrust(text)
-    if (next !== null && next !== text) await f.write(next)
+    if (unbalancedTrust(text)) {
+      return `Your CLAUDE.md (${f.path}) has an agent-services marker line without its pair; nothing was changed. ` +
+        'Remove the leftover marker line, then run this again.'
+    }
+    const line = await f.importLine()
+    if (sub === 'on' && /\s/.test(line.slice(1))) {
+      return `The methods file path has a space in it (${line.slice(1)}), which a CLAUDE.md import cannot load; nothing ` +
+        'was changed.'
+    }
+    const next = sub === 'on' ? withTrust(text, line) : text === null ? null : withoutTrust(text)
+    if (next !== null && next !== text) {
+      const again: unknown = await f.read().then((t) => t, () => Symbol('unreadable')) // read again just before
+      if (again !== text) return `Your CLAUDE.md (${f.path}) changed just now; nothing was changed. Run this again.`
+      await f.write(next)
+    }
     await safeSet(this.d.store, TRUST_KEY, { answer: sub, at: now })
+    if (sub === 'on') await syncMethodsNow() // the file the line loads, before the next session
     return sub === 'on'
       ? `Added the agent-services section to ${f.path}: from the next session on, the served working methods count ` +
           `as your own instructions. Remove it with ${COMMAND} trust off.`
@@ -1256,8 +1283,19 @@ export function engineDeps($: EngineInterface, o: EngineOptions): CommandDeps {
     bossUrl: async () => dashboardUrl(readText, await dataDir($), 'boss.json'),
     trustFile: {
       path: '~/.claude/CLAUDE.md',
-      read: async () => readText(`${(await engineDirs($)).configDir}/CLAUDE.md`),
+      read: async () => {
+        // null only when the file is not there: a file that exists but cannot be read throws, and nothing is written
+        const dir = (await engineDirs($)).configDir
+        try {
+          return String(await $.fs.read(`${dir}/CLAUDE.md`))
+        } catch {
+          const names = await Promise.resolve($.fs.list(dir)).then((l: any[]) => l.map((e) => String(e.name)), () => null)
+          if (names === null || names.includes('CLAUDE.md')) throw new Error('CLAUDE.md cannot be read')
+          return null
+        }
+      },
       write: async (text) => void (await $.fs.write(`${(await engineDirs($)).configDir}/CLAUDE.md`, text)),
+      importLine: async () => importLine(await dataDir($), (await engineDirs($)).home),
     },
   }
 }
@@ -1301,6 +1339,8 @@ export function serveCommand(
     } catch {
       // the answer stands
     }
+    // a sign-in or a sign-out: the methods file follows it, and a sign-in queues the plugin's own question if due
+    if (/^(login|code|logout)\b/i.test(args.trim())) void syncMethodsNow().then(() => queueSetup($, /Signed in/.test(text)))
     // the engine already shows a hook's answer under the plugin's name: drop the answer's own leading label
     return { text: text.replace(/^agent-services: /, '') }
   }).catch(() => ({ text: `the command failed; try ${COMMAND} status.` }))
@@ -1332,7 +1372,10 @@ export async function pastedCode(
   try {
     const answer = await (await servedCommand($)).pasted(text)
     if (answer === null) return null // no sign-in waits: an ordinary message
-    if (answer.startsWith('Signed in')) void Promise.resolve(servedAfter?.('login')).catch(() => undefined)
+    if (answer.startsWith('Signed in')) {
+      void Promise.resolve(servedAfter?.('login')).catch(() => undefined)
+      void syncMethodsNow().then(() => queueSetup($, true)) // the plugin's own question, once this turn is done
+    }
     return answer.replace(/^agent-services: /, '')
   } catch {
     return PASTED_FAILED // a code-shaped message is never forwarded once the sign-in path started

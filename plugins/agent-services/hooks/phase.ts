@@ -17,6 +17,8 @@
 import type { KV } from './engine_types'
 import { normPath } from './paths'
 import { roundCounts, Survey, SURVEY_TOOL } from './survey'
+import { methodsActive } from './methods'
+export { methodsStart } from './methods' // register.ts wires it beside pushStart
 
 export const STATE_FILE = 'agent-state.md'
 export const WRITE_TOOLS: readonly string[] = ['Edit', 'Write', 'MultiEdit', 'NotebookEdit']
@@ -334,7 +336,8 @@ export async function pushLessons(rt: Promise<PushRuntime>, agent: unknown, cwd:
   try {
     const r = await rt
     const look = surveyTool(Promise.resolve(r as SurveyRuntime), null, {}, null, async () => cwd()) // R11: the phase
-    const text = r ? await lessonPush(r).prompt(async () => cwd()) : null
+    // the methods came with CLAUDE.md (methods.ts): no push repeats them
+    const text = r && !methodsActive() ? await lessonPush(r).prompt(async () => cwd()) : null
     await look
     return text ? [text] : []
   } catch {
