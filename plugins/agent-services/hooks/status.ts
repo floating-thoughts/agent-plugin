@@ -14,6 +14,8 @@
 //   gate       optional: the reason the service gate is closed (svc.ts GateState.reason), or null while open
 // Owner decision 2026-11-01: the line always says something, in the same words as the band above the prompt
 // (band.ts BAND_TEXT says each state in full).
+// Owner decision 2026-10-31: the engine already shows the plugin's name before the status line, so the line
+// does not start with it.
 // The readers are not technical: the line says what was saved in dollars and what was done today in plain words.
 // weeklyText is the once-a-week summary line (wiring.ts weeklySummary keeps the figure it compares against).
 import { pyFixed } from './pyfmt'
@@ -35,15 +37,15 @@ export const DEFAULT_ON_NOTICE =
   `${NAME} now shows how much it saves you. To do that it uploads a daily summary of usage counts, never your code ` +
   `or chats. To turn it off: ${COMMAND} savings off`
 // The status line while signed out or after an auth fail (plan 3.9).
-export const SIGN_IN_LINE = `${NAME}${SEP}signed out: ${COMMAND} login <email>`
-export const LOCKED_LINE = `${NAME}${SEP}paused: this account is locked; contact support, then ${COMMAND} login <email>`
-export const ORG_PAUSED_STATUS = `${NAME}${SEP}paused by your company; ask your admin` // O2
+export const SIGN_IN_LINE = `signed out: ${COMMAND} login <email>`
+export const LOCKED_LINE = `paused: this account is locked; contact support, then ${COMMAND} login <email>`
+export const ORG_PAUSED_STATUS = `paused by your company; ask your admin` // O2
 // The status line while the service gate is closed for a reason other than sign-in (band.ts BAND_TEXT in full).
 export const GATE_STATUS: Readonly<Record<string, string>> = {
-  offline: `${NAME}${SEP}offline mode is on`,
-  unavailable: `${NAME}${SEP}can't reach its server`,
-  unverified: `${NAME}${SEP}can't reach its server`,
-  upgrade: `${NAME}${SEP}update needed`,
+  offline: `offline mode is on`,
+  unavailable: `can't reach its server`,
+  unverified: `can't reach its server`,
+  upgrade: `update needed`,
 }
 // today's counts: [event kind, one, many]
 export const COUNTED: [string, string, string][] = [
@@ -85,7 +87,7 @@ export function shortDay(first: unknown): string | null {
 /** The line for the upload switch, the last server figure (or null) and today's counts, at most MAX_LEN. */
 export function render(metricsOn: boolean, saved: unknown, counts: Counts): string {
   const today = todayText(counts)
-  const head = [NAME]
+  const head: string[] = [] // the engine prints the plugin's name before the line (CLI and desktop), so the line leaves it out
   let tail: string | null = null
   let short: string | null = null
   const usd = isObj(saved) ? saved.usd : undefined

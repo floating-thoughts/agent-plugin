@@ -76,6 +76,8 @@ function mailText(s: Obj): string {
   return `On, sent every Monday to ${s.mail_to}.`
 }
 
+export const NO_DATA_LINE = 'Figures show here after your people have used Claude Code with agent-services for a day.'
+
 /** The company board page from a GET /org/summary answer (escaped; no script, no clock time). */
 export function bossHtml(s: Obj): string {
   const people: Obj[] = Array.isArray(s.people) ? s.people : []
@@ -103,6 +105,8 @@ export function bossHtml(s: Obj): string {
   const used = Number(s.seats_used) || 0
   const paid = typeof s.seats_paid === 'number' ? s.seats_paid : null
   const measured = people.filter((p) => typeof p.usd === 'number').length
+  // nobody has a figure and the total is zero: a new company, so say so instead of a big $0.00 (owner 2026-10-31)
+  const noData = measured === 0 && Math.round(total * 100) === 0
   return `<!doctype html>
 <html lang="en">
 <head>
@@ -161,12 +165,12 @@ footer { color: var(--muted); font-size: 13px; margin-top: 24px; }
 <header class="top"><span class="brand"><i></i>agent-services</span><span class="pill">${esc(s.org ?? 'your company')}</span></header>
 <div class="hero">
 <p class="eyebrow">agent-services for ${esc(s.org ?? 'your company')}</p>
-<h1>Saved last week: <b>${esc(money(total))}</b></h1>
+<h1>${noData ? 'No figures yet' : `Saved last week: <b>${esc(money(total))}</b>`}</h1>
 <p class="muted">The week of ${esc(week)}.</p>
-<p class="change ${trend}">${esc(changeLine(total, prev))}</p>
+<p class="change ${noData ? 'flat' : trend}">${esc(noData ? NO_DATA_LINE : changeLine(total, prev))}</p>
 </div>
 <div class="kpis">
-<div class="kpi"><span>Saved last week</span><strong>${esc(money(total))}</strong></div>
+<div class="kpi"><span>Saved last week</span><strong>${esc(noData ? '-' : money(total))}</strong></div>
 <div class="kpi"><span>The week before</span><strong>${esc(prev === null ? '-' : money(prev))}</strong></div>
 <div class="kpi"><span>People with figures</span><strong>${esc(`${measured} of ${people.length}`)}</strong></div>
 <div class="kpi"><span>Seats used</span><strong>${esc(paid === null ? `${used}` : `${used} / ${paid}`)}</strong></div>
