@@ -1,5 +1,5 @@
-"""本机 HTTP 服务共用的小件：独占端口的服务器、按 Content-Length 读请求体、
-只让当前用户能读的文件权限。"""
+"""Small helpers shared by the local HTTP services: a port-exclusive server, reading the request body by Content-Length,
+and file permissions readable only by the current user."""
 from __future__ import annotations
 
 import logging
@@ -10,12 +10,12 @@ import sys
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
-DRAIN_MAX = 4 << 20  # 超过这么大的请求体不读完，直接关连接
+DRAIN_MAX = 4 << 20  # bodies larger than this are not drained; the connection is closed instead
 
 
 class ExclusiveHTTPServer(ThreadingHTTPServer):
-    """端口独占：不开 SO_REUSEADDR（Windows 上它允许第二个进程绑同一端口），Windows 另设 SO_EXCLUSIVEADDRUSE。
-    客户端提前断开（ConnectionReset / BrokenPipe / ConnectionAborted）只记一行 debug，不打 traceback。"""
+    """Port-exclusive: no SO_REUSEADDR (on Windows it lets a second process bind the same port); Windows also sets SO_EXCLUSIVEADDRUSE.
+    A client that disconnects early (ConnectionReset / BrokenPipe / ConnectionAborted) logs one debug line and no traceback."""
 
     allow_reuse_address = False
     daemon_threads = True
@@ -28,14 +28,14 @@ class ExclusiveHTTPServer(ThreadingHTTPServer):
     def handle_error(self, request, client_address):
         exc = sys.exc_info()[1]
         if isinstance(exc, (ConnectionError, TimeoutError)):
-            logging.getLogger("host.httpbase").debug("客户端断开：%s", type(exc).__name__)
+            logging.getLogger("host.httpbase").debug("client disconnected: %s", type(exc).__name__)
             return
         super().handle_error(request, client_address)
 
 
 def read_body(handler: BaseHTTPRequestHandler, limit: int) -> tuple:
-    """回包之前先把请求体按 Content-Length 读掉：没读完就回包关连接，Windows 客户端会收到 RST（WinError 10054/10053）。
-    返回 ("ok", bytes) / ("bad", None)（Content-Length 不是非负整数）/ ("large", None)（超过 limit）。"""
+    """Before replying, read the request body by Content-Length: replying and closing with the body unread makes Windows clients receive an RST (WinError 10054/10053).
+    Returns ("ok", bytes) / ("bad", None) (Content-Length is not a non-negative integer) / ("large", None) (over the limit)."""
     raw = handler.headers.get("Content-Length")
     try:
         n = int(raw) if raw else 0
@@ -59,7 +59,7 @@ def read_body(handler: BaseHTTPRequestHandler, limit: int) -> tuple:
 
 
 def restrict_file(path: Path) -> None:
-    """尽量只让当前用户能读：POSIX chmod 600；Windows 去掉继承、只授权当前用户。失败不致命。"""
+    """Make the file readable by the current user only: POSIX chmod 600; on Windows, drop inherited permissions and grant access to the current user only. Failure is not fatal."""
     try:
         if os.name == "nt":
             user = os.environ.get("USERNAME")

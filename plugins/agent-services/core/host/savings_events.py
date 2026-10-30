@@ -25,7 +25,7 @@ def estimate_tokens(text: str) -> int:
     """Token estimate: CJK characters count one each, the rest a quarter (length in UTF-16 code units)."""
     if not isinstance(text, str):
         raise ValueError("text")
-    cjk = sum(1 for ch in text if "　" <= ch <= "鿿" or "＀" <= ch <= "￯")
+    cjk = sum(1 for ch in text if "\u3000" <= ch <= "\u9fff" or "\uff00" <= ch <= "\uffef")
     n = len(text.encode("utf-16-le")) // 2
     return math.floor(cjk + (n - cjk) / 4 + 0.5)
 

@@ -26,8 +26,8 @@ GATE_RETRY_SECONDS = 300   # an unreachable server is tried again after this lon
 ANSWER_KEYS = ("action", "reason", "set", "context", "notice", "fallback")
 
 CHECKPOINT_MARK = "Checkpoint reached:"
-CHECKPOINT_NOW = "服务端建议现在做一次 checkpoint：这一段做完了就调用 checkpoint 工具，摘要里保留下面几项。"
-DENY_TEXT = "这次派子代理没有通过路由检查，请按提示改写后重新派。"
+CHECKPOINT_NOW = "The server suggests a checkpoint now: once this stretch is done, call the checkpoint tool and keep the items below in the summary."
+DENY_TEXT = "This subagent dispatch did not pass the routing check. Rewrite it as the hint says, then dispatch again."
 
 COMMIT_RX = re.compile(
     r"""(?:^|[\s;&|(])git(?:\s+-[cC]\s+(?:[^\s"']|"[^"]*"|'[^']*')+|\s+--?[A-Za-z][\w-]*"""
@@ -424,7 +424,7 @@ class Core:
         st = self._gate_state()
         if st["open"]:
             return
-        if st.get("reason") == "unknown" or (
+        if st.get("reason") in ("unknown", "dependency") or (
                 st.get("reason") == "unavailable"
                 and (self._hello_at is None or self._now() - self._hello_at >= GATE_RETRY_SECONDS)):
             self._handshake()

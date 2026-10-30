@@ -9,10 +9,15 @@ from .seam import IMPL
 
 MODEL_ID = re.compile(r'^claude-[a-z0-9.-]{1,60}$')
 
-# public: common task words (one constant)
+# public: common task words (one constant). The Chinese words (escaped) are the type words the user's dispatches use:
+# review x4, replan, plan x2, acceptance, default, implement, fix, test, research, search, lookup, write, refactor,
+# debug, docs, build, deploy, check, analyze
 TYPE_WORDS = (
-    '审查', '评审', '复审', '审阅', '重新规划', '规划', '计划', '验收', '默认', '实现', '修复', '测试', '调研', '搜索', '查',
-    '写', '重构', '调试', '文档', '构建', '部署', '检查', '分析',
+    '\u5ba1\u67e5', '\u8bc4\u5ba1', '\u590d\u5ba1', '\u5ba1\u9605', '\u91cd\u65b0\u89c4\u5212', '\u89c4\u5212',
+    '\u8ba1\u5212', '\u9a8c\u6536', '\u9ed8\u8ba4', '\u5b9e\u73b0', '\u4fee\u590d', '\u6d4b\u8bd5',
+    '\u8c03\u7814', '\u641c\u7d22', '\u67e5', '\u5199', '\u91cd\u6784', '\u8c03\u8bd5',
+    '\u6587\u6863', '\u6784\u5efa', '\u90e8\u7f72', '\u68c0\u67e5', '\u5206\u6790',
+    're-review', 'lookup',
     'review', 'code-review', 'plan', 'replan', 'acceptance', 'default', 'implement', 'fix', 'test', 'research',
     'search', 'explore', 'write', 'refactor', 'debug', 'docs', 'build', 'deploy', 'check', 'analyze', 'investigate',
     'find', 'verify',

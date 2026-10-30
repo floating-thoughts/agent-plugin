@@ -104,11 +104,35 @@ GATE_NOTICES = {
 }
 _OPEN_STATE = {"open": True, "reason": None, "min_shell": None}
 
+# The one package outside the standard library the shell needs at run time (Ed25519 device keys: sign-in and signed requests).
+# Without it the gate stays closed with reason "dependency" and sign-in answers missing_dependency at once.
+DEPENDENCY_FIX = "python -m pip install --user cryptography"
+DEPENDENCY_NOTICE = ("agent-services is paused: the Python package 'cryptography' is missing; run `"
+                     + DEPENDENCY_FIX + "`, then sign in again with /agent-services.")
+
+
+def missing_dependency() -> str | None:
+    """"cryptography" when it cannot be imported, else None. Not cached: a later `pip install` takes effect."""
+    try:
+        from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey  # noqa: F401
+        from cryptography.hazmat.primitives import serialization  # noqa: F401
+    except ImportError:
+        import importlib
+        importlib.invalidate_caches()
+        return "cryptography"
+    return None
+
+
+def dependency_error() -> dict:
+    return {"error": "missing_dependency", "detail": DEPENDENCY_FIX}
+
 
 def gate_notice(state) -> str | None:
     """The one notice for a closed gate; None when open or the reason is unknown."""
     if not isinstance(state, dict) or state.get("open"):
         return None
+    if state.get("reason") == "dependency":
+        return DEPENDENCY_NOTICE
     text = GATE_NOTICES.get(state.get("reason"))
     if text is None:
         return None
@@ -535,6 +559,9 @@ class Connector:
         if self.offline:
             self._set_gate("offline")
             return Result(False, error="offline")
+        if missing_dependency():
+            self._set_gate("dependency")
+            return Result(False, body=dependency_error(), error="missing_dependency")
         if not self._ks_get("token") or not self._ks_get("account_id"):
             self._set_gate("login")
             return Result(False, error="not_logged_in")
@@ -853,6 +880,9 @@ class Connector:
                 if not token:
                     last = Result(False, error="not_logged_in", attempts=attempts)
                     break
+                if missing_dependency():
+                    last = Result(False, body=dependency_error(), error="missing_dependency", attempts=attempts)
+                    break
                 headers.update(self._signed_headers(method, wire_path, body or b"", token))
             attempts += 1
             body_text = body.decode("utf-8") if body is not None else None
@@ -944,6 +974,8 @@ class Connector:
         g = self._gate("auth")
         if g:
             return g
+        if missing_dependency():   # finishing needs a device key: say so before a code is mailed
+            return Result(False, body=dependency_error(), error="missing_dependency")
         if not isinstance(email, str) or not 3 <= len(email) <= 254 or "@" not in email:
             return Result(False, error="invalid_body")
         blk = self._blocked()
@@ -979,6 +1011,8 @@ class Connector:
         g = self._gate("auth")
         if g:
             return g
+        if missing_dependency():
+            return Result(False, body=dependency_error(), error="missing_dependency")
         if not isinstance(email, str) or not 3 <= len(email) <= 254 or "@" not in email \
                 or not isinstance(code, str) or not 1 <= len(code) <= 32:
             return Result(False, error="invalid_body")
@@ -1470,9 +1504,17 @@ def serve(data_dir, keystore_kind="os", allow_plain_loopback=False) -> int:
                 if method == "POST" and path in ("/core/event", "/core/ask"):
                     return self._core(path, body)
                 if method == "GET" and path == "/local/status":
-                    return self._send(200, {**conn.status(), "notices": conn.notices(),
-                                            "services": {k: conn.service_on(k) for k in SERVICE_DEFAULTS},
-                                            "gate": conn.gate_state()})
+                    dep = dependency_error() if missing_dependency() else {}
+                    reason = conn.gate_state().get("reason")
+                    if dep and reason != "offline":
+                        conn._set_gate("dependency")
+                    elif not dep and reason == "dependency":
+                        conn._set_gate("unknown")   # installed since: the next gate check runs a handshake
+                    st = {**conn.status(), "notices": conn.notices(),
+                          "services": {k: conn.service_on(k) for k in SERVICE_DEFAULTS}, "gate": conn.gate_state()}
+                    if dep:
+                        st.update(dep, notice=DEPENDENCY_NOTICE)
+                    return self._send(200, st)
                 if method == "POST" and path == "/local/call":
                     kind = body.get("kind")
                     if not isinstance(body.get("method"), str) or not isinstance(body.get("path"), str) \
@@ -1551,16 +1593,30 @@ def serve(data_dir, keystore_kind="os", allow_plain_loopback=False) -> int:
             def _result(self, r: Result):
                 if r.ok:
                     return self._send(200, r.body if isinstance(r.body, dict) and r.body else {"ok": True})
+                if r.error == "missing_dependency":
+                    return self._send(200, dependency_error())
                 return self._send(200, {"error": r.error or "failed"})
 
+            def _safe(self, method):
+                """Every request gets an answer: an exception in a handler is 500 internal, never a dropped
+                connection (the CLI would only say connector_unreachable)."""
+                try:
+                    self._handle(method)
+                except Exception as e:  # noqa: BLE001
+                    dep = isinstance(e, ImportError) and missing_dependency()
+                    try:
+                        self._send(500, dependency_error() if dep else {"error": "internal"})
+                    except Exception:  # noqa: BLE001 - the client went away
+                        pass
+
             def do_GET(self):
-                self._handle("GET")
+                self._safe("GET")
 
             def do_POST(self):
-                self._handle("POST")
+                self._safe("POST")
 
             def do_PUT(self):
-                self._handle("PUT")
+                self._safe("PUT")
 
         srv = ThreadingHTTPServer(("127.0.0.1", 0), H)
         srv.daemon_threads = True
@@ -1755,7 +1811,12 @@ def main(argv=None) -> int:
     except (OSError, ValueError, KeyError, http.client.HTTPException):
         return out({"error": "connector_unreachable"}, 1)
     if st != 200 or "error" in body:
-        return out({"error": body.get("error") or f"http_{st}"}, 1)
+        err = {"error": body.get("error") or f"http_{st}"}
+        if isinstance(body.get("detail"), str):
+            err["detail"] = body["detail"]
+        if a.cmd == "status" and isinstance(body.get("notice"), str):
+            err["notice"] = body["notice"]
+        return out(err, 1)
     return out(body)
 
 

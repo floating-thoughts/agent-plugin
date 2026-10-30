@@ -16,7 +16,7 @@ MAX_TEMPLATE = 300
 
 _EMAIL = re.compile(r"[\w.+-]+@[\w-]+(\.[\w-]+)+")
 _URL = re.compile(r"[A-Za-z][A-Za-z0-9+.-]*://[^\s\"'<>`]+")
-_QUOTED = re.compile(r"\"[^\"\r\n]*\"|(?<!\w)'[^'\r\n]*'|`[^`\r\n]*`|“[^”\r\n]*”|‘[^’\r\n]*’|「[^」\r\n]*」")
+_QUOTED = re.compile(r"\"[^\"\r\n]*\"|(?<!\w)'[^'\r\n]*'|`[^`\r\n]*`|“[^”\r\n]*”|‘[^’\r\n]*’|\u300c[^\u300d\r\n]*\u300d")  # also Chinese corner quotes
 _LEAD = "([{<\"'"
 _TRAIL = ")]}>,;:.!?\"'"
 _KEEP = frozenset({"url", "str", "path", "hex", "n", "id", "email", "redacted"})

@@ -1,6 +1,6 @@
-"""显示用的小工具：密钥脱敏（redact）；description 脱敏、压成一行、截断。
+"""Display helpers: secret redaction (redact), and description redaction, flattening to one line, and truncation.
 
-用它的是要把文字显示出来或发出去之前先去掉密钥的地方。
+Use them wherever text is about to be shown or sent out, to strip secrets first.
 """
 from __future__ import annotations
 
@@ -12,12 +12,12 @@ TASK_LIMIT = 80
 
 _SECRET_RES = [
     re.compile(r"-----BEGIN [A-Z ]*PRIVATE KEY-----[\s\S]+?-----END [A-Z ]*PRIVATE KEY-----"),
-    # ASCII word edges, not \b: Python's \b counts CJK as word characters, so "令牌ghp_…" would slip past
+    # ASCII word edges, not \b: Python's \b counts CJK characters as word characters, so a token glued to CJK text would slip past
     re.compile(r"(?<![A-Za-z0-9_])sk-ant-[A-Za-z0-9_-]{16,}"),
     re.compile(r"(?<![A-Za-z0-9_])sk-(?:proj-)?[A-Za-z0-9_-]{16,}"),
     re.compile(r"(?<![A-Za-z0-9_])(?:gh[pousr]_[A-Za-z0-9]{20,}|github_pat_[A-Za-z0-9_]{20,})"),
     re.compile(r"(?<![A-Za-z0-9_])bot\d{6,}:[A-Za-z0-9_-]{20,}"),
-    # 聊天机器人令牌的裸格式（无 bot 前缀）：<数字>:<长串>
+    # bare chat-bot token format (no bot prefix): <digits>:<long string>
     re.compile(r"(?<![A-Za-z0-9_])\d{6,12}:[A-Za-z0-9_-]{30,}(?![A-Za-z0-9_-])"),
     re.compile(r"(?<![A-Za-z0-9_])xox[abprs]-[A-Za-z0-9-]{10,}"),
     re.compile(r"(?<![A-Za-z0-9_])AKIA[0-9A-Z]{16}(?![A-Za-z0-9_])"),
@@ -32,7 +32,7 @@ _SECRET_RES = [
 
 
 def redact(text: str) -> str:
-    """遮住文本里像密钥的部分（私钥块、各家 API 令牌、Authorization 头、key=…、--token …）。"""
+    """Mask the parts of the text that look like secrets (private key blocks, API tokens from each vendor, Authorization headers, key=..., --token ...)."""
     if not text:
         return text
     out = text
@@ -44,13 +44,13 @@ def redact(text: str) -> str:
     return out
 
 
-TOKEN_MASK = "[令牌已隐去]"
+TOKEN_MASK = "[token hidden]"
 _HEX64 = re.compile(r"(?<![0-9A-Fa-f])[0-9A-Fa-f]{64}(?![0-9A-Fa-f])")
 
 
 def scrub(text: str, known_tokens=()) -> str:
-    """同一套脱敏（redact，含聊天机器人令牌）+ 令牌遮挡：已知令牌原样替换，
-    任何 64 位十六进制串一律遮挡（会话令牌就是这个形状；不查 store，宁可多遮）。"""
+    """The same redaction (redact, including chat-bot tokens) plus token masking: known tokens are replaced as they are,
+    any 64-digit hex string is always masked (session tokens have this shape; the store is not consulted, so over-masking is preferred)."""
     if not text:
         return text or ""
     for t in known_tokens or ():
@@ -61,10 +61,10 @@ def scrub(text: str, known_tokens=()) -> str:
 
 
 def clean_description(raw, limit: int = DESC_LIMIT):
-    """工具调用的 description → 脱敏、压成一行、截断；不是非空字符串返回 None。先脱敏再截断，截断不会留下半截密钥。"""
+    """Tool-call description → redact, flatten to one line, truncate; returns None unless it is a non-empty string. Redact before truncating, so truncation never leaves half a secret behind."""
     if not isinstance(raw, str):
         return None
-    # 先按 RAW_LIMIT 粗截（防超长输入拖慢脱敏），再脱敏、再按 limit 截：粗截处若切断密钥也远在显示范围之外
+    # Coarse-cut to RAW_LIMIT first (so oversized input cannot slow redaction), then redact, then cut to limit: a secret split by the coarse cut lies far beyond the displayed range
     text = " ".join(redact(raw[:RAW_LIMIT]).split())
     if not text:
         return None

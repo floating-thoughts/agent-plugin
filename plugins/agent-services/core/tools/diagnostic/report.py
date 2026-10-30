@@ -51,7 +51,7 @@ def _split_row(label, bucket):
 
 
 SPLIT_HEAD = ['', 'Tokens', 'API-equivalent cost', 'Responses', 'Main conversation tokens', 'Main conversation cost',
-              'Subagent (子代理) tokens', 'Subagent (子代理) cost']
+              'Subagent tokens', 'Subagent cost']
 
 
 # The reference line (our own measured saving) on the estimate page; set False to leave it out.
@@ -114,7 +114,7 @@ def render_html(facts, today=None, estimate=None):
         parts.append(f'<div class="tile"><b>{_e(value)}</b><span>{_e(label)}</span></div>')
     parts.append('</div>')
 
-    parts.append('<h2>Totals: main conversation vs subagents (子代理)</h2>')
+    parts.append('<h2>Totals: main conversation vs subagents</h2>')
     parts.append(_table(SPLIT_HEAD, [_split_row('All', totals)]))
 
     parts.append('<h2>Per month</h2>')
@@ -138,7 +138,7 @@ def render_html(facts, today=None, estimate=None):
                         + [[m, num(n), '', ''] for m, n in comp['by_month'].items()]))
 
     parts.append('<h2>Sessions</h2>')
-    parts.append(_table(['Sessions', 'Median length (minutes)', 'Longest (minutes)', 'Subagents (子代理)'],
+    parts.append(_table(['Sessions', 'Median length (minutes)', 'Longest (minutes)', 'Subagents'],
                         [[num(sessions['count']), sessions['median_minutes'], sessions['max_minutes'],
                           num(sessions['subagents'])]]))
 

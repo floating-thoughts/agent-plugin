@@ -32,7 +32,7 @@ KNOWN_HEADS = frozenset({
 _PYTHONS = re.compile(r"^(python|python3|python3\.\d+|py|pythonw)$")
 _SUFFIXES = (".exe", ".cmd", ".bat", ".ps1", ".sh", ".py")
 
-ROUTER_NOTICE = "路由服务暂时不可用，这次派子代理按原样运行（用调用方写的 model 和档位）。"
+ROUTER_NOTICE = "The routing service is temporarily unavailable; this subagent dispatch runs as written, with the model and effort the caller set."
 
 _EFFORTS = ("low", "medium", "high", "xhigh", "max")
 _MODEL_RX = re.compile(r"^[A-Za-z0-9.\[\]_:-]+$")
