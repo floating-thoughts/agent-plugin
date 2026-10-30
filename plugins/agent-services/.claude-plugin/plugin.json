@@ -1,0 +1,5 @@
+{
+  "name": "agent-services",
+  "description": "agent-services: maps Claude Code hook events to the local core (core/1) and applies its answers",
+  "author": { "name": "Yi Zhang" }
+}

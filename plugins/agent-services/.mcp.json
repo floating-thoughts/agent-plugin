@@ -1,0 +1,8 @@
+{
+  "mcpServers": {
+    "agent-services": {
+      "command": "python",
+      "args": ["${CLAUDE_PLUGIN_ROOT}/hooks/agent_core.py", "mcp", "--harness", "claude-code"]
+    }
+  }
+}

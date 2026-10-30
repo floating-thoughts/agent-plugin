@@ -1,0 +1,535 @@
+{
+ "api": "svc/1",
+ "prefix": "/svc/v1",
+ "source": "本机连接器（host/services.py）和我们的服务之间的请求契约：客户端按本文件拼请求、校验回包，服务端按本文件收",
+ "x-transport": {
+  "scheme": "https",
+  "tls_min": "1.2",
+  "endpoint": "客户端配置里的 https://<ip>:<port>（只能是 IP，不能是域名）",
+  "trust": "自签证书：只认客户端配置里钉的证书 SHA-256 指纹（或我们的 CA），不认系统信任库，不退回明文",
+  "egress": "只有本机连接器进程（host/services.py）发；会话、hook、插件、界面从不直接连服务"
+ },
+ "x-auth": {
+  "header": "Authorization",
+  "format": "Bearer <client_id>.<secret>",
+  "note": "每个客户一把服务 key（我们发）；存 <数据目录>/secrets/services.key，只当前用户可读；不进日志、事件、发件记录（outbox）和错误文字；和 Claude 凭据无关"
+ },
+ "x-headers": [
+  {"name": "Authorization", "value": "服务 key（见 x-auth）", "in_outbox": false},
+  {"name": "User-Agent", "value": "agent-services/<client_version>", "in_outbox": true},
+  {"name": "Content-Type", "value": "application/json", "in_outbox": true}
+ ],
+ "x-validation": "两端都按 request schema 校验：客户端只按 schema 拼请求体，schema 里没有的字段在发送前丢掉；服务端遇到多余字段、类型或长度不合 → 422 bad_request；跨字段上限（x-limits）两端都查",
+ "limits": {"body_bytes": 65536},
+ "x-common-errors": {
+  "400": ["bad_json"],
+  "401": ["bad_key"],
+  "404": ["not_found"],
+  "413": ["too_large"],
+  "422": ["bad_request"],
+  "429": ["rate_limited"],
+  "500": ["internal"],
+  "503": ["unavailable"]
+ },
+ "x-client-config": {
+  "path": "<数据目录>/services/client.json（随许可和服务 key 一起发）",
+  "schema": {
+   "type": "object",
+   "properties": {
+    "endpoint": {"type": "string", "pattern": "^https://(\\d{1,3}\\.){3}\\d{1,3}:\\d{1,5}$", "maxLength": 40, "description": "只能是 IP，不能是域名"},
+    "client_id": {"type": "string", "pattern": "^c_[a-z0-9]{8,32}$", "maxLength": 34},
+    "pin": {
+     "type": "object",
+     "properties": {
+      "kind": {"enum": ["cert_sha256", "ca"]},
+      "sha256": {"type": "array", "minItems": 1, "maxItems": 2, "items": {"type": "string", "pattern": "^[0-9a-f]{64}$", "maxLength": 64}, "description": "两个指纹 = 轮换期新旧证书都认"}
+     },
+     "required": ["kind", "sha256"],
+     "additionalProperties": false
+    }
+   },
+   "required": ["endpoint", "client_id", "pin"],
+   "additionalProperties": false
+  }
+ },
+ "x-outbox": {
+  "path": "<数据目录>/services/outbox.jsonl",
+  "line": {"$ref": "#/definitions/OutboxLine"},
+  "keep_days": 90,
+  "note": "每个请求一行，包括只预览不发的（preview=true、status=null）；body_text 是发出去的请求体原样字节（UTF-8），不含 Authorization 头"
+ },
+ "definitions": {
+  "Error": {
+   "type": "object",
+   "properties": {
+    "error": {
+     "type": "object",
+     "properties": {
+      "code": {"type": "string", "pattern": "^[a-z][a-z0-9_]*$"},
+      "message": {"type": "string", "minLength": 1},
+      "next": {"type": "string"}
+     },
+     "required": ["code", "message", "next"]
+    }
+   },
+   "required": ["error"]
+  },
+  "SessionRef": {"type": "string", "pattern": "^[0-9a-f]{32}$", "maxLength": 32, "description": "本机每个会话随机生成的 id，不是会话名、项目名或路径"},
+  "SessionKind": {"enum": ["auto", "direct"], "description": "auto = 自动推进的会话；direct = 用户直接使用的会话"},
+  "Sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$", "maxLength": 64},
+  "SessionMark": {"type": "string", "pattern": "^[a-z]{2,8}-[0-9a-f]{16,32}$", "maxLength": 41, "description": "不透明的会话标记"},
+  "SessionTag": {"type": "string", "pattern": "^[a-z]{2,8}-[0-9a-f]{16,32}$", "maxLength": 41, "description": "不透明的会话标记串"},
+  "Version": {"type": "string", "pattern": "^\\d+\\.\\d+\\.\\d+([-+][0-9A-Za-z.-]+)?$", "maxLength": 40},
+  "ServedRole": {"enum": ["control", "auto", "plugin"], "description": "control = 调度会话；auto = 自动推进的会话；plugin = 插件"},
+  "ServedPhase": {"enum": ["plan", "implement", "test", "review", "deliver", "checkpoint"]},
+  "PackTarget": {"enum": ["pack-a", "pack-b", "skills", "plugin"]},
+  "PackRef": {
+   "type": "object",
+   "properties": {
+    "name": {"type": "string", "pattern": "^[a-z0-9][a-z0-9-]{0,39}$", "maxLength": 40},
+    "target": {"$ref": "#/definitions/PackTarget"},
+    "version": {"$ref": "#/definitions/Version"},
+    "min_client": {"$ref": "#/definitions/Version"},
+    "sha256": {"$ref": "#/definitions/Sha256"},
+    "size_bytes": {"type": "integer", "minimum": 1, "maximum": 52428800},
+    "download": {"type": "string", "pattern": "^/svc/v1/packs/[a-z-]+/[0-9A-Za-z.+-]+$", "maxLength": 120}
+   },
+   "required": ["name", "target", "version", "min_client", "sha256", "size_bytes", "download"],
+   "additionalProperties": false
+  },
+  "Savings": {
+   "type": "object",
+   "description": "服务端从上传的计数算出的节约；金额 6 位小数，pct 4 位；usd 和 tokens 可以为负（压缩可能花得比省得多）",
+   "properties": {
+    "first_day": {"anyOf": [{"type": "string", "pattern": "^\\d{4}-\\d{2}-\\d{2}$", "maxLength": 10}, {"type": "null"}]},
+    "last_day": {"anyOf": [{"type": "string", "pattern": "^\\d{4}-\\d{2}-\\d{2}$", "maxLength": 10}, {"type": "null"}]},
+    "days": {"type": "integer", "minimum": 0, "maximum": 1000000},
+    "api_usd": {"type": "number", "minimum": 0, "maximum": 1000000000},
+    "usd": {"type": "number", "minimum": -1000000000, "maximum": 1000000000},
+    "pct": {"type": "number", "minimum": -1000000000, "maximum": 1},
+    "route": {"$ref": "#/definitions/Lever"},
+    "compact": {"$ref": "#/definitions/Lever"},
+    "index": {"$ref": "#/definitions/Lever"},
+    "by_day": {"type": "array", "maxItems": 400, "items": {"type": "object", "properties": {
+     "day": {"type": "string", "pattern": "^\\d{4}-\\d{2}-\\d{2}$", "maxLength": 10}, "api_usd": {"type": "number", "minimum": 0, "maximum": 1000000000}, "usd": {"type": "number", "minimum": -1000000000, "maximum": 1000000000}, "route_usd": {"type": "number", "minimum": -1000000000, "maximum": 1000000000}, "compact_usd": {"type": "number", "minimum": -1000000000, "maximum": 1000000000}, "index_usd": {"type": "number", "minimum": -1000000000, "maximum": 1000000000}
+    }, "required": ["day", "api_usd", "usd", "route_usd", "compact_usd", "index_usd"], "additionalProperties": false}}
+   },
+   "required": ["first_day", "last_day", "days", "api_usd", "usd", "pct", "route", "compact", "index", "by_day"],
+   "additionalProperties": false
+  },
+  "Lever": {"type": "object", "properties": {"usd": {"type": "number", "minimum": -1000000000, "maximum": 1000000000}, "tokens": {"type": "integer", "minimum": -1000000000000000, "maximum": 1000000000000000}, "runs": {"type": "integer", "minimum": 0, "maximum": 1000000000}}, "required": ["usd", "tokens", "runs"], "additionalProperties": false},
+  "DiagSide": {"type": "object", "properties": {"input_tokens": {"type": "integer", "minimum": 0, "maximum": 10000000000000}, "output_tokens": {"type": "integer", "minimum": 0, "maximum": 10000000000000}, "cache_read_tokens": {"type": "integer", "minimum": 0, "maximum": 10000000000000}, "cache_write_tokens": {"type": "integer", "minimum": 0, "maximum": 10000000000000}, "api_usd": {"type": "number", "minimum": 0, "maximum": 100000000}, "responses": {"type": "integer", "minimum": 0, "maximum": 1000000000}}, "required": ["input_tokens", "output_tokens", "cache_read_tokens", "cache_write_tokens", "api_usd", "responses"], "additionalProperties": false},
+  "DiagEstimateRequest": {"type": "object", "description": "免费用量诊断的一次性汇总：只有计数和金额，没有会话或项目哈希、按天的行、路径、名字或文字。服务端在 schema 之外还查字段之间是否一致，不一致回 422 bad_request；数据太少、给不出估算时回 422 too_little_data", "properties": {"schema": {"type": "string", "const": "diag-est-1", "maxLength": 10}, "client_version": {"$ref": "#/definitions/Version"}, "harness": {"type": "string", "const": "claude-code", "maxLength": 11}, "window": {"type": "object", "properties": {"first_day": {"type": "string", "pattern": "^\\d{4}-\\d{2}-\\d{2}$", "maxLength": 10}, "last_day": {"type": "string", "pattern": "^\\d{4}-\\d{2}-\\d{2}$", "maxLength": 10}}, "required": ["first_day", "last_day"], "additionalProperties": false}, "by_model": {"type": "array", "maxItems": 40, "description": "每个型号一行（超过 40 个时其余并进 other），主对话和子代理分开", "items": {"type": "object", "properties": {"model": {"type": "string", "pattern": "^(claude-[a-z0-9.-]{1,60}|other)$", "maxLength": 67}, "main": {"$ref": "#/definitions/DiagSide"}, "subagents": {"$ref": "#/definitions/DiagSide"}}, "required": ["model", "main", "subagents"], "additionalProperties": false}}, "dispatches": {"type": "array", "maxItems": 60, "description": "按子代理 description 的第一个词（公开的 tools.diagnostic.TYPE_WORDS 里的词或 other）计数；不发其余文字", "items": {"type": "object", "properties": {"type_word": {"type": "string", "pattern": "^\\S{1,20}$", "maxLength": 20}, "count": {"type": "integer", "minimum": 1, "maximum": 10000000}}, "required": ["type_word", "count"], "additionalProperties": false}}, "compactions": {"type": "object", "properties": {"total": {"type": "integer", "minimum": 0, "maximum": 10000000}, "manual": {"type": "integer", "minimum": 0, "maximum": 10000000}, "auto": {"type": "integer", "minimum": 0, "maximum": 10000000}}, "required": ["total", "manual", "auto"], "additionalProperties": false}, "sessions": {"type": "object", "properties": {"count": {"type": "integer", "minimum": 0, "maximum": 10000000}, "minutes_total": {"type": "number", "minimum": 0, "maximum": 1000000000}, "by_responses": {"type": "array", "minItems": 14, "maxItems": 14, "description": "会话按回复数分桶（第 k 项 = 回复数在 [2^k, 2^(k+1)) 的会话数，最后一项含更多）", "items": {"type": "integer", "minimum": 0, "maximum": 10000000}}}, "required": ["count", "minutes_total", "by_responses"], "additionalProperties": false}}, "required": ["schema", "client_version", "harness", "window", "by_model", "dispatches", "compactions", "sessions"], "additionalProperties": false},
+  "DiagRange": {"type": "object", "properties": {"value": {"type": "number", "minimum": -1000000000, "maximum": 1000000000}, "low": {"type": "number", "minimum": -1000000000, "maximum": 1000000000}, "high": {"type": "number", "minimum": -1000000000, "maximum": 1000000000}}, "required": ["value", "low", "high"], "additionalProperties": false},
+  "DiagLever": {"type": "object", "properties": {"usd": {"$ref": "#/definitions/DiagRange"}, "hours": {"$ref": "#/definitions/DiagRange"}}, "required": ["usd", "hours"], "additionalProperties": false},
+  "DiagEstimate": {"type": "object", "description": "估算的每月节约（只有数字和日期）：每项的美元和小时及上下限；pct = total 占花费的比例；reference = 我们自己实测的节约比例", "properties": {"schema": {"type": "string", "const": "diag-est-1", "maxLength": 10}, "window": {"type": "object", "properties": {"first_day": {"type": "string", "pattern": "^\\d{4}-\\d{2}-\\d{2}$", "maxLength": 10}, "last_day": {"type": "string", "pattern": "^\\d{4}-\\d{2}-\\d{2}$", "maxLength": 10}, "days": {"type": "integer", "minimum": 1, "maximum": 400}}, "required": ["first_day", "last_day", "days"], "additionalProperties": false}, "api_usd_month": {"type": "number", "minimum": -1000000000, "maximum": 1000000000}, "routing": {"$ref": "#/definitions/DiagLever"}, "compaction": {"$ref": "#/definitions/DiagLever"}, "index": {"$ref": "#/definitions/DiagLever"}, "scripts": {"$ref": "#/definitions/DiagLever"}, "total": {"$ref": "#/definitions/DiagLever"}, "pct": {"$ref": "#/definitions/DiagRange"}, "reference": {"type": "object", "properties": {"pct": {"type": "number", "minimum": 0, "maximum": 1}, "since": {"type": "string", "pattern": "^\\d{4}-\\d{2}-\\d{2}$", "maxLength": 10}}, "required": ["pct", "since"], "additionalProperties": false}}, "required": ["schema", "window", "api_usd_month", "routing", "compaction", "index", "scripts", "total", "pct", "reference"], "additionalProperties": false},
+  "OutboxLine": {
+   "type": "object",
+   "properties": {
+    "ts": {"type": "string", "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}(\\.\\d+)?Z$", "maxLength": 32},
+    "service": {"enum": ["health", "updates", "incidents", "metrics", "auth", "router", "checkpoint", "limits"], "description": "auth = /svc/v1/auth/*（登录、轮换、登出）"},
+    "method": {"enum": ["GET", "POST", "DELETE"]},
+    "route": {"type": "string", "pattern": "^(/svc/v1/|/health$)", "maxLength": 120},
+    "preview": {"type": "boolean", "description": "true = 只拼好请求体给客户看，没发"},
+    "body_text": {"anyOf": [{"type": "string", "maxLength": 65536}, {"type": "null"}], "description": "发出去的请求体原样；GET/DELETE 为 null"},
+    "status": {"anyOf": [{"type": "integer", "minimum": 100, "maximum": 599}, {"type": "null"}], "description": "预览或连不上时为 null"},
+    "response_text": {"anyOf": [{"type": "string", "maxLength": 65536}, {"type": "null"}]},
+    "error": {"anyOf": [{"type": "string", "maxLength": 300}, {"type": "null"}], "description": "连不上、超时等本机错误；不含 key"}
+   },
+   "required": ["ts", "service", "method", "route", "preview", "body_text", "status", "response_text", "error"],
+   "additionalProperties": false
+  }
+ },
+ "routes": [
+  {
+   "method": "GET",
+   "path": "/health",
+   "request": null,
+   "responses": {"200": {"type": "object", "properties": {"api": {"const": "svc/1"}, "ok": {"type": "boolean"}}, "required": ["api", "ok"], "additionalProperties": false}},
+   "errors": {},
+   "x-inventory": {"service": "health", "purpose": "连通和 key 检查（设置页「测试连接」）", "default": "on", "retention": "不存内容；访问日志（client_id、时间、状态码）30 天", "sent_to": ["our_service"]}
+  },
+  {
+   "method": "POST",
+   "path": "/updates/check",
+   "request": {
+    "type": "object",
+    "properties": {
+     "client_version": {"$ref": "#/definitions/Version"},
+     "os": {"enum": ["windows", "macos", "linux"]},
+     "channel": {"enum": ["stable", "beta"]},
+     "pinned_version": {"anyOf": [{"$ref": "#/definitions/Version"}, {"type": "null"}]},
+     "installed_pack_versions": {
+      "type": "array", "maxItems": 20,
+      "items": {
+       "type": "object",
+       "properties": {"target": {"$ref": "#/definitions/PackTarget"}, "version": {"$ref": "#/definitions/Version"}},
+       "required": ["target", "version"],
+       "additionalProperties": false
+      }
+     }
+    },
+    "required": ["client_version", "os", "channel", "pinned_version", "installed_pack_versions"],
+    "additionalProperties": false
+   },
+   "responses": {"200": {"type": "object", "properties": {"packs": {"type": "array", "maxItems": 20, "items": {"$ref": "#/definitions/PackRef"}}}, "required": ["packs"], "additionalProperties": false}},
+   "errors": {},
+   "x-inventory": {"service": "updates", "purpose": "查有没有新的更新包；不带项目、会话或内容", "default": "on（有新版本时只提示）", "retention": "下载记录（client_id、版本、时间）90 天", "sent_to": ["our_service"]}
+  },
+  {
+   "method": "GET",
+   "path": "/packs/{target}/{version}",
+   "x-params": {"target": "^(pack-a|pack-b|skills|plugin)$", "version": "^\\d+\\.\\d+\\.\\d+([-+][0-9A-Za-z.-]+)?$"},
+   "request": null,
+   "x-response-body": "raw：tar 包，内含 manifest.json 和 manifest.sig（Ed25519）；客户端按钉住的公钥验签",
+   "responses": {"200": null},
+   "errors": {},
+   "x-inventory": {"service": "updates", "purpose": "下载更新包；只发路径里的 target 和 version", "default": "on", "retention": "下载记录（client_id、版本、时间）90 天", "sent_to": ["our_service"]}
+  },
+  {
+   "method": "POST",
+   "path": "/served/fetch",
+   "request": {
+    "type": "object",
+    "properties": {
+     "session_ref": {"$ref": "#/definitions/SessionRef"},
+     "role": {"$ref": "#/definitions/ServedRole"},
+     "phase": {"$ref": "#/definitions/ServedPhase"},
+     "pinned_version": {"anyOf": [{"$ref": "#/definitions/Version"}, {"type": "null"}], "description": "这个会话绑定的版本，否则客户端为该角色钉住的版本，否则 null（= 频道上的当前版本）"},
+     "channel": {"enum": ["stable", "beta"]}
+    },
+    "required": ["session_ref", "role", "phase", "pinned_version", "channel"],
+    "additionalProperties": false
+   },
+   "responses": {"200": {
+    "type": "object",
+    "properties": {
+     "role": {"$ref": "#/definitions/ServedRole"},
+     "phase": {"$ref": "#/definitions/ServedPhase"},
+     "version": {"$ref": "#/definitions/Version"},
+     "channel": {"enum": ["stable", "beta"], "description": "下发的这个版本现在所在的频道"},
+     "pinned": {"type": "boolean", "description": "请求带了钉住的版本"},
+     "catalog": {"type": "string", "maxLength": 200, "description": "这个阶段的目录行，没有时为空串"},
+     "items": {
+      "type": "array", "maxItems": 30,
+      "items": {
+       "type": "object",
+       "properties": {
+        "id": {"type": "string", "pattern": "^[a-z0-9][a-z0-9-]{0,39}$", "maxLength": 40},
+        "text": {"type": "string", "minLength": 1, "maxLength": 20000},
+        "sha256": {"$ref": "#/definitions/Sha256"}
+       },
+       "required": ["id", "text", "sha256"],
+       "additionalProperties": false
+      }
+     }
+    },
+    "required": ["role", "phase", "version", "channel", "pinned", "catalog", "items"],
+    "additionalProperties": false
+   }},
+   "errors": {"404": ["no_served_version", "no_such_version"], "403": ["not_in_plan"]},
+   "x-inventory": {"service": "updates", "purpose": "按阶段取服务下发的内容；只发会话随机 id、角色、阶段、钉住的版本和频道", "default": "on", "retention": "不存请求内容；访问日志 30 天", "sent_to": ["our_service"]}
+  },
+  {
+   "method": "POST",
+   "path": "/served/session",
+   "request": {"type": "object", "properties": {"session_ref": {"$ref": "#/definitions/SessionRef"}, "role": {"$ref": "#/definitions/ServedRole"}}, "required": ["session_ref", "role"], "additionalProperties": false},
+   "responses": {"200": {"type": "object", "properties": {
+    "session_ref": {"$ref": "#/definitions/SessionRef"},
+    "watermark": {"$ref": "#/definitions/SessionMark", "description": "本会话的标记"},
+    "canaries": {"type": "array", "minItems": 1, "maxItems": 4, "uniqueItems": true, "items": {"$ref": "#/definitions/SessionTag"}, "description": "本会话的标记串"},
+    "fp": {"type": "object", "properties": {
+     "key": {"$ref": "#/definitions/Sha256", "description": "本会话的指纹 HMAC 密钥"},
+     "shingle": {"type": "integer", "minimum": 4, "maximum": 64},
+     "window": {"type": "integer", "minimum": 1, "maximum": 32}
+    }, "required": ["key", "shingle", "window"], "additionalProperties": false},
+    "thresholds": {"type": "object", "properties": {
+     "run": {"type": "integer", "minimum": 1, "maximum": 1000},
+     "share": {"type": "number", "minimum": 0.01, "maximum": 1}
+    }, "required": ["run", "share"], "additionalProperties": false}
+   }, "required": ["session_ref", "watermark", "canaries", "fp", "thresholds"], "additionalProperties": false}},
+   "errors": {"403": ["not_in_plan"], "409": ["role_mismatch"]},
+   "x-response-secret": ["watermark", "canaries", "fp", "thresholds"],
+   "x-inventory": {"service": "updates", "purpose": "只发会话随机 id 和角色；换回本会话的参数", "default": "on（会话打开时一次；关掉下发内容后不发）", "retention": "会话记录 13 个月", "sent_to": ["our_service"]}
+  },
+  {
+   "method": "POST",
+   "path": "/incidents",
+   "request": {
+    "type": "object",
+    "properties": {
+     "session_ref": {"$ref": "#/definitions/SessionRef"},
+     "harness": {"enum": ["claude-code", "opencode", "codex", "other"]},
+     "harness_version": {"type": "string", "pattern": "^[0-9A-Za-z.+-]+$", "maxLength": 40},
+     "model": {"type": "string", "pattern": "^[0-9A-Za-z.:/_-]+$", "maxLength": 80},
+     "tool": {"type": "string", "pattern": "^[A-Za-z0-9_.:-]+$", "maxLength": 80},
+     "error_class": {"type": "string", "pattern": "^[A-Za-z0-9_.:-]+$", "maxLength": 80},
+     "error_template": {"type": "string", "minLength": 1, "maxLength": 300, "description": "模板化后的报错第一行（host/incident.py template：路径、网址、引号串、数字、标识符都换成占位符）；不发原始报错行"},
+     "error_sha256": {"$ref": "#/definitions/Sha256", "description": "脱敏后第一行的 sha256（只用来数有几种不同的报错）"},
+     "file_ext": {"anyOf": [{"type": "string", "pattern": "^\\.[A-Za-z0-9]{1,10}$", "maxLength": 11}, {"type": "null"}], "description": "涉及文件的扩展名；不带路径和文件名"},
+     "outcome": {"enum": ["fixed", "retried", "failed"]}
+    },
+    "required": ["session_ref", "harness", "harness_version", "model", "tool", "error_class", "error_template", "error_sha256", "file_ext", "outcome"],
+    "additionalProperties": false
+   },
+   "responses": {"200": {"type": "object", "properties": {"received": {"const": true}}, "required": ["received"], "additionalProperties": false}},
+   "errors": {"403": ["service_off", "not_in_plan"], "429": ["too_many"]},
+   "x-inventory": {"service": "incidents", "purpose": "故障上报，喂经验整理流水线（不含代码、文件内容、路径）", "default": "off（客户自己打开）", "retention": "直到据此做成或驳回一条 lesson 为止，最长 180 天；不存 session_ref", "sent_to": ["our_service"]}
+  },
+  {
+   "method": "POST",
+   "path": "/metrics/daily",
+   "request": {
+    "type": "object",
+    "description": "服务端在 schema 之外还查字段之间是否一致，不一致回 422 bad_request；day 不是日历日期或不在服务端接受的日期范围内时回 422 bad_day",
+    "properties": {
+     "day": {"type": "string", "pattern": "^\\d{4}-\\d{2}-\\d{2}$", "maxLength": 10},
+     "client_version": {"$ref": "#/definitions/Version"},
+     "by_model": {
+      "type": "array", "maxItems": 50,
+      "items": {
+       "type": "object",
+       "properties": {
+        "model": {"type": "string", "pattern": "^[0-9A-Za-z.:/_-]+$", "maxLength": 80},
+        "input_tokens": {"type": "integer", "minimum": 0, "maximum": 1000000000000},
+        "output_tokens": {"type": "integer", "minimum": 0, "maximum": 1000000000000},
+        "cache_read_tokens": {"type": "integer", "minimum": 0, "maximum": 1000000000000},
+        "cache_write_tokens": {"type": "integer", "minimum": 0, "maximum": 1000000000000},
+        "api_usd": {"type": "number", "minimum": 0, "maximum": 1000000}
+       },
+       "required": ["model", "input_tokens", "output_tokens", "cache_read_tokens", "cache_write_tokens", "api_usd"],
+       "additionalProperties": false
+      }
+     },
+     "by_task": {
+      "type": "array", "maxItems": 500,
+      "items": {
+       "type": "object",
+       "properties": {
+        "task_type": {"type": "string", "maxLength": 20, "description": "子代理 description 的第一个词（路由的任务类型）"},
+        "model": {"type": "string", "pattern": "^[0-9A-Za-z.:/_-]+$", "maxLength": 80},
+        "project_hash": {"type": "string", "pattern": "^[0-9a-f]{16}$", "maxLength": 16, "description": "HMAC(本机盐, 项目)，能分组不能还原项目名"},
+        "count": {"type": "integer", "minimum": 0, "maximum": 1000000},
+        "success": {"anyOf": [{"type": "integer", "minimum": 0, "maximum": 1000000}, {"type": "null"}], "description": "null = 没有记录（会话记录不记结果）"},
+        "fail": {"anyOf": [{"type": "integer", "minimum": 0, "maximum": 1000000}, {"type": "null"}]},
+        "retry": {"anyOf": [{"type": "integer", "minimum": 0, "maximum": 1000000}, {"type": "null"}]},
+        "median_seconds": {"anyOf": [{"type": "number", "minimum": 0, "maximum": 86400}, {"type": "null"}]}
+       },
+       "required": ["task_type", "model", "project_hash", "count", "success", "fail", "retry", "median_seconds"],
+       "additionalProperties": false
+      }
+     },
+     "sessions": {
+      "type": "array", "maxItems": 20,
+      "items": {
+       "type": "object",
+       "properties": {
+        "kind": {"$ref": "#/definitions/SessionKind"},
+        "harness": {"enum": ["claude-code", "codex", "other"]},
+        "count": {"type": "integer", "minimum": 0, "maximum": 1000000}
+       },
+       "required": ["kind", "harness", "count"],
+       "additionalProperties": false
+      }
+     },
+     "savings": {
+      "type": "object",
+      "description": "节约公式要的原始计数；没有就不带。金额由服务端算，客户端不算",
+      "properties": {
+       "route": {
+        "type": "array", "maxItems": 100, "description": "路由的子代理回合，按 (model, long) 每天一行",
+        "items": {
+         "type": "object",
+         "properties": {
+          "model": {"type": "string", "pattern": "^[0-9A-Za-z.:/_-]+$", "maxLength": 80},
+          "long": {"type": "boolean", "description": "这一回合的 prompt 超过该型号公开价目表的 long_prompt.over"},
+          "turns": {"type": "integer", "minimum": 0, "maximum": 1000000},
+          "input_tokens": {"type": "integer", "minimum": 0, "maximum": 1000000000000},
+          "output_tokens": {"type": "integer", "minimum": 0, "maximum": 1000000000000},
+          "cache_read_tokens": {"type": "integer", "minimum": 0, "maximum": 1000000000000},
+          "cache_write_tokens": {"type": "integer", "minimum": 0, "maximum": 1000000000000}
+         },
+         "required": ["model", "long", "turns", "input_tokens", "output_tokens", "cache_read_tokens", "cache_write_tokens"],
+         "additionalProperties": false
+        }
+       },
+       "index": {
+        "type": "array", "maxItems": 500, "description": "索引文件的分段读，按 (model, file_tokens) 每天一行",
+        "items": {
+         "type": "object",
+         "properties": {
+          "model": {"type": "string", "pattern": "^[0-9A-Za-z.:/_-]+$", "maxLength": 80},
+          "file_tokens": {"type": "integer", "minimum": 0, "maximum": 1000000000, "description": "被读文件整份的 token 估计"},
+          "reads": {"type": "integer", "minimum": 0, "maximum": 1000000}
+         },
+         "required": ["model", "file_tokens", "reads"],
+         "additionalProperties": false
+        }
+       },
+       "compact": {
+        "type": "array", "maxItems": 50, "description": "checkpoint 压缩，每个 ref 每天一行；跨天的步在服务端按 ref 接上",
+        "items": {
+         "type": "object",
+         "properties": {
+          "ref": {"type": "string", "pattern": "^[0-9a-f]{16}$", "maxLength": 16, "description": "每次压缩随机生成，不是会话 id"},
+          "start": {"anyOf": [{
+           "type": "object",
+           "properties": {
+            "model": {"type": "string", "pattern": "^[0-9A-Za-z.:/_-]+$", "maxLength": 80},
+            "before_tokens": {"type": "integer", "minimum": 0, "maximum": 1000000000000},
+            "after_tokens": {"anyOf": [{"type": "integer", "minimum": 0, "maximum": 1000000000000}, {"type": "null"}]},
+            "window_tokens": {"type": "integer", "minimum": 0, "maximum": 1000000000000},
+            "threshold_tokens": {"anyOf": [{"type": "integer", "minimum": 0, "maximum": 1000000000000}, {"type": "null"}]},
+            "compact_usd": {"anyOf": [{"type": "number", "minimum": 0, "maximum": 1000000}, {"type": "null"}]}
+           },
+           "required": ["model", "before_tokens", "after_tokens", "window_tokens", "threshold_tokens", "compact_usd"],
+           "additionalProperties": false
+          }, {"type": "null"}], "description": "压缩那天的起点；起点不在这一天时为 null"},
+          "models": {"type": "array", "maxItems": 10, "items": {"type": "string", "pattern": "^[0-9A-Za-z.:/_-]+$", "maxLength": 80}},
+          "steps": {"type": "array", "maxItems": 4000, "description": "之后每次主对话请求的 [上下文, models 的下标]",
+           "items": {"type": "array", "minItems": 2, "maxItems": 2, "items": {"type": "integer", "minimum": 0, "maximum": 1000000000000}}}
+         },
+         "required": ["ref", "start", "models", "steps"],
+         "additionalProperties": false
+        }
+       }
+      },
+      "required": ["route", "index", "compact"],
+      "additionalProperties": false
+     }
+    },
+    "required": ["day", "client_version", "by_model", "by_task", "sessions"],
+    "additionalProperties": false
+   },
+   "responses": {"200": {"type": "object", "properties": {"accepted": {"const": true}}, "required": ["accepted"], "additionalProperties": false}},
+   "errors": {"403": ["service_off", "not_in_plan"], "422": ["bad_request", "bad_day"]},
+   "x-inventory": {"service": "metrics", "purpose": "每天一份用量汇总（只有数字和哈希），换回跨客户报表、服务端算的节约金额和调优建议", "default": "off（客户自己打开；第一次上传前给看原样 JSON）", "retention": "13 个月；关掉后 30 天内删，或在设置页立即删（DELETE /metrics）", "sent_to": ["our_service"]}
+  },
+  {
+   "method": "DELETE",
+   "path": "/metrics",
+   "request": null,
+   "responses": {"200": {"type": "object", "properties": {"deleted": {"type": "integer", "minimum": 0}}, "required": ["deleted"], "additionalProperties": false}},
+   "errors": {"403": ["not_in_plan"]},
+   "x-inventory": {"service": "metrics", "purpose": "立即删掉这个客户在服务端的全部用量汇总", "default": "只在客户点删除时发", "retention": "不存内容；删除记录（client_id、时间、条数）13 个月", "sent_to": ["our_service"]}
+  },
+  {
+   "method": "GET",
+   "path": "/report",
+   "request": null,
+   "responses": {"200": {"type": "object", "properties": {
+    "generated": {"type": "string", "maxLength": 32},
+    "window": {"type": "object", "properties": {"first_day": {"type": "string", "pattern": "^\\d{4}-\\d{2}-\\d{2}$", "maxLength": 10}, "last_day": {"type": "string", "pattern": "^\\d{4}-\\d{2}-\\d{2}$", "maxLength": 10}, "days": {"type": "integer", "minimum": 0, "maximum": 1000000}}, "required": ["first_day", "last_day", "days"], "additionalProperties": false},
+    "lines": {"type": "array", "maxItems": 40, "items": {"type": "object", "properties": {
+     "id": {"type": "string", "pattern": "^[a-z][a-z0-9_]{0,39}$", "maxLength": 40, "description": "固定模板的 id"},
+     "values": {"type": "object", "description": "模板的参数：数字，或固定集合里的字符串（日期、型号 id、节约项名）"},
+     "text": {"type": "string", "maxLength": 300}
+    }, "required": ["id", "values", "text"], "additionalProperties": false}}
+   }, "required": ["generated", "window", "lines"], "additionalProperties": false}},
+   "errors": {"403": ["not_in_plan"], "404": ["no_report"]},
+   "x-inventory": {"service": "metrics", "purpose": "取回跨客户报表；不发任何内容", "default": "随时可取（关掉用量上传后也能看已有报表）", "retention": "不存内容；访问日志 30 天", "sent_to": ["our_service"]}
+  },
+  {
+   "method": "GET",
+   "path": "/metrics/savings",
+   "request": null,
+   "responses": {"200": {"$ref": "#/definitions/Savings"}},
+   "errors": {"403": ["not_in_plan"]},
+   "x-inventory": {"service": "metrics", "purpose": "saved amounts computed on the server from the uploaded counters", "default": "only while the metrics upload is on", "retention": "nothing stored; access log 30 days", "sent_to": ["our_service"]}
+  },
+  {
+   "method": "POST",
+   "path": "/diagnostic/estimate",
+   "request": {"$ref": "#/definitions/DiagEstimateRequest"},
+   "responses": {"200": {"$ref": "#/definitions/DiagEstimate"}},
+   "errors": {"400": ["bad_json"], "403": ["not_in_plan", "service_off"], "422": ["bad_request", "too_little_data"], "429": ["rate_limited"]},
+   "x-inventory": {"service": "metrics", "purpose": "one-time usage aggregate for the free diagnostic; the server answers an estimated monthly saving (numbers only)（免费诊断的一次性用量汇总，换回估算的每月节约，只有数字）", "default": "off; sent once, only after the exact body was shown and `--consent` given（给看原样请求体、加 --consent 后才发一次）", "retention": "body not stored; a per-account count per UTC day kept 30 days; access log 30 days（不存请求体；按账户按 UTC 天计数，留 30 天；访问日志 30 天）", "sent_to": ["our_service"]}
+  },
+  {
+   "method": "POST",
+   "path": "/router/decide",
+   "request": {
+    "type": "object",
+    "properties": {
+     "session_ref": {"$ref": "#/definitions/SessionRef"},
+     "type_word": {"type": "string", "pattern": "^\\S*$", "maxLength": 32, "description": "子代理 description 按空白切开的第一个词；其余文字不发"},
+     "subagent_type": {"type": "string", "pattern": "^[A-Za-z0-9 _.:-]+$", "minLength": 1, "maxLength": 64},
+     "requested_model": {"anyOf": [{"type": "string", "pattern": "^[A-Za-z0-9.\\[\\]_:-]+$", "maxLength": 64}, {"type": "null"}]},
+     "requested_effort": {"anyOf": [{"enum": ["low", "medium", "high", "xhigh", "max"]}, {"type": "null"}]},
+     "harness": {"enum": ["claude-code", "opencode", "codex", "other"]},
+     "desc_len": {"type": "integer", "minimum": 0, "maximum": 100000},
+     "dispatch_no": {"type": "integer", "minimum": 0, "maximum": 1000000, "description": "本会话第几次派子代理"},
+     "project_hash": {"anyOf": [{"type": "string", "pattern": "^[0-9a-f]{16}$", "maxLength": 16}, {"type": "null"}], "description": "HMAC(本机盐, 项目)，能分组不能还原项目名"}
+    },
+    "required": ["session_ref", "type_word", "subagent_type", "requested_model", "requested_effort", "harness", "desc_len", "dispatch_no", "project_hash"],
+    "additionalProperties": false
+   },
+   "responses": {"200": {"type": "object", "properties": {
+    "decision": {"enum": ["route", "pass", "deny"]},
+    "model": {"anyOf": [{"enum": ["haiku", "opus", "sonnet"]}, {"type": "null"}]},
+    "effort": {"anyOf": [{"enum": ["low", "medium", "high", "xhigh", "max"]}, {"type": "null"}]},
+    "reason": {"enum": ["r1", "r2", "r3", "r4", "r5", "r6", "r7"]},
+    "hint": {"anyOf": [{"type": "string", "maxLength": 2000}, {"type": "null"}]}
+   }, "required": ["decision", "model", "effort", "reason", "hint"], "additionalProperties": false}},
+   "errors": {"403": ["not_in_plan"]},
+   "x-inventory": {"service": "router", "purpose": "派子代理之前问该用哪个模型和档位（只发任务类型的第一个词和计数，不发描述正文）", "default": "on（Services 开着就默认开）", "retention": "counts per decision per day; request bodies not stored（按天按结论计数，不存请求体）", "sent_to": ["our_service"]}
+  },
+  {
+   "method": "POST",
+   "path": "/checkpoint/timing",
+   "request": {
+    "type": "object",
+    "properties": {
+     "session_ref": {"$ref": "#/definitions/SessionRef"},
+     "context_pct": {"type": "number", "minimum": 0, "maximum": 100},
+     "turns": {"type": "integer", "minimum": 0, "maximum": 1000000},
+     "tool_calls": {"type": "integer", "minimum": 0, "maximum": 1000000},
+     "todos_done": {"type": "integer", "minimum": 0, "maximum": 1000000},
+     "commits": {"type": "integer", "minimum": 0, "maximum": 1000000},
+     "minutes": {"type": "integer", "minimum": 0, "maximum": 1000000}
+    },
+    "required": ["session_ref", "context_pct", "turns", "tool_calls", "todos_done", "commits", "minutes"],
+    "additionalProperties": false
+   },
+   "responses": {"200": {"type": "object", "properties": {
+    "now": {"type": "boolean"},
+    "keep_lines": {"type": "array", "maxItems": 10, "items": {"type": "string", "maxLength": 300}, "x-served": true}
+   }, "required": ["now", "keep_lines"], "additionalProperties": false}},
+   "errors": {"403": ["not_in_plan"]},
+   "x-inventory": {"service": "checkpoint", "purpose": "问现在是不是压缩上下文的好时机（只发计数器）", "default": "on（Services 开着就默认开）", "retention": "counts per decision per day; request bodies not stored（按天按结论计数，不存请求体）", "sent_to": ["our_service"]}
+  },
+  {
+   "method": "POST",
+   "path": "/limits/run",
+   "request": {
+    "type": "object",
+    "properties": {
+     "session_ref": {"$ref": "#/definitions/SessionRef"},
+     "head": {"type": "string", "pattern": "^[a-z0-9._+-]+$", "minLength": 1, "maxLength": 40, "description": "命令的头一个词（公开常用命令表里的，否则 other）；不发参数和路径"},
+     "project_hash": {"anyOf": [{"type": "string", "pattern": "^[0-9a-f]{16}$", "maxLength": 16}, {"type": "null"}]},
+     "prior_durations": {"type": "array", "maxItems": 5, "items": {"type": "number", "minimum": 0, "maximum": 604800}}
+    },
+    "required": ["session_ref", "head", "project_hash", "prior_durations"],
+    "additionalProperties": false
+   },
+   "responses": {"200": {"type": "object", "properties": {
+    "idle_seconds": {"type": "number", "minimum": 1, "maximum": 86400},
+    "max_seconds": {"type": "number", "minimum": 0, "maximum": 604800, "description": "0 = 不设上限"}
+   }, "required": ["idle_seconds", "max_seconds"], "additionalProperties": false}},
+   "errors": {"403": ["not_in_plan"]},
+   "x-inventory": {"service": "limits", "purpose": "有界运行（boundrun）问这条命令多久没输出就停、总时长上限多少", "default": "on（Services 开着就默认开）", "retention": "counts per decision per day; request bodies not stored（按天按结论计数，不存请求体）", "sent_to": ["our_service"]}
+  },
+  {
+   "method": "POST",
+   "path": "/dist/token",
+   "request": {"type": "object", "properties": {"client_version": {"$ref": "#/definitions/Version"}}, "required": ["client_version"], "additionalProperties": false},
+   "responses": {"200": {"type": "object", "properties": {
+    "token": {"type": "string", "pattern": "^ghs_[A-Za-z0-9_]{16,251}$", "maxLength": 255},
+    "expires_at": {"type": "string", "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}Z$", "maxLength": 20}
+   }, "required": ["token", "expires_at"], "additionalProperties": false}},
+   "errors": {"401": ["license_inactive"], "403": ["no_license", "not_in_plan"], "422": ["bad_request"], "429": ["rate_limited"], "502": ["scope_mismatch", "github_error"], "503": ["dist_unavailable", "github_unreachable"]},
+   "x-response-secret": ["token"],
+   "x-inventory": {"service": "updates", "purpose": "插件更新用的只读令牌（1 小时过期）；只发客户端版本", "default": "on", "retention": "令牌的 sha256、账户、设备、时间、过期时间 30 天；不存令牌本身", "sent_to": ["our_service"]}
+  }
+ ]
+}
