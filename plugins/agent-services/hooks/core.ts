@@ -25,20 +25,21 @@ const fallback = (): Answer => ({ action: 'allow', reason: null, set: null, cont
 // Set once the daemon start was tried in this process (never tried twice).
 let ensured = false
 
-const envGet = async ($: EngineInterface, name: string): Promise<string> => {
+// $.env.get takes a literal name (claude plugin validate), so each caller reads its variable and this only trims
+async function envText(read: () => Promise<unknown>): Promise<string> {
   try {
-    return String((await $.env.get(name)) ?? '').trim()
+    return String((await read()) ?? '').trim()
   } catch {
     return ''
   }
 }
 
-const dataDir = async ($: EngineInterface): Promise<string> => {
-  const own = await envGet($, 'AGENT_SVC_DATA_DIR')
+async function dataDir($: EngineInterface): Promise<string> {
+  const own = await envText(() => $.env.get('AGENT_SVC_DATA_DIR'))
   if (own) {
     return own
   }
-  const home = (await envGet($, 'HOME')) || (await envGet($, 'USERPROFILE'))
+  const home = (await envText(() => $.env.get('HOME'))) || (await envText(() => $.env.get('USERPROFILE')))
   return `${home.replace(/[\\/]+$/, '')}/.agent-services`
 }
 
@@ -51,7 +52,7 @@ const isAnswer = (x: unknown): x is Answer => {
 }
 
 // One try: the answer, 'absent' (the core is not there) or 'failed' (it is there but did not answer well).
-const attempt = async ($: EngineInterface, body: string): Promise<Answer | 'absent' | 'failed'> => {
+async function attempt($: EngineInterface, body: string): Promise<Answer | 'absent' | 'failed'> {
   let info: { port?: unknown; token?: unknown }
   try {
     info = JSON.parse(String(await $.fs.read(`${await dataDir($)}/services/connector.json`)))
@@ -96,14 +97,14 @@ const attempt = async ($: EngineInterface, body: string): Promise<Answer | 'abse
 
 const maybeCancel = async (timer: { cancel: () => void } | undefined) => Promise.resolve().then(() => timer?.cancel()).catch(() => undefined)
 
-export const coreEvent = async ($: EngineInterface, event: Record<string, unknown>): Promise<Answer> => {
+export async function coreEvent($: EngineInterface, event: Record<string, unknown>): Promise<Answer> {
   try {
     const body = JSON.stringify(event)
     let got = await attempt($, body)
     if (got === 'absent' && !ensured) {
       ensured = true
       try {
-        const python = (await envGet($, 'AGENT_CORE_PYTHON')) || 'python'
+        const python = (await envText(() => $.env.get('AGENT_CORE_PYTHON'))) || 'python'
         await $.process.run([python, `${$.plugin.root}/hooks/agent_core.py`, 'ensure'], { timeoutMs: ENSURE_TIMEOUT_MS })
       } catch {
         // the retry below finds out
