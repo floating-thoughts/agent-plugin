@@ -6,12 +6,33 @@ token, device key and account data in the OS key store (host/services_keystore.p
 
 CLI: `python -m host.services <serve|ensure|login start|login finish|logout|status|offline on|off|stop|
 served status|pin|unpin|channel> --data-dir D [--keystore os|memory] [--allow-plain-loopback]`. Every command but `serve` runs `ensure` first and
-talks to the per-user daemon over loopback with the local token from connector.json.
+talks to the per-user daemon over loopback with the local token from connector.json. `connect --endpoint URL
+--server-key K [--server-key K2] [--e2e-key E [--e2e-key E2]] [--pin-sha256 HEX ...]` writes client.json (checked first) and stops a running
+daemon so the next command starts one with the new config; it is the only command that needs no client.json.
+
+One daemon serves every shell that uses the same data dir. connector.json and GET /local/status name the daemon's
+shell version and code root; `ensure` replaces a running daemon only as `replace_daemon` says (a release shell
+replaces a dev, unknown or older daemon; a dev shell never replaces a release one).
 
 Never written anywhere (outbox, connector.log, connector.json, settings, notices, errors, CLI output): the token,
 the device private key, the raw Claude accountUuid, the plugin update token (`dist_token()` keeps it in this
 process's memory only; the outbox line has it as "[redacted]"; the daemon hands it out only on the local route
 POST /local/dist/token, to the plugin updater's read-only credential helper).
+
+client.json (<data dir>/services/client.json; `connect` writes it) has one of two forms:
+  direct:  {"endpoint": "https://<IPv4>:<port>", "pin": {"kind": "cert_sha256", "sha256": [1-2 hex]}}
+           (the server's own self-signed certificate is pinned; "server_keys" and "e2e_keys" optional)
+  tunnel:  {"endpoint": "https://<hostname>[:<port>]", "pin": {"kind": "ca"}, "server_keys": [1-2 base64],
+            "e2e_keys": [1-2 base64]}
+           (system CA store plus hostname check; a TLS-terminating edge such as a Cloudflare Tunnel sits in between,
+           so every answer must carry a valid server signature, see `_verify_response`, and every request but
+           GET /health travels in an end-to-end envelope, see host/e2e.py)
+With "server_keys" set, an answer that is unsigned, signed by another key, bound to another request (a replay) or
+stale is never used: the request fails and the gate closes with reason "unverified" (an unsigned 5xx, 403 or 429, the
+edge's own page, counts as an unreachable server and is backed off). Nothing ever falls back to an unverified answer.
+With "e2e_keys" set (it needs "server_keys"), the token, the device signature, the request and the answer are sealed
+to the first listed key, so the edge sees only the outer path category and ciphertext; there is no plaintext fallback.
+The token is bound to the endpoint it was issued by: a client.json naming another endpoint drops it (sign in again).
 """
 from __future__ import annotations
 
@@ -35,6 +56,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+from host import e2e
 from host.jsonschema_lite import check_schema, load_contract
 from host.services_keystore import KeyStore, KeyStoreUnavailable, MemoryKeyStore, default_keystore
 
@@ -54,6 +76,8 @@ DIST_RENEW_BEFORE = 600
 DIST_TOKEN_RX = re.compile(r"^ghs_[A-Za-z0-9_]{16,251}$")
 MAX_ATTEMPTS = 3
 BLOCK_SECONDS = {"locked_out": 900, "account_locked": 3600}
+THROTTLE_MAX_SECONDS = 300      # the longest Retry-After the connector honors (429 rate_limited, 503 busy)
+THROTTLE_NOTICE_AFTER = 120     # a notice only when throttling has lasted this long without one success
 NOTICE_EVERY = 3600
 OUTBOX_KEEP_DAYS = 90
 BODY_LIMIT = API.get("limits", {}).get("body_bytes", 65536)
@@ -70,7 +94,7 @@ SERVED_ROLES = tuple(API["definitions"]["ServedRole"]["enum"])
 SERVED_CHANNELS = ("stable", "beta")
 SERVED_ROUTE = "/served/fetch"
 _VERSION = re.compile(API["definitions"]["Version"]["pattern"].rstrip("$") + r"\Z")
-KS_NAMES = ("token", "token_next", "device_key", "device_id", "account_id", "plan", "expires_at")
+KS_NAMES = ("token", "token_next", "device_key", "device_id", "account_id", "plan", "expires_at", "endpoint")
 
 PLAN_PATH = "/auth/plan"   # which plan and routes this account has (an auth route, not in service_api.json)
 _PLAN_VALUES = ("diagnostic", "guard", "full")
@@ -102,6 +126,10 @@ GATE_NOTICES = {
     "offline": "agent-services is paused: offline mode is on.",
     "unavailable": "agent-services is paused: the server could not be reached; it tries again at the next session.",
 }
+# Gate reason "unverified" (an answer failed the server signature check); like "dependency", outside GATE_NOTICES.
+UNVERIFIED_NOTICE = ("agent-services is paused: an answer claiming to come from the server was not signed by the "
+                     "server's key (a proxy or a fake server may be in the way); nothing it said was used. It tries "
+                     "again at the next session; if this keeps happening, check server_keys in client.json.")
 _OPEN_STATE = {"open": True, "reason": None, "min_shell": None}
 
 # The one package outside the standard library the shell needs at run time (Ed25519 device keys: sign-in and signed requests).
@@ -133,6 +161,8 @@ def gate_notice(state) -> str | None:
         return None
     if state.get("reason") == "dependency":
         return DEPENDENCY_NOTICE
+    if state.get("reason") == "unverified":
+        return UNVERIFIED_NOTICE
     text = GATE_NOTICES.get(state.get("reason"))
     if text is None:
         return None
@@ -148,6 +178,21 @@ def plan_notice(plan) -> str | None:
 
 
 _IP_ENDPOINT = re.compile(r"^https://((\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})):(\d{1,5})$")
+# A DNS name whose last label starts with a letter (so never an IPv4 address), optional port, nothing after it.
+_HOST_ENDPOINT = re.compile(r"^https://((?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)*[a-z](?:[a-z0-9-]{0,61}[a-z0-9])?)"
+                            r"(?::(\d{1,5}))?\Z")
+_SERVER_KEY = re.compile(r"^[A-Za-z0-9+/]{43}=\Z")   # base64 of a raw 32-byte Ed25519 public key
+SIG_HEADER = "x-agent-server-signature"            # lowercase, as the response headers are kept
+CHALLENGE_HEADER = "X-Agent-Challenge"
+SIG_DOMAIN = "agent-svc-response/1"
+SIG_SKEW_SECONDS = 300                              # a signed answer older or newer than this is stale
+_SIG_FIELDS = re.compile(r"^v=1; kid=([0-9a-f]{16}); ts=(\d{1,12}); sig=([A-Za-z0-9+/]{86}==)\Z")
+UNVERIFIED_ERRORS = ("unsigned_response", "bad_signature", "stale_response")
+E2E_RESPONSE_ERRORS = ("undecryptable_response",)  # signed, but the sealed answer does not open: never used
+EDGE_STATUS = (403, 429)          # an unsigned 403 / 429 is the edge's own refusal (WAF, rate rule): back off
+UNSIGNED_RETRY_MAX = 60           # the longest unsigned Retry-After honored while server_keys is set
+EDGE_COOL_SECONDS = 30            # backoff after an edge refusal without a usable Retry-After
+MAX_RESPONSE_BYTES = 4 * 1048576  # a longer answer is refused (response_too_large), never buffered
 _LOOPBACK_ENDPOINT = re.compile(r"^http://(127\.0\.0\.1):(\d{1,5})$")
 _HEX64 = re.compile(r"^[0-9a-f]{64}$")
 _CODE = re.compile(r"^[a-z][a-z0-9_]{0,63}$")
@@ -158,6 +203,12 @@ NOTICE_TEXT = {
     "claude_account_mismatch": "The Claude account changed since login; sign in again to re-pair this device.",
     "account_locked": "Your agent-services account is locked; contact support.",
     "locked_out": "Too many failed requests; agent-services paused for 15 minutes.",
+    "rate_limited": "agent-services is busy and is slowing requests down; the plugin keeps working on its defaults "
+                    "and retries on its own.",
+    "server_unverified": "agent-services stopped: an answer was not signed by the server's key, so it was not used "
+                         "(a proxy or a fake server may be in the way). It tries again at the next session.",
+    "endpoint_changed": "The agent-services address in client.json changed, so the old sign-in was dropped; sign in "
+                        "again with /agent-services.",
 }
 
 
@@ -248,6 +299,126 @@ class _PinnedHTTPS(http.client.HTTPSConnection):
             self.sock.close()
             self.sock = None
             raise _PinError("certificate does not match the pin")
+
+
+class _CAHTTPS(http.client.HTTPSConnection):
+    """HTTPS verified the normal way: the system CA store (or `ca_file` alone, tests) and the hostname."""
+
+    def __init__(self, host, port, ca_file, timeout):
+        ctx = ssl.create_default_context(cafile=ca_file)
+        ctx.minimum_version = ssl.TLSVersion.TLSv1_2
+        super().__init__(host, port, timeout=timeout, context=ctx)
+
+
+def _key_id(raw: bytes) -> str:
+    return hashlib.sha256(raw).hexdigest()[:16]
+
+
+def _server_keys(config: dict, required: bool) -> dict:
+    """{kid: raw 32-byte public key} from config["server_keys"] (one or two base64 Ed25519 keys; two while rotating)."""
+    keys = config.get("server_keys")
+    if keys is None and not required:
+        return {}
+    if not isinstance(keys, list) or not 1 <= len(keys) <= 2 or len(set(map(str, keys))) != len(keys) \
+            or not all(isinstance(k, str) and _SERVER_KEY.match(k) for k in keys):
+        raise ValueError("config server_keys must be one or two base64 Ed25519 public keys")
+    raws = [base64.b64decode(k) for k in keys]
+    if any(len(r) != 32 for r in raws):
+        raise ValueError("config server_keys must be one or two base64 Ed25519 public keys")
+    return {_key_id(r): r for r in raws}
+
+
+def _with_e2e(config: dict, out: dict, required: bool) -> dict:
+    """Adds "e2e_keys" ({kid: raw 32-byte X25519 public key}, in client.json order) and "e2e_send" (the raw key
+    requests are sealed to: the first listed; None = no envelope). Required for a hostname endpoint (fail closed);
+    an envelope always needs server_keys, so every sealed answer is also signature-checked."""
+    keys = config.get("e2e_keys")
+    if keys is None:
+        if required:
+            raise ValueError("a hostname endpoint needs e2e_keys (the server's end-to-end encryption keys)")
+        out["e2e_keys"], out["e2e_send"] = {}, None
+        return out
+    if not isinstance(keys, list) or not 1 <= len(keys) <= 2 or len(set(map(str, keys))) != len(keys) \
+            or not all(isinstance(k, str) and e2e.KEY_RX.match(k) for k in keys):
+        raise ValueError("config e2e_keys must be one or two base64 X25519 public keys")
+    if not out["server_keys"]:
+        raise ValueError("config e2e_keys needs server_keys (sealed answers must also be signed)")
+    raws = [base64.b64decode(k) for k in keys]
+    if any(len(r) != 32 for r in raws):
+        raise ValueError("config e2e_keys must be one or two base64 X25519 public keys")
+    out["e2e_keys"] = {e2e.key_id(r): r for r in raws}
+    out["e2e_send"] = raws[0]
+    return out
+
+
+def parse_client_config(config, allow_plain: bool = False) -> dict:
+    """client.json -> {"scheme", "host", "port", "pins", "ca", "server_keys", "e2e_keys", "e2e_send"}; ValueError
+    when it is not one of the
+    accepted forms (module docstring). Unknown fields are refused, so a typo never silently drops a setting."""
+    if not isinstance(config, dict):
+        raise ValueError("config must be an object")
+    extra = set(config) - {"endpoint", "pin", "server_keys", "e2e_keys", "client_id"}
+    if extra:
+        raise ValueError(f"config has unknown fields: {', '.join(sorted(extra))}")
+    ep = config.get("endpoint")
+    if not isinstance(ep, str):
+        raise ValueError("config endpoint missing")
+    pin = config.get("pin")
+    m = _IP_ENDPOINT.match(ep)
+    if m:
+        if any(int(m.group(i)) > 255 for i in range(2, 6)) or not 0 < int(m.group(6)) < 65536:
+            raise ValueError("config endpoint is not a valid IPv4 endpoint")
+        if not isinstance(pin, dict):
+            raise ValueError("config pin missing")
+        if pin.get("kind") == "ca":
+            raise ValueError("pin kind ca needs a hostname endpoint (https://<hostname>[:<port>])")
+        shas = pin.get("sha256")
+        if pin.get("kind") != "cert_sha256" or not isinstance(shas, list) or not 1 <= len(shas) <= 2 \
+                or not all(isinstance(x, str) and _HEX64.match(x) for x in shas):
+            raise ValueError("config pin must be cert_sha256 with one or two sha256 fingerprints")
+        return _with_e2e(config, {"scheme": "https", "host": m.group(1), "port": int(m.group(6)), "pins": list(shas),
+                                  "ca": False, "server_keys": _server_keys(config, False)}, False)
+    m = _HOST_ENDPOINT.match(ep)
+    if m and len(m.group(1)) <= 253:
+        port = int(m.group(2)) if m.group(2) else 443
+        if not 0 < port < 65536:
+            raise ValueError("config endpoint port is out of range")
+        if pin != {"kind": "ca"}:
+            raise ValueError('a hostname endpoint needs pin {"kind": "ca"} (system CA store and hostname check)')
+        return _with_e2e(config, {"scheme": "https", "host": m.group(1), "port": port, "pins": [], "ca": True,
+                                  "server_keys": _server_keys(config, True)}, True)
+    m = _LOOPBACK_ENDPOINT.match(ep)
+    if m and allow_plain:
+        if isinstance(pin, dict) and pin.get("kind") == "ca":
+            raise ValueError("pin kind ca needs a hostname endpoint (https://<hostname>[:<port>])")
+        return _with_e2e(config, {"scheme": "http", "host": m.group(1), "port": int(m.group(2)), "pins": [],
+                                  "ca": False, "server_keys": _server_keys(config, False)}, False)
+    raise ValueError("config endpoint must be https://<IPv4>:<port> or https://<hostname>[:<port>]")
+
+
+def _verify_response(keys: dict, method: str, wire_path: str, challenge: str, status: int, headers: dict,
+                     body: bytes, now: float) -> str | None:
+    """None when the answer is signed by one of `keys` for exactly this request (method, path, challenge), with this
+    status and body, and a timestamp within SIG_SKEW_SECONDS; else the error code (UNVERIFIED_ERRORS).
+    The server builds the same message (wire format: service_api.json x-transport response_signature)."""
+    from cryptography.exceptions import InvalidSignature
+    from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PublicKey
+    hv = headers.get(SIG_HEADER)
+    if not hv:
+        return "unsigned_response"
+    m = _SIG_FIELDS.match(hv.strip())
+    if not m or m.group(1) not in keys:
+        return "bad_signature"
+    ts = int(m.group(2))
+    msg = "\n".join((SIG_DOMAIN, str(int(status)), method.upper(), wire_path.split("?", 1)[0], challenge, str(ts),
+                     hashlib.sha256(body).hexdigest())).encode("utf-8")
+    try:
+        Ed25519PublicKey.from_public_bytes(keys[m.group(1)]).verify(base64.b64decode(m.group(3)), msg)
+    except (InvalidSignature, ValueError):
+        return "bad_signature"
+    if abs(now - ts) > SIG_SKEW_SECONDS:
+        return "stale_response"
+    return None
 
 
 # ------------------------------------------------------------------ routes from the contract
@@ -415,7 +586,7 @@ class _Deadline:
 class Connector:
     def __init__(self, data_dir, keystore: KeyStore, config: dict, *, clock=None, sleep=None, claude_json=None,
                  timeouts=None, allow_plain_loopback=False, harness="claude-code", client_version=None,
-                 gate=False, shell_version=None):
+                 gate=False, shell_version=None, ca_file=None):
         if not isinstance(keystore, KeyStore):
             raise TypeError("keystore must be a KeyStore")
         self.data_dir = Path(data_dir)
@@ -431,6 +602,7 @@ class Connector:
                 self.timeouts[k] = float(v)
         self.harness = harness
         self.client_version = client_version or "0.0.0"
+        self._ca_file = ca_file   # tests only: trust this CA file instead of the system store (hostname endpoints)
         self._parse_config(config, allow_plain_loopback)
         self._dir = services_dir(self.data_dir)
         self._dir.mkdir(parents=True, exist_ok=True)
@@ -452,38 +624,44 @@ class Connector:
         self.shell_version = shell_version or SHELL_VERSION
         self._gs = {"open": False, "reason": "unknown", "min_shell": None}   # memory only
         self._hello_lock = threading.Lock()
+        self._cool_until: float | None = None        # server said 429 rate_limited / 503 busy: no sends until then
+        self._throttled_since: float | None = None   # first throttled answer since the last success
+        self._bind_endpoint()
         self._prune_outbox()
+
+    def _bind_endpoint(self) -> None:
+        """The token belongs to the endpoint that issued it. A stored token from another endpoint (client.json was
+        changed, by `connect` or by hand) is dropped before anything is sent, so it never reaches a different server.
+        A token stored before endpoints were recorded is adopted for the current endpoint."""
+        if self._endpoint_id is None:
+            return
+        try:
+            tok, bound = self.ks.get("token"), self.ks.get("endpoint")
+            if not tok:
+                return
+            if bound is None:
+                self.ks.set("endpoint", self._endpoint_id)
+                return
+        except KeyStoreUnavailable:
+            return
+        if bound != self._endpoint_id:
+            self._drop_token()
+            for n in ("plan", "expires_at"):
+                try:
+                    self.ks.delete(n)
+                except KeyStoreUnavailable:
+                    pass
+            self._notice("endpoint_changed")
 
     # ---------------- config and settings
     def _parse_config(self, config, allow_plain):
-        if not isinstance(config, dict):
-            raise ValueError("config must be an object")
-        ep = config.get("endpoint")
-        if not isinstance(ep, str):
-            raise ValueError("config endpoint missing")
-        m = _IP_ENDPOINT.match(ep)
-        if m:
-            if any(int(m.group(i)) > 255 for i in range(2, 6)) or not 0 < int(m.group(6)) < 65536:
-                raise ValueError("config endpoint is not a valid IPv4 endpoint")
-            pin = config.get("pin")
-            if not isinstance(pin, dict):
-                raise ValueError("config pin missing")
-            if pin.get("kind") == "ca":
-                raise ValueError("pin kind ca not supported yet")
-            shas = pin.get("sha256")
-            if pin.get("kind") != "cert_sha256" or not isinstance(shas, list) or not 1 <= len(shas) <= 2 \
-                    or not all(isinstance(x, str) and _HEX64.match(x) for x in shas):
-                raise ValueError("config pin must be cert_sha256 with one or two sha256 fingerprints")
-            self._scheme, self._host, self._port, self._pins = "https", m.group(1), int(m.group(6)), list(shas)
-            return
-        m = _LOOPBACK_ENDPOINT.match(ep)
-        if m and allow_plain:
-            pin = config.get("pin")
-            if isinstance(pin, dict) and pin.get("kind") == "ca":
-                raise ValueError("pin kind ca not supported yet")
-            self._scheme, self._host, self._port, self._pins = "http", m.group(1), int(m.group(2)), []
-            return
-        raise ValueError("config endpoint must be https://<IPv4>:<port>")
+        c = parse_client_config(config, allow_plain)
+        self._scheme, self._host, self._port, self._pins = c["scheme"], c["host"], c["port"], c["pins"]
+        self._ca = c["ca"]
+        self._server_keys = c["server_keys"]   # {kid: raw public key}; empty = answers are not signature-checked
+        self._e2e_send = c["e2e_send"]         # raw X25519 key requests are sealed to; None = no envelope
+        # the token is bound to this; the plain loopback form (tests only) is not bound
+        self._endpoint_id = f"{c['scheme']}://{c['host']}:{c['port']}" if c["scheme"] == "https" else None
 
     def _settings_path(self) -> Path:
         return self._dir / "settings.json"
@@ -569,6 +747,8 @@ class Connector:
         if blk:
             self._set_gate("locked" if blk in ("account_locked", "locked_out") else "login")
             return Result(False, error=blk)
+        if self._cooling():
+            return Result(False, error="rate_limited")   # the gate stays as it is; nothing is sent
         d = _Deadline(self.timeouts["auth"], self._sleep)
         err = self._ensure_fresh(d)
         if err:
@@ -600,6 +780,10 @@ class Connector:
             self._set_gate("login")
         elif res.status == 423 or (res.status == 429 and res.error == "locked_out"):
             self._set_gate("locked")
+        elif _throttled(res.status, res.error):
+            pass   # rate limited or busy: the server is up; the gate keeps its state and the connector backs off
+        elif res.error in UNVERIFIED_ERRORS or res.error in E2E_RESPONSE_ERRORS:
+            self._set_gate("unverified")
         else:
             self._set_gate("unavailable")
         return res
@@ -711,6 +895,12 @@ class Connector:
                                   "text": NOTICE_TEXT.get(code, f"agent-services stopped: {code}")})
         self._log({"event": "notice", "code": code})
 
+    def _distrust(self) -> None:
+        """An answer failed verification: close the gate (fail closed) until the next handshake."""
+        self._notice("server_unverified")
+        if self.gate:
+            self._set_gate("unverified")
+
     def notices(self) -> list[dict]:
         with self._state_lock:
             return [dict(n) for n in self._notices]
@@ -728,6 +918,33 @@ class Connector:
     def _set_block(self, code: str, until: float | None) -> None:
         with self._state_lock:
             self._block = (code, until)
+
+    # ---------------- server throttling (429 rate_limited, 503 busy): back off, never block or close the gate
+    def _cooling(self) -> bool:
+        with self._state_lock:
+            return self._cool_until is not None and self.clock.now() < self._cool_until
+
+    def _throttle(self, retry_after) -> None:
+        try:
+            secs = float(retry_after) if retry_after is not None else 1.0
+        except ValueError:
+            secs = 1.0
+        if secs != secs:
+            secs = 1.0
+        secs = min(max(secs, 1.0), THROTTLE_MAX_SECONDS)
+        now = self.clock.now()
+        with self._state_lock:
+            self._cool_until = max(self._cool_until or 0.0, now + secs)
+            if self._throttled_since is None:
+                self._throttled_since = now
+            lasting = now - self._throttled_since >= THROTTLE_NOTICE_AFTER
+        if lasting:
+            self._notice("rate_limited")
+
+    def _unthrottle(self) -> None:
+        with self._state_lock:
+            self._cool_until = None
+            self._throttled_since = None
 
     # ---------------- key store helpers
     def _ks_get(self, name):
@@ -820,17 +1037,60 @@ class Connector:
 
     # ---------------- transport
     def _send_once(self, method: str, wire_path: str, body: bytes | None, headers: dict, timeout: float):
-        """One request. Returns (status, headers, bytes) or raises _NetError(code)."""
+        """One request. Returns (status, headers, bytes) or raises _NetError(code).
+
+        `timeout` bounds the whole exchange, not each read: a timer shuts the socket when it runs out, so a peer that
+        trickles bytes cannot hold the call open. An answer longer than MAX_RESPONSE_BYTES is refused unread."""
         timeout = max(timeout, 0.001)
-        if self._scheme == "https":
+        if self._scheme == "https" and self._ca:
+            conn = _CAHTTPS(self._host, self._port, self._ca_file, timeout)
+        elif self._scheme == "https":
             conn = _PinnedHTTPS(self._host, self._port, self._pins, timeout)
         else:
             conn = http.client.HTTPConnection(self._host, self._port, timeout=timeout)
+        expired = threading.Event()
+
+        def _cut():
+            expired.set()
+            sock = conn.sock
+            if sock is not None:
+                try:
+                    sock.shutdown(socket.SHUT_RDWR)
+                except OSError:
+                    pass
+
+        timer = threading.Timer(timeout, _cut)
+        timer.daemon = True
+        timer.start()
         try:
             conn.request(method, wire_path, body=body, headers=headers)
             resp = conn.getresponse()
-            data = resp.read()
+            n = resp.getheader("Content-Length")
+            if n is not None and (not n.strip().isdigit() or int(n) > MAX_RESPONSE_BYTES):
+                raise _NetError("response_too_large")
+            data = resp.read(MAX_RESPONSE_BYTES + 1)
+            if len(data) > MAX_RESPONSE_BYTES:
+                raise _NetError("response_too_large")
+            if expired.is_set():
+                raise _NetError("timeout")
             return resp.status, {k.lower(): v for k, v in resp.getheaders()}, data
+        except _NetError:
+            raise
+        except Exception as e:  # noqa: BLE001 — mapped below; a cut socket surfaces as any of them
+            if expired.is_set():
+                raise _NetError("timeout") from None
+            self._net_error(e)
+        finally:
+            timer.cancel()
+            try:
+                conn.close()
+            except Exception:
+                pass
+
+    @staticmethod
+    def _net_error(e: BaseException):
+        try:
+            raise e
         except _PinError:
             raise _NetError("pin_mismatch") from None
         except (socket.timeout, TimeoutError):
@@ -839,15 +1099,12 @@ class Connector:
             raise _NetError("connection_refused") from None
         except (ConnectionResetError, ConnectionAbortedError, http.client.RemoteDisconnected, BrokenPipeError):
             raise _NetError("connection_reset") from None
+        except ssl.SSLCertVerificationError:
+            raise _NetError("cert_invalid") from None
         except ssl.SSLError:
             raise _NetError("tls_error") from None
         except (OSError, http.client.HTTPException):
             raise _NetError("connection_failed") from None
-        finally:
-            try:
-                conn.close()
-            except Exception:
-                pass
 
     def _signed_headers(self, method: str, wire_path: str, body: bytes, token: str) -> dict:
         from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
@@ -884,10 +1141,31 @@ class Connector:
                     last = Result(False, body=dependency_error(), error="missing_dependency", attempts=attempts)
                     break
                 headers.update(self._signed_headers(method, wire_path, body or b"", token))
+            challenge = None
+            if self._server_keys:
+                if missing_dependency():   # an answer that cannot be verified is never used
+                    last = Result(False, body=dependency_error(), error="missing_dependency", attempts=attempts)
+                    break
+                challenge = secrets.token_hex(16)
+                headers[CHALLENGE_HEADER] = challenge
+            # The end-to-end envelope (host/e2e.py): with e2e_keys set, everything but GET /health is sealed; the
+            # outer request carries only the path category, the key id, the ephemeral key, a timestamp and the
+            # challenge. There is no plaintext fallback: a request that cannot be sealed is not sent.
+            ctx = None
+            out_method, out_path, out_body, out_headers = method, wire_path, body, headers
+            if self._e2e_send is not None and wire_path.split("?", 1)[0] != "/health":
+                try:
+                    out_path, sealed_hdrs, out_body, ctx = e2e.seal_request(
+                        self._e2e_send, method, wire_path, headers, body, int(self.clock.now()), challenge)
+                except e2e.EnvelopeError:
+                    last = Result(False, error="e2e_failed", attempts=attempts)
+                    break
+                out_method = "POST"
+                out_headers = {"User-Agent": headers["User-Agent"], "Accept": e2e.CONTENT_TYPE, **sealed_hdrs}
             attempts += 1
             body_text = body.decode("utf-8") if body is not None else None
             try:
-                status, rh, data = self._send_once(method, wire_path, body, headers, remaining)
+                status, rh, data = self._send_once(out_method, out_path, out_body, out_headers, remaining)
             except _NetError as e:
                 self._outbox(service=service, method=method, route=wire_path.split("?", 1)[0],
                              body_text=body_text, status=None, response_text=None, error=e.code)
@@ -896,6 +1174,53 @@ class Connector:
                     if self._backoff(attempts, None, deadline):
                         continue
                 break
+            if challenge is not None:
+                bad = _verify_response(self._server_keys, out_method, out_path, challenge, status, rh, data,
+                                       self.clock.now())
+                if bad:
+                    # Never used, never logged: only the error code reaches the outbox (status unknown).
+                    self._outbox(service=service, method=method, route=wire_path.split("?", 1)[0],
+                                 body_text=body_text, status=None, response_text=None, error=bad)
+                    if bad == "unsigned_response" and status >= 500:
+                        # the edge's own error page (origin down): an unreachable server, retried like one
+                        last = Result(False, error="server_unreachable", attempts=attempts)
+                        if retry and status in RETRY_STATUS and self._backoff(attempts, None, deadline):
+                            continue
+                        break
+                    if bad == "unsigned_response" and status in EDGE_STATUS:
+                        # the edge's own refusal (a WAF or rate rule): not a forgery, so the gate is not closed as
+                        # unverified; the connector backs off (Retry-After capped, as it is unsigned) instead
+                        last = Result(False, error="server_unreachable", attempts=attempts)
+                        self._throttle(self._unsigned_retry(rh.get("retry-after"), EDGE_COOL_SECONDS))
+                        break
+                    last = Result(False, error=bad, attempts=attempts)
+                    self._distrust()
+                    break
+                # the signature covers status and body, not headers: an outer Retry-After is capped (a sealed answer's
+                # own headers replace these below and are authenticated)
+                rh = dict(rh)
+                if "retry-after" in rh:
+                    rh["retry-after"] = str(self._unsigned_retry(rh["retry-after"], 1.0))
+            if ctx is not None:
+                if status == 200 and (rh.get("content-type") or "").split(";")[0].strip() == e2e.CONTENT_TYPE:
+                    try:
+                        status, ih, data = e2e.open_response(ctx, data)
+                    except e2e.EnvelopeError:
+                        self._outbox(service=service, method=method, route=wire_path.split("?", 1)[0],
+                                     body_text=body_text, status=None, response_text=None,
+                                     error="undecryptable_response")
+                        last = Result(False, error="undecryptable_response", attempts=attempts)
+                        self._distrust()
+                        break
+                    rh = {k.lower(): v for k, v in ih.items()}   # sealed: these headers are authenticated
+                elif 200 <= status < 300:
+                    # a signed success that is not sealed is never used for a sealed request
+                    self._outbox(service=service, method=method, route=wire_path.split("?", 1)[0],
+                                 body_text=body_text, status=None, response_text=None,
+                                 error="undecryptable_response")
+                    last = Result(False, error="undecryptable_response", attempts=attempts)
+                    self._distrust()
+                    break
             text = data.decode("utf-8", errors="replace")
             parsed = None
             if data:
@@ -912,6 +1237,7 @@ class Connector:
                          body_text=body_text, status=status, response_text=logged, error=None)
             if 200 <= status < 300:
                 last = Result(True, status, parsed, None, None, attempts)
+                self._unthrottle()
                 break
             code = _error_code(parsed, status)
             last = Result(False, status, parsed, code, None, attempts)
@@ -942,13 +1268,27 @@ class Connector:
             if signed and status == 428 and code == "hello_required":
                 self._set_gate("unknown")
                 break
-            if retry and (status in RETRY_STATUS or (status == 429 and code == "rate_limited")):
+            throttled = _throttled(status, code)
+            if retry and (status in RETRY_STATUS or throttled):
                 if self._backoff(attempts, rh.get("retry-after"), deadline):
                     continue
+            if throttled:
+                self._throttle(rh.get("retry-after"))
             break
         self._log({"route": wire_path.split("?", 1)[0], "status": last.status, "error": last.error,
                    "attempts": attempts, "latency_ms": int((time.monotonic() - t0) * 1000)})
         return last
+
+    @staticmethod
+    def _unsigned_retry(value, default: float) -> float:
+        """A Retry-After nobody signed: honored, but never longer than UNSIGNED_RETRY_MAX seconds."""
+        try:
+            secs = float(value) if value is not None else default
+        except ValueError:
+            secs = default
+        if secs != secs:
+            secs = default
+        return min(max(secs, 1.0), UNSIGNED_RETRY_MAX)
 
     def _backoff(self, attempts: int, retry_after, deadline: _Deadline) -> bool:
         if attempts >= MAX_ATTEMPTS:
@@ -979,8 +1319,10 @@ class Connector:
         if not isinstance(email, str) or not 3 <= len(email) <= 254 or "@" not in email:
             return Result(False, error="invalid_body")
         blk = self._blocked()
-        if blk in BLOCK_SECONDS:
+        if blk == "account_locked":   # a locked_out block (failed signed requests) never stops a fresh sign-in
             return Result(False, error=blk)
+        if self._cooling():
+            return Result(False, error="rate_limited")
         d = _Deadline(self.timeouts["auth"], self._sleep)
         return self._exchange("POST", PREFIX + "/auth/login/start", _dumps({"email": email}), "auth", d,
                               signed=False)
@@ -1017,8 +1359,10 @@ class Connector:
                 or not isinstance(code, str) or not 1 <= len(code) <= 32:
             return Result(False, error="invalid_body")
         blk = self._blocked()
-        if blk in BLOCK_SECONDS:
+        if blk == "account_locked":   # a locked_out block (failed signed requests) never stops a fresh sign-in
             return Result(False, error=blk)
+        if self._cooling():
+            return Result(False, error="rate_limited")
         dev, pub = self._device()
         token = secrets.token_urlsafe(32)
         body = {"email": email, "code": code, "token_hash": hashlib.sha256(token.encode()).hexdigest(),
@@ -1032,6 +1376,8 @@ class Connector:
         if res.ok and isinstance(res.body, dict):
             b = res.body
             self.ks.set("token", token)
+            if self._endpoint_id is not None:
+                self.ks.set("endpoint", self._endpoint_id)
             self.ks.delete("token_next")
             for n in ("account_id", "plan", "expires_at"):
                 if b.get(n) is not None:
@@ -1234,6 +1580,8 @@ class Connector:
         key = f"{route['method']} {route['path']}"
         if signed and self._plan_refused(key):   # out of plan -> nothing sent, no outbox line
             return fail("not_in_plan")
+        if self._cooling():
+            return fail("rate_limited")   # honoring the server's Retry-After: nothing sent, the caller's fallback runs
         deadline = _Deadline(self.timeouts[kind], self._sleep)
         if signed:
             blk = self._blocked()
@@ -1289,6 +1637,11 @@ class Connector:
                 return Result(False, res.status, None, "bad_response", fb, res.attempts)
             self._dist_cache = {"token": tok, "expires_at": exp_text, "exp": exp}
             return Result(True, res.status, {"token": tok, "expires_at": exp_text}, None, None, res.attempts)
+
+
+def _throttled(status, code) -> bool:
+    """The server is up but asks for less traffic: back off; this is never a block and never closes the gate."""
+    return (status == 429 and code == "rate_limited") or (status == 503 and code == "busy")
 
 
 def _ungated(route: dict) -> bool:
@@ -1440,6 +1793,7 @@ def serve(data_dir, keystore_kind="os", allow_plain_loopback=False) -> int:
             print(json.dumps({"error": "bad_client_config"}))
             return 1
         local_token = secrets.token_hex(32)
+        daemon_id = {"pid": os.getpid(), "shell": SHELL_VERSION, "root": str(ROOT)}
         from host.conclusions import Conclusions
         concl = Conclusions(conn, harness=conn.harness)
         from host import metrics as metrics_mod
@@ -1511,7 +1865,8 @@ def serve(data_dir, keystore_kind="os", allow_plain_loopback=False) -> int:
                     elif not dep and reason == "dependency":
                         conn._set_gate("unknown")   # installed since: the next gate check runs a handshake
                     st = {**conn.status(), "notices": conn.notices(),
-                          "services": {k: conn.service_on(k) for k in SERVICE_DEFAULTS}, "gate": conn.gate_state()}
+                          "services": {k: conn.service_on(k) for k in SERVICE_DEFAULTS}, "gate": conn.gate_state(),
+                          "daemon": daemon_id}
                     if dep:
                         st.update(dep, notice=DEPENDENCY_NOTICE)
                     return self._send(200, st)
@@ -1622,8 +1977,8 @@ def serve(data_dir, keystore_kind="os", allow_plain_loopback=False) -> int:
         srv.daemon_threads = True
         cj = _connector_json(data_dir)
         tmp = cj.with_suffix(".tmp")
-        tmp.write_text(json.dumps({"pid": os.getpid(), "port": srv.server_address[1], "token": local_token}),
-                       encoding="utf-8")
+        tmp.write_text(json.dumps({"pid": os.getpid(), "port": srv.server_address[1], "token": local_token,
+                                   "shell": SHELL_VERSION, "root": str(ROOT)}), encoding="utf-8")
         restrict_file(tmp)
         os.replace(tmp, cj)
         restrict_file(cj)
@@ -1701,22 +2056,131 @@ def local_status(data_dir, timeout=5.0) -> dict | None:
     return d if st == 200 and isinstance(d, dict) else None
 
 
-def _alive(data_dir):
+def _probe(data_dir):
+    """(connector.json, its /local/status answer) when the daemon it names answers with its token, else None."""
     try:
         info = json.loads(_connector_json(data_dir).read_text(encoding="utf-8"))
-        st, _ = _local(data_dir, "GET", "/local/status", timeout=5, info=info)
-        if st == 200:
-            return info
-    except (OSError, ValueError, KeyError, http.client.HTTPException):
+        st, body = _local(data_dir, "GET", "/local/status", timeout=5, info=info)
+        if st == 200 and isinstance(info, dict):
+            return info, body if isinstance(body, dict) else {}
+    except (OSError, ValueError, KeyError, TypeError, http.client.HTTPException):
         pass
     return None
 
 
-def ensure(data_dir, keystore_kind="os", allow_plain_loopback=False, wait=20.0) -> dict:
-    info = _alive(data_dir)
-    if info:
-        return {"pid": info["pid"], "port": info["port"]}
+def _alive(data_dir):
+    p = _probe(data_dir)
+    return p[0] if p else None
+
+
+def _release(v):
+    """"X.Y.Z" -> (X, Y, Z); "dev", a missing field (a daemon from before the field) or anything else -> None."""
+    return tuple(int(x) for x in v.split(".")) if isinstance(v, str) and _RELEASE.match(v) else None
+
+
+def _same_path(a, b) -> bool:
+    return os.path.normcase(os.path.normpath(str(a))) == os.path.normcase(os.path.normpath(str(b)))
+
+
+def replace_daemon(info: dict, shell: str | None = None, root=None) -> bool:
+    """Whether a caller of shell version `shell` with core root `root` (default: this code) stops the running daemon
+    that `info` (its connector.json) describes and starts its own. In order:
+    - it runs the caller's own shell version from the caller's own root: no (reuse);
+    - its root no longer holds host/services.py (the install it ran from is gone): yes;
+    - it runs from the caller's own root but under another shell version (updated in place): yes;
+    - the caller is a release: yes when the daemon is dev, does not say its version (from before this rule) or is
+      a lower release; no when it is a release at least as new (ties keep the running daemon, so two installs of one
+      version never take turns);
+    - the caller is dev: no (it talks to whatever runs; stop the daemon to test daemon code).
+    The newest release wins and nothing alternates: a replacement is never undone by the caller it displaced."""
+    shell = SHELL_VERSION if shell is None else shell
+    root = ROOT if root is None else root
+    d_shell, d_root = info.get("shell"), info.get("root")
+    d_root = d_root if isinstance(d_root, str) and d_root else None
+    if d_root is not None and _same_path(d_root, root):
+        return d_shell != shell
+    if d_root is not None and not (Path(d_root) / "host" / "services.py").is_file():
+        return True
+    mine = _release(shell)
+    if mine is None:
+        return False
+    theirs = _release(d_shell)
+    return theirs is None or theirs < mine
+
+
+def _until(end: float, test) -> bool:
+    while True:
+        if test():
+            return True
+        if time.monotonic() >= end:
+            return False
+        time.sleep(0.05)
+
+
+def _stop_daemon(data_dir, info: dict, status: dict, end: float) -> bool:
+    """Stop the daemon of `info` the clean way (POST /local/stop with its own token) and wait until it has let go of
+    connector.lock. Only our own daemon: the token answered /local/status, and when the daemon reports its pid
+    (every daemon that writes "shell" does) it is the pid of connector.json. Never kills a process. True once gone."""
+    d = status.get("daemon")
+    pid = d.get("pid") if isinstance(d, dict) else None
+    if ("shell" in info or pid is not None) and (pid is None or pid != info.get("pid")):
+        return False
+    try:
+        st, _ = _local(data_dir, "POST", "/local/stop", {}, timeout=5, info=info)
+    except (OSError, ValueError, KeyError, TypeError, http.client.HTTPException):
+        return False
+    if st != 200:
+        return False
+    lock = _Lock(services_dir(data_dir) / "connector.lock")
+
+    def free() -> bool:
+        if not lock.acquire():
+            return False
+        lock.release()
+        return True
+    return _until(end, free)
+
+
+def ensure(data_dir, keystore_kind="os", allow_plain_loopback=False, wait=20.0, *, start=True) -> dict | None:
+    """The running daemon of `data_dir` as {"pid", "port"}. One whose version `replace_daemon` says this caller
+    replaces is stopped and one is started from this code; none running -> one is started from this code (with
+    start=False -> None). Callers take turns on ensure.lock, so two shells never stop or start a daemon at once."""
+    end = time.monotonic() + wait
     services_dir(data_dir).mkdir(parents=True, exist_ok=True)
+    turn = _Lock(services_dir(data_dir) / "ensure.lock")
+    held = _until(end, turn.acquire)   # not had in time (a stuck caller): go on without it
+    try:
+        return _ensure(data_dir, keystore_kind, allow_plain_loopback, end, start)
+    finally:
+        if held:
+            turn.release()
+
+
+def reconcile(data_dir, keystore_kind="os", allow_plain_loopback=False, wait=10.0) -> dict | None:
+    """A shell's start (the MCP server): replace the running daemon when its connector.json shows that
+    `replace_daemon` says so; otherwise do nothing (no request, and no daemon is started: that stays lazy)."""
+    try:
+        info = json.loads(_connector_json(data_dir).read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+    if not isinstance(info, dict) or not replace_daemon(info):
+        return None
+    return ensure(data_dir, keystore_kind, allow_plain_loopback, wait, start=False)
+
+
+def _ensure(data_dir, keystore_kind, allow_plain_loopback, end: float, start: bool) -> dict | None:
+    p = _probe(data_dir)
+    if p and replace_daemon(p[0]):
+        if not _stop_daemon(data_dir, p[0], p[1], end):
+            info = _alive(data_dir)   # it would not stop: talk to it rather than fight it
+            if info:
+                return {"pid": info["pid"], "port": info["port"]}
+            raise RuntimeError("daemon_timeout")
+        p, start = None, True
+    if p:
+        return {"pid": p[0]["pid"], "port": p[0]["port"]}
+    if not start:
+        return None
     argv = [sys.executable, "-m", "host.services", "serve", "--data-dir", str(data_dir),
             "--keystore", keystore_kind]
     if allow_plain_loopback:
@@ -1731,7 +2195,6 @@ def ensure(data_dir, keystore_kind="os", allow_plain_loopback=False, wait=20.0) 
     else:
         kw["start_new_session"] = True
     proc = subprocess.Popen(argv, **kw)
-    end = time.monotonic() + wait
     while time.monotonic() < end:
         info = _alive(data_dir)
         if info:
@@ -1741,6 +2204,45 @@ def ensure(data_dir, keystore_kind="os", allow_plain_loopback=False, wait=20.0) 
             raise RuntimeError("daemon_failed")
         time.sleep(0.1)
     raise RuntimeError("daemon_timeout")
+
+
+def connect(data_dir, endpoint, server_keys, pins, e2e_keys=None) -> tuple[dict, int]:
+    """Write <data dir>/services/client.json for `endpoint` (hostname: pin ca; IPv4: pin cert_sha256 with `pins`) and
+    the server's public keys (signing: `server_keys`; end-to-end envelope: `e2e_keys`, or server_keys entries written
+    "e2e:<key>"), after the same check the daemon applies; then stop a running daemon so the next command starts one
+    with it. -> (answer, exit code). The keys are public; nothing secret is read or written. A different endpoint
+    makes the daemon drop the stored sign-in when it starts (Connector._bind_endpoint)."""
+    if not isinstance(endpoint, str) or not endpoint:
+        return {"error": "bad_client_config", "detail": "--endpoint is required"}, 1
+    endpoint = endpoint.strip().rstrip("/").lower()   # host names are case-insensitive; the check wants lowercase
+    cfg: dict = {"endpoint": endpoint}
+    if _IP_ENDPOINT.match(endpoint):
+        cfg["pin"] = {"kind": "cert_sha256", "sha256": [p.strip().lower() for p in pins or []]}
+    else:
+        cfg["pin"] = {"kind": "ca"}
+    sig = [k.strip() for k in server_keys or [] if not k.strip().startswith("e2e:")]
+    enc = [k.strip()[4:] for k in server_keys or [] if k.strip().startswith("e2e:")]
+    enc += [k.strip()[4:] if k.strip().startswith("e2e:") else k.strip() for k in e2e_keys or []]
+    if sig:
+        cfg["server_keys"] = sig
+    if enc:
+        cfg["e2e_keys"] = enc
+    try:
+        parse_client_config(cfg)
+    except ValueError as e:
+        return {"error": "bad_client_config", "detail": str(e)}, 1
+    d = services_dir(data_dir)
+    d.mkdir(parents=True, exist_ok=True)
+    path = d / "client.json"
+    tmp = path.with_name("client.json.tmp")
+    tmp.write_text(json.dumps(cfg, indent=1) + "\n", encoding="utf-8")
+    os.replace(tmp, path)
+    p = _probe(data_dir)
+    stopped = bool(p) and _stop_daemon(data_dir, p[0], p[1], time.monotonic() + 10)
+    return {"ok": True, "endpoint": endpoint, "pin": cfg["pin"]["kind"],
+            "server_keys": [_key_id(base64.b64decode(k)) for k in cfg.get("server_keys", [])],
+            "e2e_keys": [e2e.key_id(base64.b64decode(k)) for k in cfg.get("e2e_keys", [])],
+            "daemon_stopped": stopped}, 0
 
 
 def main(argv=None) -> int:
@@ -1756,6 +2258,10 @@ def main(argv=None) -> int:
     ap.add_argument("--role")
     ap.add_argument("--version")
     ap.add_argument("--channel")
+    ap.add_argument("--endpoint")
+    ap.add_argument("--server-key", action="append", default=[])
+    ap.add_argument("--e2e-key", action="append", default=[])
+    ap.add_argument("--pin-sha256", action="append", default=[])
     a = ap.parse_args(argv)
     data_dir = Path(a.data_dir) if a.data_dir else default_data_dir()
     if a.keystore == "memory":
@@ -1770,6 +2276,8 @@ def main(argv=None) -> int:
 
     if a.cmd == "serve":
         return serve(data_dir, a.keystore, a.allow_plain_loopback)
+    if a.cmd == "connect":
+        return out(*connect(data_dir, a.endpoint, a.server_key, a.pin_sha256, a.e2e_key))
     try:
         info = ensure(data_dir, a.keystore, a.allow_plain_loopback)
     except RuntimeError as e:

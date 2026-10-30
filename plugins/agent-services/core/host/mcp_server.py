@@ -171,7 +171,7 @@ class McpServer:
         if self._gate is not None:
             self._start_once()
             g = self._gate_now()
-            if not g["open"] and g.get("reason") in ("unknown", "core_down", "unavailable"):
+            if not g["open"] and g.get("reason") in ("unknown", "core_down", "unavailable", "unverified"):
                 g = self._gate_now(refresh=True)
             if not g["open"]:
                 text = f"inactive: {g.get('notice') or g.get('reason')}"
@@ -248,6 +248,12 @@ def main(argv=None) -> int:
     def gate(refresh=False):
         return core_client.gate(data_dir=data_dir, refresh=refresh, timeout=15.0 if refresh else 3.0)
 
+    if not a.no_start:   # a daemon of an older or dev shell left running: this shell's own replaces it now
+        try:
+            from host import services
+            services.reconcile(data_dir, a.keystore, a.allow_plain_loopback)
+        except Exception:  # noqa: BLE001 — the gate then tells what is wrong
+            pass
     server = McpServer(ask, gate=gate, start=start)
     stop = threading.Event()
     if a.gate_poll > 0:

@@ -425,7 +425,7 @@ class Core:
         if st["open"]:
             return
         if st.get("reason") in ("unknown", "dependency") or (
-                st.get("reason") == "unavailable"
+                st.get("reason") in ("unavailable", "unverified")
                 and (self._hello_at is None or self._now() - self._hello_at >= GATE_RETRY_SECONDS)):
             self._handshake()
 

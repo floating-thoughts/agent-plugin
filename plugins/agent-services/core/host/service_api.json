@@ -5,9 +5,12 @@
  "x-transport": {
   "scheme": "https",
   "tls_min": "1.2",
-  "endpoint": "Endpoint in the client config: https://<ip>:<port> (IP address only, not a domain name)",
-  "trust": "Self-signed certificate: trust only the certificate SHA-256 fingerprint pinned in the client config (or our CA), not the system trust store, and never fall back to plaintext",
-  "egress": "Only the local connector process (host/services.py) sends; sessions, hooks, plugins and the UI never connect to the service directly"
+  "endpoint": "Endpoint in the client config: https://<IPv4>:<port> (direct over a private network, the server's own certificate) or https://<hostname>[:<port>] (a TLS-terminating tunnel such as Cloudflare Tunnel)",
+  "trust": "IPv4 endpoint: trust only the certificate SHA-256 fingerprint pinned in the client config (pin kind cert_sha256), not the system trust store. Hostname endpoint: the system trust store plus the hostname check (pin kind ca), and both server_keys and e2e_keys are required, so a TLS-terminating edge can neither forge an answer nor read a credential or served content. Never fall back to plaintext: with e2e_keys set, a request that cannot be sealed is not sent",
+  "response_signature": "With server_keys in the client config, every answer must carry X-Agent-Server-Signature: v=1; kid=<16 hex: sha256(raw public key)[:16]>; ts=<unix seconds>; sig=<base64 Ed25519 signature> over the UTF-8 lines agent-svc-response/1, status, METHOD, path without query, the request's X-Agent-Challenge (32 hex, fresh per request), ts, sha256 hex of the body bytes, joined by a newline. The client refuses an answer that is unsigned, signed by a key not in server_keys, bound to another request (replay) or more than 300 seconds off its clock, never uses it, and closes the shell gate (reason unverified); an unsigned 5xx, 403 or 429 (the tunnel edge's own page) counts as an unreachable server and is backed off (an unsigned Retry-After is honored up to 60 seconds); with e2e_keys, a signed success that is not a sealed answer, or one that does not open, is never used either. Verifier: host/services.py _verify_response",
+  "egress": "Only the local connector process (host/services.py) sends; sessions, hooks, plugins and the UI never connect to the service directly",
+  "e2e": "End-to-end envelope (host/e2e.py, both sides), used for every request but GET /health whenever the client config has e2e_keys (required for a hostname endpoint, optional for the IPv4 one). The client makes a fresh X25519 key per request; shared = X25519(that key, the first key in e2e_keys); HKDF-SHA256(shared, salt agent-svc-e2e/1, info \"keys\" + ephemeral public key + server public key) gives 64 bytes: the request key (first 32) and the answer key (last 32). Outer request: POST to an outer path (x-transport outer_paths) with X-Agent-E2E: v=1; kid=<16 hex: sha256(raw X25519 public key)[:16]>; epk=<base64 ephemeral public key>; ts=<unix seconds>, X-Agent-Challenge and Content-Type application/octet-stream; body = 12-byte nonce || AES-256-GCM(request key, inner, aad). Inner: compact JSON {method, path (with query), headers} + newline + the raw body; the headers are the credential headers (Authorization, X-Agent-Account, X-Agent-Device, X-Agent-Claude, X-Agent-Timestamp, X-Agent-Nonce, X-Agent-Signature) and Content-Type, which never travel outside the envelope. AAD: the lines agent-svc-e2e/1, req (or resp), POST, the outer path, kid, epk, ts, challenge. Answer: 200 application/octet-stream, body = random 12-byte nonce || AES-256-GCM(answer key, compact JSON {status, headers} + newline + body, aad with resp); errors found before the envelope opens (limits, bad_envelope) are plain JSON. The server refuses a timestamp more than 300 seconds off, an unknown kid (before any key work), an envelope that does not open, a login route outside the login outer path, and a replayed ephemeral key, all as 400 bad_envelope counted as a failed authentication of the client IP. The Ed25519 response signature covers the outer answer (the ciphertext), so a client checks it before decrypting and a signature never confirms a guess about the plaintext",
+  "outer_paths": {"POST /svc/v1/x": "every sealed route except the two login routes", "POST /svc/v1/auth/login/x": "sealed login start and finish (keeps the edge's per-IP login rate rule)", "GET /health": "plain; carries no credential or private content"}
  },
  "x-auth": {
   "header": "Authorization",
@@ -17,26 +20,29 @@
  "x-headers": [
   {"name": "Authorization", "value": "service key (see x-auth)", "in_outbox": false},
   {"name": "User-Agent", "value": "agent-services/<client_version>", "in_outbox": true},
-  {"name": "Content-Type", "value": "application/json", "in_outbox": true}
+  {"name": "Content-Type", "value": "application/json", "in_outbox": true},
+  {"name": "X-Agent-Challenge", "value": "32 random lowercase hex per request, sent only when the client config has server_keys; the server signs its answer over it (x-transport response_signature)", "in_outbox": false},
+  {"name": "X-Agent-E2E", "value": "v=1; kid=<16 hex>; epk=<base64 32-byte X25519 public key>; ts=<unix seconds>, sent only when the client config has e2e_keys (x-transport e2e); the credential headers then travel inside the envelope only", "in_outbox": false}
  ],
  "x-validation": "Both ends validate against the request schema: the client builds the body only from the schema and drops fields the schema does not have before sending; the server answers 422 bad_request on extra fields or a wrong type or length; cross-field limits (x-limits) are checked on both ends",
  "limits": {"body_bytes": 65536},
  "x-common-errors": {
-  "400": ["bad_json"],
+  "400": ["bad_json", "bad_envelope"],
   "401": ["bad_key"],
+  "403": ["owner_only", "e2e_required"],
   "404": ["not_found"],
   "413": ["too_large"],
   "422": ["bad_request"],
   "429": ["rate_limited"],
   "500": ["internal"],
-  "503": ["unavailable"]
+  "503": ["unavailable", "busy"]
  },
  "x-client-config": {
-  "path": "<data dir>/services/client.json (shipped together with the license and the service key)",
+  "path": "<data dir>/services/client.json (written by `agent_core.py connect`, from what the operator gives: endpoint, server keys and e2e keys; agent-svc-vps admin server-key prints them)",
   "schema": {
    "type": "object",
    "properties": {
-    "endpoint": {"type": "string", "pattern": "^https://(\\d{1,3}\\.){3}\\d{1,3}:\\d{1,5}$", "maxLength": 40, "description": "IP address only, not a domain name"},
+    "endpoint": {"type": "string", "pattern": "^https://((\\d{1,3}\\.){3}\\d{1,3}:\\d{1,5}|((?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\\.)*[a-z](?:[a-z0-9-]{0,61}[a-z0-9])?)(:\\d{1,5})?)$", "maxLength": 270, "description": "https://<IPv4>:<port> (pin cert_sha256) or https://<hostname>[:<port>] (pin ca)"},
     "client_id": {"type": "string", "pattern": "^c_[a-z0-9]{8,32}$", "maxLength": 34},
     "pin": {
      "type": "object",
@@ -44,12 +50,52 @@
       "kind": {"enum": ["cert_sha256", "ca"]},
       "sha256": {"type": "array", "minItems": 1, "maxItems": 2, "items": {"type": "string", "pattern": "^[0-9a-f]{64}$", "maxLength": 64}, "description": "two fingerprints: the old and the new certificate are both accepted during rotation"}
      },
-     "required": ["kind", "sha256"],
+     "required": ["kind"],
+     "additionalProperties": false
+    },
+    "server_keys": {"type": "array", "minItems": 1, "maxItems": 2, "uniqueItems": true, "items": {"type": "string", "pattern": "^[A-Za-z0-9+/]{43}=$", "maxLength": 44}, "description": "the server's Ed25519 public keys (raw 32 bytes, base64) that sign every answer; two only while the server rotates its key"},
+    "e2e_keys": {"type": "array", "minItems": 1, "maxItems": 2, "uniqueItems": true, "items": {"type": "string", "pattern": "^[A-Za-z0-9+/]{43}=$", "maxLength": 44}, "description": "the server's X25519 public keys (raw 32 bytes, base64) that requests are sealed to (x-transport e2e; the first is used); two only while the server rotates its key; needs server_keys"}
+   },
+   "required": ["endpoint", "pin"],
+   "additionalProperties": false,
+   "anyOf": [
+    {
+     "type": "object",
+     "description": "direct: the server's own self-signed certificate is pinned; server_keys optional; e2e_keys optional (needs server_keys)",
+     "properties": {
+      "endpoint": {"type": "string", "pattern": "^https://(\\d{1,3}\\.){3}\\d{1,3}:\\d{1,5}$", "maxLength": 40},
+      "client_id": {"type": "string", "pattern": "^c_[a-z0-9]{8,32}$", "maxLength": 34},
+      "pin": {
+       "type": "object",
+       "properties": {"kind": {"const": "cert_sha256"}, "sha256": {"type": "array", "minItems": 1, "maxItems": 2, "items": {"type": "string", "pattern": "^[0-9a-f]{64}$", "maxLength": 64}, "description": "two fingerprints: the old and the new certificate are both accepted during rotation"}},
+       "required": ["kind", "sha256"],
+       "additionalProperties": false
+      },
+      "server_keys": {"type": "array", "minItems": 1, "maxItems": 2, "uniqueItems": true, "items": {"type": "string", "pattern": "^[A-Za-z0-9+/]{43}=$", "maxLength": 44}, "description": "the server's Ed25519 public keys (raw 32 bytes, base64) that sign every answer; two only while the server rotates its key"},
+      "e2e_keys": {"type": "array", "minItems": 1, "maxItems": 2, "uniqueItems": true, "items": {"type": "string", "pattern": "^[A-Za-z0-9+/]{43}=$", "maxLength": 44}, "description": "the server's X25519 public keys (raw 32 bytes, base64) that requests are sealed to (x-transport e2e; the first is used); two only while the server rotates its key; needs server_keys"}
+     },
+     "required": ["endpoint", "pin"],
+     "additionalProperties": false
+    },
+    {
+     "type": "object",
+     "description": "tunnel: system trust store and hostname check, every answer signed by one of server_keys and every request but GET /health sealed to e2e_keys (no plaintext fallback)",
+     "properties": {
+      "endpoint": {"type": "string", "pattern": "^https://((?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\\.)*[a-z](?:[a-z0-9-]{0,61}[a-z0-9])?)(:\\d{1,5})?$", "maxLength": 270},
+      "client_id": {"type": "string", "pattern": "^c_[a-z0-9]{8,32}$", "maxLength": 34},
+      "pin": {
+       "type": "object",
+       "properties": {"kind": {"const": "ca"}},
+       "required": ["kind"],
+       "additionalProperties": false
+      },
+      "server_keys": {"type": "array", "minItems": 1, "maxItems": 2, "uniqueItems": true, "items": {"type": "string", "pattern": "^[A-Za-z0-9+/]{43}=$", "maxLength": 44}, "description": "the server's Ed25519 public keys (raw 32 bytes, base64) that sign every answer; two only while the server rotates its key"},
+      "e2e_keys": {"type": "array", "minItems": 1, "maxItems": 2, "uniqueItems": true, "items": {"type": "string", "pattern": "^[A-Za-z0-9+/]{43}=$", "maxLength": 44}, "description": "the server's X25519 public keys (raw 32 bytes, base64) that requests are sealed to (x-transport e2e; the first is used); two only while the server rotates its key; needs server_keys"}
+     },
+     "required": ["endpoint", "pin", "server_keys", "e2e_keys"],
      "additionalProperties": false
     }
-   },
-   "required": ["endpoint", "client_id", "pin"],
-   "additionalProperties": false
+   ]
   }
  },
  "x-outbox": {

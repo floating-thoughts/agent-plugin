@@ -82,6 +82,20 @@ Linux:   /etc/claude-code/managed-settings.json
 ```
 
 Each user then signs in once with `/agent-services login <email>`.
+
+## Service address
+
+The plugin talks to the service named in `client.json` (in `~/.agent-services/services/`). If you were given an
+address and a server key instead of that file, set them once before signing in:
+
+```
+/agent-services connect https://<service host> <server key> e2e:<encryption key>
+```
+
+The connection is checked with your system's certificate store, and every answer must be signed with that server key;
+an answer that is not is never used, and the plugin pauses with a notice instead. Every request and answer is also
+encrypted end to end with the encryption key, so a proxy or CDN in between sees no sign-in code, token or content.
+
 ## License
 
 All rights reserved; see `LICENSE`. The terms of use are in the end-user license agreement shipped by the installer.
